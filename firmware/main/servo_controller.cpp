@@ -162,51 +162,118 @@ float ServoController::GetAngle(int pin) const {
   return 90.0f;
 }
 
+void ServoController::MoveAngleSmooth(int pin, float target_angle, float step_deg, uint32_t step_delay_ms) {
+  if (pin == 0 || pin == kPinServo0) {
+    if (target_angle < kServo0MinAngle) target_angle = kServo0MinAngle;
+    if (target_angle > kServo0MaxAngle) target_angle = kServo0MaxAngle;
+  } else if (pin == 25 || pin == kPinServo1) {
+    if (target_angle < kServo1MinAngle) target_angle = kServo1MinAngle;
+    if (target_angle > kServo1MaxAngle) target_angle = kServo1MaxAngle;
+  } else if (pin == 26 || pin == 15 || pin == kPinServo2) {
+    if (target_angle < kServo2MinAngle) target_angle = kServo2MinAngle;
+    if (target_angle > kServo2MaxAngle) target_angle = kServo2MaxAngle;
+  }
+
+  float current = GetAngle(pin);
+  float diff = target_angle - current;
+  float abs_diff = fabsf(diff);
+  if (abs_diff < 0.2f) {
+    SetAngle(pin, target_angle);
+    return;
+  }
+
+  int steps = static_cast<int>(ceilf(abs_diff / step_deg));
+  if (steps < 1) steps = 1;
+
+  for (int i = 1; i <= steps; ++i) {
+    float angle = current + diff * (static_cast<float>(i) / static_cast<float>(steps));
+    SetAngle(pin, angle);
+    delay(step_delay_ms);
+  }
+  SetAngle(pin, target_angle);
+}
+
+void ServoController::MoveAllSmooth(float target0, float target1, float target2, float step_deg, uint32_t step_delay_ms) {
+  if (target0 < kServo0MinAngle) target0 = kServo0MinAngle;
+  if (target0 > kServo0MaxAngle) target0 = kServo0MaxAngle;
+  if (target1 < kServo1MinAngle) target1 = kServo1MinAngle;
+  if (target1 > kServo1MaxAngle) target1 = kServo1MaxAngle;
+  if (target2 < kServo2MinAngle) target2 = kServo2MinAngle;
+  if (target2 > kServo2MaxAngle) target2 = kServo2MaxAngle;
+
+  float cur0 = GetAngle(kPinServo0);
+  float cur1 = GetAngle(kPinServo1);
+  float cur2 = GetAngle(kPinServo2);
+
+  float diff0 = target0 - cur0;
+  float diff1 = target1 - cur1;
+  float diff2 = target2 - cur2;
+
+  float max_diff = fmaxf(fabsf(diff0), fmaxf(fabsf(diff1), fabsf(diff2)));
+  if (max_diff < 0.2f) {
+    SetAllAngles(target0, target1, target2);
+    return;
+  }
+
+  int steps = static_cast<int>(ceilf(max_diff / step_deg));
+  if (steps < 1) steps = 1;
+
+  for (int i = 1; i <= steps; ++i) {
+    float fraction = static_cast<float>(i) / static_cast<float>(steps);
+    float a0 = cur0 + diff0 * fraction;
+    float a1 = cur1 + diff1 * fraction;
+    float a2 = cur2 + diff2 * fraction;
+    SetAllAngles(a0, a1, a2);
+    delay(step_delay_ms);
+  }
+  SetAllAngles(target0, target1, target2);
+}
+
 void ServoController::CenterAll() {
-  SetAllAngles(kDefaultAngle, kDefaultAngle, kServo2DefaultAngle);
-  ESP_LOGI(TAG, "All 3 servos centered: Pitch 90°, Roll 90°, Yaw 70° (Front)");
+  MoveAllSmooth(kDefaultAngle, kDefaultAngle, kServo2DefaultAngle);
+  ESP_LOGI(TAG, "All 3 servos centered smoothly: Pitch 90°, Roll 90°, Yaw 70° (Front)");
 }
 
 void ServoController::LookUp(float delta_deg) {
   float current = GetAngle(kPinServo0);
   float target = current - delta_deg;
-  ESP_LOGI(TAG, "LookUp: %.1f -> %.1f deg", current, target);
-  SetAngle(kPinServo0, target);
+  ESP_LOGI(TAG, "LookUp: %.1f -> %.1f deg (smooth)", current, target);
+  MoveAngleSmooth(kPinServo0, target);
 }
 
 void ServoController::LookDown(float delta_deg) {
   float current = GetAngle(kPinServo0);
   float target = current + delta_deg;
-  ESP_LOGI(TAG, "LookDown: %.1f -> %.1f deg", current, target);
-  SetAngle(kPinServo0, target);
+  ESP_LOGI(TAG, "LookDown: %.1f -> %.1f deg (smooth)", current, target);
+  MoveAngleSmooth(kPinServo0, target);
 }
 
 void ServoController::TiltLeft(float delta_deg) {
   float current = GetAngle(kPinServo1);
   float target = current - delta_deg;
-  ESP_LOGI(TAG, "TiltLeft: %.1f -> %.1f deg", current, target);
-  SetAngle(kPinServo1, target);
+  ESP_LOGI(TAG, "TiltLeft: %.1f -> %.1f deg (smooth)", current, target);
+  MoveAngleSmooth(kPinServo1, target);
 }
 
 void ServoController::TiltRight(float delta_deg) {
   float current = GetAngle(kPinServo1);
   float target = current + delta_deg;
-  ESP_LOGI(TAG, "TiltRight: %.1f -> %.1f deg", current, target);
-  SetAngle(kPinServo1, target);
+  ESP_LOGI(TAG, "TiltRight: %.1f -> %.1f deg (smooth)", current, target);
+  MoveAngleSmooth(kPinServo1, target);
 }
 
 void ServoController::TurnLeft(float delta_deg) {
   float current = GetAngle(kPinServo2);
   float target = current - delta_deg;
-  ESP_LOGI(TAG, "TurnLeft: %.1f -> %.1f deg", current, target);
-  SetAngle(kPinServo2, target);
+  ESP_LOGI(TAG, "TurnLeft: %.1f -> %.1f deg (smooth)", current, target);
+  MoveAngleSmooth(kPinServo2, target);
 }
 
 void ServoController::TurnRight(float delta_deg) {
   float current = GetAngle(kPinServo2);
   float target = current + delta_deg;
-  ESP_LOGI(TAG, "TurnRight: %.1f -> %.1f deg", current, target);
-  SetAngle(kPinServo2, target);
+  ESP_LOGI(TAG, "TurnRight: %.1f -> %.1f deg (smooth)", current, target);
+  MoveAngleSmooth(kPinServo2, target);
 }
 
 void ServoController::RunSweepTest() {

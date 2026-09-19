@@ -679,7 +679,7 @@ void loop() {
         const auto angle_ptr = mcp_tool_call_event->param<int64_t>("angle");
         if (pin_ptr != nullptr && angle_ptr != nullptr) {
           printf("on mcp tool call: self.servo.set_angle, pin: %lld, angle: %lld\n", *pin_ptr, *angle_ptr);
-          ServoController::GetInstance().SetAngle(static_cast<int>(*pin_ptr), static_cast<float>(*angle_ptr));
+          ServoController::GetInstance().MoveAngleSmooth(static_cast<int>(*pin_ptr), static_cast<float>(*angle_ptr));
           g_last_motion_exec_time = millis();
           engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
         } else {

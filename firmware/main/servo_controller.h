@@ -58,13 +58,17 @@ class ServoController {
   // Center all 3 servos to 90 degrees
   void CenterAll();
 
+  // Smooth interpolated movements to avoid mechanical inertia/shaking
+  void MoveAngleSmooth(int pin, float target_angle, float step_deg = 1.0f, uint32_t step_delay_ms = 18);
+  void MoveAllSmooth(float target0, float target1, float target2, float step_deg = 1.0f, uint32_t step_delay_ms = 18);
+
   // Relative head motion methods (default 10 degrees, strictly bounded by safe limits)
   void LookUp(float delta_deg = kDefaultStepDeg);     // Pin 0 Pitch decreases (抬头, min 40)
   void LookDown(float delta_deg = kDefaultStepDeg);   // Pin 0 Pitch increases (低头, max 120)
   void TiltLeft(float delta_deg = kDefaultStepDeg);   // Pin 25 Roll decreases (向左歪头, min 50)
   void TiltRight(float delta_deg = kDefaultStepDeg);  // Pin 25 Roll increases (向右歪头, max 110)
   void TurnLeft(float delta_deg = kDefaultStepDeg);   // Pin 26 Yaw decreases (向左转头, min 20)
-  void TurnRight(float delta_deg = kDefaultStepDeg);  // Pin 26 Yaw increases (向右转头, max 160)
+  void TurnRight(float delta_deg = kDefaultStepDeg);  // Pin 26 Yaw increases (向右转头, max 120)
 
   // Sweep test for calibration
   void RunSweepTest();
