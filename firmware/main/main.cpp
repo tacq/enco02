@@ -387,7 +387,7 @@ void InitMcpTools() {
   );
 
   engine.AddMcpTool("self.servo.set_angle",
-                    "Set the rotation angle of a servo motor (0 to 180 degrees). Pin 0 is Yaw (horizontal), Pin 25 is Pitch (vertical).",
+                    "Set the rotation angle of a servo motor within hardware safe limits (Pin 0 Yaw safe range: 40 to 120 deg; Pin 25 Pitch safe range: 50 to 110 deg).",
                     {
                         {
                             "pin",
@@ -401,14 +401,18 @@ void InitMcpTools() {
                             "angle",
                             ai_vox::ParamSchema<int64_t>{
                                 .default_value = 90,
-                                .min = 0,
-                                .max = 180,
+                                .min = 40,
+                                .max = 120,
                             },
                         },
                     });
 
   engine.AddMcpTool("self.servo.center",
-                    "Center both servo motors (Pin 0 and Pin 25) to 90 degrees.",
+                    "Center both servo motors (Pin 0 and Pin 25) to safe 90 degrees.",
+                    {});
+
+  engine.AddMcpTool("self.servo.bobble",
+                    "Perform a cute '摇头晃脑' (head bobble and tilt) gesture.",
                     {});
 }
 }  // namespace
@@ -598,6 +602,10 @@ void loop() {
       } else if ("self.servo.center" == mcp_tool_call_event->name) {
         printf("on mcp tool call: self.servo.center\n");
         ServoController::GetInstance().CenterAll();
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+      } else if ("self.servo.bobble" == mcp_tool_call_event->name) {
+        printf("on mcp tool call: self.servo.bobble\n");
+        ServoController::GetInstance().TriggerHeadBobble();
         engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
       }
     }

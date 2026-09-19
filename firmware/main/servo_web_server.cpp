@@ -207,57 +207,60 @@ static const char kServoIndexHtml[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     <!-- Servo 0: PIN 0 -->
     <div class="card">
       <div class="card-title">
-        <span>📍 舵机 1：GPIO 0 (水平 / Yaw)</span>
+        <span>📍 舵机 1：GPIO 0 (俯仰 / Pitch)</span>
         <span class="angle-val" id="val0">90°</span>
       </div>
+      <p style="font-size:11px;color:var(--primary);margin-top:-6px;margin-bottom:8px;">安全限位：40° ~ 120° (角大低头，角小抬头)</p>
       <div class="slider-container">
-        <input type="range" id="slider0" min="0" max="180" value="90" oninput="onSliderInput(0, this.value)">
+        <input type="range" id="slider0" min="40" max="120" value="90" oninput="onSliderInput(0, this.value)">
         <div class="scale-labels">
-          <span>0° (左极)</span>
-          <span>45°</span>
+          <span>40° (抬头)</span>
+          <span>60°</span>
           <span>90° (居中)</span>
-          <span>135°</span>
-          <span>180° (右极)</span>
+          <span>105°</span>
+          <span>120° (低头)</span>
         </div>
       </div>
       <div class="btn-group">
-        <button class="btn" onclick="setAngle(0, 0)">0°</button>
-        <button class="btn" onclick="setAngle(0, 45)">45°</button>
-        <button class="btn" onclick="setAngle(0, 90)">90°</button>
-        <button class="btn" onclick="setAngle(0, 135)">135°</button>
-        <button class="btn" onclick="setAngle(0, 180)">180°</button>
+        <button class="btn" onclick="setAngle(0, 40)">40° 抬头</button>
+        <button class="btn" onclick="setAngle(0, 60)">60°</button>
+        <button class="btn" onclick="setAngle(0, 90)">90° 居中</button>
+        <button class="btn" onclick="setAngle(0, 105)">105°</button>
+        <button class="btn" onclick="setAngle(0, 120)">120° 低头</button>
       </div>
     </div>
 
     <!-- Servo 1: PIN 25 -->
     <div class="card">
       <div class="card-title">
-        <span>📍 舵机 2：GPIO 25 (垂直 / Pitch)</span>
+        <span>📍 舵机 2：GPIO 25 (偏侧 / Roll & Tilt)</span>
         <span class="angle-val" id="val25">90°</span>
       </div>
+      <p style="font-size:11px;color:var(--primary);margin-top:-6px;margin-bottom:8px;">安全限位：50° ~ 110° (角大右下歪，角小左下歪)</p>
       <div class="slider-container">
-        <input type="range" id="slider25" min="0" max="180" value="90" oninput="onSliderInput(25, this.value)">
+        <input type="range" id="slider25" min="50" max="110" value="90" oninput="onSliderInput(25, this.value)">
         <div class="scale-labels">
-          <span>0° (下极)</span>
-          <span>45°</span>
+          <span>50° (向左歪)</span>
+          <span>70°</span>
           <span>90° (居中)</span>
-          <span>135°</span>
-          <span>180° (上极)</span>
+          <span>100°</span>
+          <span>110° (向右歪)</span>
         </div>
       </div>
       <div class="btn-group">
-        <button class="btn" onclick="setAngle(25, 0)">0°</button>
-        <button class="btn" onclick="setAngle(25, 45)">45°</button>
-        <button class="btn" onclick="setAngle(25, 90)">90°</button>
-        <button class="btn" onclick="setAngle(25, 135)">135°</button>
-        <button class="btn" onclick="setAngle(25, 180)">180°</button>
+        <button class="btn" onclick="setAngle(25, 50)">50° 左歪</button>
+        <button class="btn" onclick="setAngle(25, 70)">70°</button>
+        <button class="btn" onclick="setAngle(25, 90)">90° 居中</button>
+        <button class="btn" onclick="setAngle(25, 100)">100°</button>
+        <button class="btn" onclick="setAngle(25, 110)">110° 右歪</button>
       </div>
     </div>
 
     <!-- Quick Global Actions -->
-    <div class="action-row">
-      <button class="btn-action primary" onclick="centerAll()">🎯 全部位归中 (90°)</button>
-      <button class="btn-action" onclick="runSweep()">🔄 自动巡航测试</button>
+    <div class="action-row" style="grid-template-columns: 1fr 1.2fr 1fr;">
+      <button class="btn-action primary" onclick="centerAll()">🎯 归中 (90°)</button>
+      <button class="btn-action" style="background: linear-gradient(135deg, #ec4899, #8b5cf6); border: none; box-shadow: 0 4px 15px rgba(236, 72, 153, 0.35);" onclick="runHeadBobble()">🕺 摇头晃脑</button>
+      <button class="btn-action" onclick="runSweep()">🔄 巡航测试</button>
     </div>
 
     <!-- Diagnostics Info -->
@@ -310,6 +313,11 @@ static const char kServoIndexHtml[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       fetch('/api/center').catch(e => console.error(e));
     }
 
+    function runHeadBobble() {
+      fetch('/api/bobble').catch(e => console.error(e));
+      setTimeout(syncStatus, 2200);
+    }
+
     function runSweep() {
       fetch('/api/sweep').catch(e => console.error(e));
       setTimeout(syncStatus, 1500);
@@ -359,6 +367,8 @@ void ServoWebServer::SetupRoutes() {
   server_->on("/api/servo", HTTP_POST, [this]() { HandleApiServo(); });
   server_->on("/api/center", HTTP_GET, [this]() { HandleApiCenter(); });
   server_->on("/api/sweep", HTTP_GET, [this]() { HandleApiSweep(); });
+  server_->on("/api/bobble", HTTP_GET, [this]() { HandleApiBobble(); });
+  server_->on("/api/bobble", HTTP_POST, [this]() { HandleApiBobble(); });
   server_->onNotFound([this]() { HandleNotFound(); });
 }
 
@@ -446,6 +456,12 @@ void ServoWebServer::HandleApiSweep() {
   server_->sendHeader("Access-Control-Allow-Origin", "*");
   server_->send(200, "application/json", "{\"success\":true,\"action\":\"sweep\"}");
   ServoController::GetInstance().RunSweepTest();
+}
+
+void ServoWebServer::HandleApiBobble() {
+  server_->sendHeader("Access-Control-Allow-Origin", "*");
+  server_->send(200, "application/json", "{\"success\":true,\"action\":\"head_bobble\"}");
+  ServoController::GetInstance().TriggerHeadBobble();
 }
 
 void ServoWebServer::HandleNotFound() {

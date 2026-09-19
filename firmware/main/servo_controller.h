@@ -24,6 +24,12 @@ class ServoController {
   static constexpr float kMaxPulseUs = 2500.0f;           // 180 degrees
   static constexpr float kDefaultAngle = 90.0f;           // Neutral center
 
+  // Safe operating angle ranges
+  static constexpr float kServo0MinAngle = 40.0f;         // GPIO 0 Min safe angle
+  static constexpr float kServo0MaxAngle = 120.0f;        // GPIO 0 Max safe angle
+  static constexpr float kServo1MinAngle = 50.0f;         // GPIO 25 Min safe angle
+  static constexpr float kServo1MaxAngle = 110.0f;        // GPIO 25 Max safe angle
+
   static ServoController& GetInstance();
 
   // Initialize LEDC timers, channels, and position both servos to 90 degrees
@@ -47,6 +53,11 @@ class ServoController {
   // Sweep test for calibration
   void RunSweepTest();
 
+  // Trigger cute "摇头晃脑" action (smooth tilt + nod bobble)
+  void TriggerHeadBobble();
+  void RunHeadBobble();
+  bool IsAnimating() const { return is_animating_; }
+
  private:
   ServoController() = default;
   ~ServoController() = default;
@@ -56,6 +67,7 @@ class ServoController {
   uint32_t AngleToDuty(float angle) const;
 
   bool initialized_ = false;
+  volatile bool is_animating_ = false;
   float angle_servo0_ = kDefaultAngle;
   float angle_servo1_ = kDefaultAngle;
 };
