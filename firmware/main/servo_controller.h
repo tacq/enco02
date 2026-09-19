@@ -50,6 +50,12 @@ class ServoController {
   // Center both servos to 90 degrees
   void CenterAll();
 
+  // Relative head motion methods (5 degrees by default, strictly bounded by safe limits)
+  void LookUp(float delta_deg = 5.0f);     // Pin 0 angle decreases (40 deg min)
+  void LookDown(float delta_deg = 5.0f);   // Pin 0 angle increases (120 deg max)
+  void TiltLeft(float delta_deg = 5.0f);   // Pin 25 angle decreases (50 deg min)
+  void TiltRight(float delta_deg = 5.0f);  // Pin 25 angle increases (110 deg max)
+
   // Sweep test for calibration
   void RunSweepTest();
 

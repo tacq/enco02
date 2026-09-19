@@ -132,6 +132,34 @@ void ServoController::CenterAll() {
   ESP_LOGI(TAG, "Both servos centered to 90 degrees (safe center)");
 }
 
+void ServoController::LookUp(float delta_deg) {
+  float current = GetAngle(kPinServo0);
+  float target = current - delta_deg;
+  ESP_LOGI(TAG, "LookUp: %.1f -> %.1f deg", current, target);
+  SetAngle(kPinServo0, target);
+}
+
+void ServoController::LookDown(float delta_deg) {
+  float current = GetAngle(kPinServo0);
+  float target = current + delta_deg;
+  ESP_LOGI(TAG, "LookDown: %.1f -> %.1f deg", current, target);
+  SetAngle(kPinServo0, target);
+}
+
+void ServoController::TiltLeft(float delta_deg) {
+  float current = GetAngle(kPinServo1);
+  float target = current - delta_deg;
+  ESP_LOGI(TAG, "TiltLeft: %.1f -> %.1f deg", current, target);
+  SetAngle(kPinServo1, target);
+}
+
+void ServoController::TiltRight(float delta_deg) {
+  float current = GetAngle(kPinServo1);
+  float target = current + delta_deg;
+  ESP_LOGI(TAG, "TiltRight: %.1f -> %.1f deg", current, target);
+  SetAngle(kPinServo1, target);
+}
+
 void ServoController::RunSweepTest() {
   ESP_LOGI(TAG, "Starting servo sweep test within safe ranges...");
   // 1. Move to lower safe bounds (Pin 0: 50 deg, Pin 25: 60 deg)
