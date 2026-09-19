@@ -92,7 +92,7 @@ EngineImpl::EngineImpl()
           {"Authorization", "Bearer test-token"},
       },
       task_queue_("AiVoxMain", 1024 * 6, tskIDLE_PRIORITY + 1),
-      network_task_queue_("AiVoxNetwork", 1024 * 6, tskIDLE_PRIORITY + 1, true) {
+      network_task_queue_("AiVoxNetwork", 1024 * 6, tskIDLE_PRIORITY + 1, false) {
 }
 
 EngineImpl::~EngineImpl() {
@@ -757,6 +757,10 @@ void EngineImpl::DisconnectWebSocket() {
 }
 
 void EngineImpl::SendTextInternal(std::string text) {
+  if (esp_get_free_heap_size() < 10240) {
+    CLOGE("Free heap too low (%u bytes), dropping SendTextInternal text of %zu bytes", esp_get_free_heap_size(), text.length());
+    return;
+  }
   network_task_queue_.Enqueue([this, text = std::move(text)]() mutable {
     if (esp_websocket_client_is_connected(web_socket_client_)) {
       const auto start_time = esp_timer_get_time();

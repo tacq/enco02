@@ -346,112 +346,56 @@ uint32_t g_last_motion_exec_time = 0;
 
 void InitMcpTools() {
   auto& engine = ai_vox::Engine::GetInstance();
-  engine.AddMcpTool("self.audio_speaker.set_volume",         // tool name
-                    "Set the volume of the audio speaker.",  // tool description
-                    {
-                        {
-                            "volume",  // parameter name
+  engine.AddMcpTool("self.audio_speaker.set_volume", "Set speaker volume (0-100).", {
+    {"volume", ai_vox::ParamSchema<int64_t>{.default_value = std::nullopt, .min = 0, .max = 100}},
+  });
 
-                            ai_vox::ParamSchema<int64_t>{
-                                // parameter type can be bool, std::string or int64_t
-                                .default_value = std::nullopt,  // default value, set to std::nullopt if not specified
-                                .min = 0,                       // minimum value, set to std::nullopt if not specified
-                                .max = 100,                     // maximum value, set to std::nullopt if not specified
-                            },
-                        },
-                        // add more parameter schema as needed
-                    }  // parameter schema
-  );
+  engine.AddMcpTool("self.audio_speaker.get_volume", "Get speaker volume.", {});
 
-  engine.AddMcpTool("self.audio_speaker.get_volume",         // tool name
-                    "Get the volume of the audio speaker.",  // tool description
-                    {
-                        // empty
-                    }  // parameter schema
-  );
+  engine.AddMcpTool("self.led.set", "Set LED state (true: on, false: off).", {
+    {"state", ai_vox::ParamSchema<bool>{.default_value = std::nullopt}},
+  });
 
-  engine.AddMcpTool("self.led.set",                                           // tool name
-                    "Set the state of the LED, true for on, false for off.",  // tool description
-                    {
-                        {
-                            "state",  // parameter name
+  engine.AddMcpTool("self.led.get", "Get LED state.", {});
 
-                            ai_vox::ParamSchema<bool>{
-                                // parameter type can be bool, std::string or int64_t
-                                .default_value = std::nullopt,  // default value, set to std::nullopt if not specified
-                            },                                  // parameter type
-                        },
-                        // add more parameter schema as needed
-                    }  // parameter schema
-  );
+  engine.AddMcpTool("self.head.look_up", "Look up (抬头/仰头). Step in deg.", {
+    {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
+  });
 
-  engine.AddMcpTool("self.led.get",                                           // tool name
-                    "Get the state of the LED, true for on, false for off.",  // tool description
-                    {
-                        // empty
-                    }  // parameter schema
-  );
+  engine.AddMcpTool("self.head.look_down", "Look down (低头/俯视). Step in deg.", {
+    {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
+  });
 
-  engine.AddMcpTool("self.head.look_up",
-                    "Make robot look up (抬头/仰头/往上看). Default step 10 deg.",
-                    {
-                        {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
-                    });
+  engine.AddMcpTool("self.head.tilt_left", "Tilt head left (向左歪头). Step in deg.", {
+    {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
+  });
 
-  engine.AddMcpTool("self.head.look_down",
-                    "Make robot look down (低头/俯视/往下看). Default step 10 deg.",
-                    {
-                        {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
-                    });
+  engine.AddMcpTool("self.head.tilt_right", "Tilt head right (向右歪头). Step in deg.", {
+    {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
+  });
 
-  engine.AddMcpTool("self.head.tilt_left",
-                    "Tilt robot head left (向左歪头/左偏). Default step 10 deg.",
-                    {
-                        {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
-                    });
+  engine.AddMcpTool("self.head.turn_left", "Turn head left (向左转头). Step in deg.", {
+    {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 50}},
+  });
 
-  engine.AddMcpTool("self.head.tilt_right",
-                    "Tilt robot head right (向右歪头/右偏). Default step 10 deg.",
-                    {
-                        {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
-                    });
+  engine.AddMcpTool("self.head.turn_right", "Turn head right (向右转头). Step in deg.", {
+    {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 50}},
+  });
 
-  engine.AddMcpTool("self.head.turn_left",
-                    "Rotate robot head left (向左转头/往左看/左转). Default step 10 deg.",
-                    {
-                        {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 50}},
-                    });
+  engine.AddMcpTool("self.head.bobble", "Cute head bobble/shake (摇头/摇头晃脑).", {});
 
-  engine.AddMcpTool("self.head.turn_right",
-                    "Rotate robot head right (向右转头/往右看/右转). Default step 10 deg.",
-                    {
-                        {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 50}},
-                    });
+  engine.AddMcpTool("self.head.center", "Reset head to front (头摆正/正视/复位).", {});
 
-  engine.AddMcpTool("self.head.bobble",
-                    "Cute 3-axis head bobble/shake gesture (摇头/摇头晃脑/摇摇头). Gentle motion within 10 degrees.",
-                    {});
+  engine.AddMcpTool("self.servo.set_angle", "Set servo angle (0 Pitch, 25 Roll, 26 Yaw).", {
+    {"pin", ai_vox::ParamSchema<int64_t>{.default_value = 0, .min = 0, .max = 26}},
+    {"angle", ai_vox::ParamSchema<int64_t>{.default_value = 70, .min = 20, .max = 120}},
+  });
 
-  engine.AddMcpTool("self.head.center",
-                    "Reset all 3 head servos to neutral looking front: Pitch 90, Roll 90, Yaw 70 (头摆正/正视/复位).",
-                    {});
+  engine.AddMcpTool("self.screen.set_mode", "Set screen mode (face or chat).", {
+    {"mode", ai_vox::ParamSchema<std::string>{.default_value = "face"}},
+  });
 
-  engine.AddMcpTool("self.servo.set_angle",
-                    "Set servo angle (Pin 0 Pitch: 40-120, Pin 25 Roll: 50-110, Pin 26 Yaw: 20-120).",
-                    {
-                        {"pin", ai_vox::ParamSchema<int64_t>{.default_value = 0, .min = 0, .max = 26}},
-                        {"angle", ai_vox::ParamSchema<int64_t>{.default_value = 70, .min = 20, .max = 120}},
-                    });
-
-  engine.AddMcpTool("self.screen.set_mode",
-                    "Switch robot screen display mode between virtual face and chat text (切换屏幕模式: face 表情模式, chat 对话模式).",
-                    {
-                        {"mode", ai_vox::ParamSchema<std::string>{.default_value = "face"}},
-                    });
-
-  engine.AddMcpTool("self.screen.toggle_mode",
-                    "Toggle robot screen display mode between virtual face and chat text (切换屏幕显示模式).",
-                    {});
+  engine.AddMcpTool("self.screen.toggle_mode", "Toggle screen mode between face and chat.", {});
 }
 }  // namespace
 
@@ -571,8 +515,10 @@ void loop() {
           break;
         }
         case ai_vox::ChatState::kStandby: {
-          printf("Standby\n");
+          printf("Standby -> auto advance to connect & listen\n");
           g_display->ShowStatus("待命");
+          // Automatically advance to connect and start listening without requiring button press
+          engine.Advance();
           break;
         }
         case ai_vox::ChatState::kConnecting: {
