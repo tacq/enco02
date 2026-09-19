@@ -35,6 +35,7 @@ class ServoWebServer {
   void HandleApiCenter();
   void HandleApiSweep();
   void HandleApiBobble();
+  void HandleApiUiMode();
   void HandleNotFound();
 
   std::unique_ptr<WebServer> server_;

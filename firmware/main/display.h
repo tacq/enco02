@@ -5,6 +5,7 @@
 
 #include <esp_lcd_panel_ops.h>
 
+#include <memory>
 #include <string>
 
 #include "lvgl.h"
@@ -16,6 +17,11 @@ class Display {
     kAssistant,
     kUser,
   };
+  enum class UiMode : uint8_t {
+    kRobotFace = 0,  // Virtual cute robot face with reactions (Default)
+    kChatText = 1,   // Full conversation history HUD
+  };
+
   Display(esp_lcd_panel_io_handle_t panel_io,
           esp_lcd_panel_handle_t panel,
           int width,
@@ -30,6 +36,10 @@ class Display {
   void SetChatMessage(const Role role, const std::string& content);
   void ShowStatus(const char* status);
   void SetEmotion(const std::string& emotion);
+
+  void SetUiMode(UiMode mode);
+  UiMode GetUiMode() const { return ui_mode_; }
+  void ToggleUiMode();
 
  private:
   struct ThemeColors {
@@ -53,6 +63,10 @@ class Display {
   lv_display_t* display_ = nullptr;
   lv_obj_t* container_ = nullptr;
   lv_obj_t* status_bar_ = nullptr;
+
+  UiMode ui_mode_ = UiMode::kRobotFace;  // Default to Virtual Robot Face mode
+
+  // Chat Text Mode elements (preserved!)
   lv_obj_t* content_ = nullptr;
   lv_obj_t* content_left_ = nullptr;
   lv_obj_t* content_right_ = nullptr;
@@ -62,7 +76,37 @@ class Display {
   lv_obj_t* notification_label_ = nullptr;
   lv_obj_t* status_label_ = nullptr;
   lv_obj_t* mute_label_ = nullptr;
+
+  // Virtual Robot Face Mode elements
+  lv_obj_t* face_container_ = nullptr;
+  lv_obj_t* eye_box_ = nullptr;
+  lv_obj_t* eye_left_ = nullptr;
+  lv_obj_t* eye_right_ = nullptr;
+  lv_obj_t* pupil_left_ = nullptr;
+  lv_obj_t* pupil_right_ = nullptr;
+  lv_obj_t* blush_left_ = nullptr;
+  lv_obj_t* blush_right_ = nullptr;
+  lv_obj_t* mouth_box_ = nullptr;
+  lv_obj_t* wave_bars_[5] = {nullptr};
+  lv_obj_t* subtitle_box_ = nullptr;
+  lv_obj_t* subtitle_label_ = nullptr;
+
+  lv_timer_t* blink_timer_ = nullptr;
+  lv_timer_t* voice_anim_timer_ = nullptr;
+
+  std::string current_emotion_ = "neutral";
+  bool is_speaking_ = false;
+  int current_eye_height_ = 68;
+  int current_eye_width_ = 50;
+  lv_color_t current_eye_color_;
+
+  void UpdateRobotFaceEmotion(const std::string& emotion);
+  static void OnBlinkTimer(lv_timer_t* timer);
+  static void OnVoiceAnimTimer(lv_timer_t* timer);
+
   ThemeColors current_theme_;
 };
+
+extern std::unique_ptr<Display> g_display;
 
 #endif

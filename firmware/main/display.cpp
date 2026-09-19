@@ -167,6 +167,146 @@ void Display::Start() {
   // We'll create chat messages dynamically in SetChatMessage
   chat_message_label_ = nullptr;
 
+  // By default, hide content_ if in kRobotFace mode
+  if (ui_mode_ == UiMode::kRobotFace) {
+    lv_obj_add_flag(content_, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  /* Virtual Robot Face Container (Default New Interaction Way) */
+  face_container_ = lv_obj_create(container_);
+  lv_obj_set_style_radius(face_container_, 0, 0);
+  lv_obj_set_width(face_container_, LV_HOR_RES);
+  lv_obj_set_flex_grow(face_container_, 1);
+  lv_obj_set_style_pad_all(face_container_, 0, 0);
+  lv_obj_set_style_bg_color(face_container_, lv_color_hex(0x050912), 0);
+  lv_obj_set_style_bg_opa(face_container_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(face_container_, 1, 0);
+  lv_obj_set_style_border_color(face_container_, current_theme_.border, 0);
+  lv_obj_set_style_border_side(face_container_, LV_BORDER_SIDE_TOP, 0);
+  lv_obj_set_scrollbar_mode(face_container_, LV_SCROLLBAR_MODE_OFF);
+
+  if (ui_mode_ == UiMode::kChatText) {
+    lv_obj_add_flag(face_container_, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  // 1. Eye Area Container
+  eye_box_ = lv_obj_create(face_container_);
+  lv_obj_set_size(eye_box_, 200, 110);
+  lv_obj_align(eye_box_, LV_ALIGN_TOP_MID, 0, 26);
+  lv_obj_set_style_bg_opa(eye_box_, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(eye_box_, 0, 0);
+  lv_obj_set_style_pad_all(eye_box_, 0, 0);
+  lv_obj_set_scrollbar_mode(eye_box_, LV_SCROLLBAR_MODE_OFF);
+
+  // Left Eye (Capsule)
+  eye_left_ = lv_obj_create(eye_box_);
+  lv_obj_set_size(eye_left_, current_eye_width_, current_eye_height_);
+  lv_obj_align(eye_left_, LV_ALIGN_CENTER, -44, 0);
+  lv_obj_set_style_radius(eye_left_, 24, 0);
+  lv_obj_set_style_bg_color(eye_left_, current_theme_.jarvis_cyan, 0);
+  lv_obj_set_style_bg_opa(eye_left_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(eye_left_, 2, 0);
+  lv_obj_set_style_border_color(eye_left_, lv_color_hex(0x7dd3fc), 0);
+  lv_obj_set_style_pad_all(eye_left_, 0, 0);
+  lv_obj_set_scrollbar_mode(eye_left_, LV_SCROLLBAR_MODE_OFF);
+
+  // Specular Highlight Left
+  pupil_left_ = lv_obj_create(eye_left_);
+  lv_obj_set_size(pupil_left_, 14, 14);
+  lv_obj_align(pupil_left_, LV_ALIGN_TOP_RIGHT, -4, 6);
+  lv_obj_set_style_radius(pupil_left_, 7, 0);
+  lv_obj_set_style_bg_color(pupil_left_, lv_color_white(), 0);
+  lv_obj_set_style_bg_opa(pupil_left_, LV_OPA_80, 0);
+  lv_obj_set_style_border_width(pupil_left_, 0, 0);
+  lv_obj_set_scrollbar_mode(pupil_left_, LV_SCROLLBAR_MODE_OFF);
+
+  // Right Eye (Capsule)
+  eye_right_ = lv_obj_create(eye_box_);
+  lv_obj_set_size(eye_right_, current_eye_width_, current_eye_height_);
+  lv_obj_align(eye_right_, LV_ALIGN_CENTER, 44, 0);
+  lv_obj_set_style_radius(eye_right_, 24, 0);
+  lv_obj_set_style_bg_color(eye_right_, current_theme_.jarvis_cyan, 0);
+  lv_obj_set_style_bg_opa(eye_right_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(eye_right_, 2, 0);
+  lv_obj_set_style_border_color(eye_right_, lv_color_hex(0x7dd3fc), 0);
+  lv_obj_set_style_pad_all(eye_right_, 0, 0);
+  lv_obj_set_scrollbar_mode(eye_right_, LV_SCROLLBAR_MODE_OFF);
+
+  // Specular Highlight Right
+  pupil_right_ = lv_obj_create(eye_right_);
+  lv_obj_set_size(pupil_right_, 14, 14);
+  lv_obj_align(pupil_right_, LV_ALIGN_TOP_RIGHT, -4, 6);
+  lv_obj_set_style_radius(pupil_right_, 7, 0);
+  lv_obj_set_style_bg_color(pupil_right_, lv_color_white(), 0);
+  lv_obj_set_style_bg_opa(pupil_right_, LV_OPA_80, 0);
+  lv_obj_set_style_border_width(pupil_right_, 0, 0);
+  lv_obj_set_scrollbar_mode(pupil_right_, LV_SCROLLBAR_MODE_OFF);
+
+  // Left Blush
+  blush_left_ = lv_obj_create(eye_box_);
+  lv_obj_set_size(blush_left_, 26, 10);
+  lv_obj_align(blush_left_, LV_ALIGN_CENTER, -44, 48);
+  lv_obj_set_style_radius(blush_left_, 5, 0);
+  lv_obj_set_style_bg_color(blush_left_, lv_color_hex(0xf43f5e), 0);
+  lv_obj_set_style_bg_opa(blush_left_, LV_OPA_70, 0);
+  lv_obj_set_style_border_width(blush_left_, 0, 0);
+  lv_obj_add_flag(blush_left_, LV_OBJ_FLAG_HIDDEN);
+
+  // Right Blush
+  blush_right_ = lv_obj_create(eye_box_);
+  lv_obj_set_size(blush_right_, 26, 10);
+  lv_obj_align(blush_right_, LV_ALIGN_CENTER, 44, 48);
+  lv_obj_set_style_radius(blush_right_, 5, 0);
+  lv_obj_set_style_bg_color(blush_right_, lv_color_hex(0xf43f5e), 0);
+  lv_obj_set_style_bg_opa(blush_right_, LV_OPA_70, 0);
+  lv_obj_set_style_border_width(blush_right_, 0, 0);
+  lv_obj_add_flag(blush_right_, LV_OBJ_FLAG_HIDDEN);
+
+  // 2. Mouth / Voice Waveform Area
+  mouth_box_ = lv_obj_create(face_container_);
+  lv_obj_set_size(mouth_box_, 100, 32);
+  lv_obj_align(mouth_box_, LV_ALIGN_TOP_MID, 0, 150);
+  lv_obj_set_style_bg_opa(mouth_box_, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(mouth_box_, 0, 0);
+  lv_obj_set_style_pad_all(mouth_box_, 0, 0);
+  lv_obj_set_scrollbar_mode(mouth_box_, LV_SCROLLBAR_MODE_OFF);
+
+  const int bar_x_offsets[5] = {-24, -12, 0, 12, 24};
+  for (int i = 0; i < 5; ++i) {
+    wave_bars_[i] = lv_obj_create(mouth_box_);
+    lv_obj_set_size(wave_bars_[i], 6, 6);
+    lv_obj_align(wave_bars_[i], LV_ALIGN_CENTER, bar_x_offsets[i], 0);
+    lv_obj_set_style_radius(wave_bars_[i], 3, 0);
+    lv_obj_set_style_bg_color(wave_bars_[i], current_theme_.jarvis_cyan, 0);
+    lv_obj_set_style_bg_opa(wave_bars_[i], LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(wave_bars_[i], 0, 0);
+    lv_obj_set_scrollbar_mode(wave_bars_[i], LV_SCROLLBAR_MODE_OFF);
+  }
+
+  // 3. Bottom Subtitle Banner
+  subtitle_box_ = lv_obj_create(face_container_);
+  lv_obj_set_size(subtitle_box_, 224, 56);
+  lv_obj_align(subtitle_box_, LV_ALIGN_BOTTOM_MID, 0, -10);
+  lv_obj_set_style_radius(subtitle_box_, 10, 0);
+  lv_obj_set_style_bg_color(subtitle_box_, lv_color_hex(0x0c1b2c), 0);
+  lv_obj_set_style_bg_opa(subtitle_box_, LV_OPA_90, 0);
+  lv_obj_set_style_border_width(subtitle_box_, 1, 0);
+  lv_obj_set_style_border_color(subtitle_box_, lv_color_hex(0x0284c7), 0);
+  lv_obj_set_style_pad_all(subtitle_box_, 6, 0);
+  lv_obj_set_scrollbar_mode(subtitle_box_, LV_SCROLLBAR_MODE_OFF);
+
+  subtitle_label_ = lv_label_create(subtitle_box_);
+  lv_obj_set_width(subtitle_label_, 210);
+  lv_obj_set_style_text_font(subtitle_label_, &font_puhui_16_4, 0);
+  lv_obj_set_style_text_color(subtitle_label_, current_theme_.assistant_text, 0);
+  lv_obj_set_style_text_align(subtitle_label_, LV_TEXT_ALIGN_CENTER, 0);
+  lv_label_set_long_mode(subtitle_label_, LV_LABEL_LONG_WRAP);
+  lv_label_set_text(subtitle_label_, "🤖 Enco 正在待命...");
+
+  // Natural Blinking & Voice Animation Timers
+  blink_timer_ = lv_timer_create(OnBlinkTimer, 3500, this);
+  voice_anim_timer_ = lv_timer_create(OnVoiceAnimTimer, 120, this);
+
   /* Status bar */
   lv_obj_set_flex_flow(status_bar_, LV_FLEX_FLOW_ROW);
   lv_obj_set_style_pad_all(status_bar_, 0, 0);
@@ -212,25 +352,6 @@ void Display::Start() {
   lv_obj_set_style_text_color(network_label_, current_theme_.jarvis_cyan, 0);
   lv_obj_set_style_margin_left(network_label_, 5, 0);  // 添加左边距，与前面的元素分隔
 
-#if 0
-  battery_label_ = lv_label_create(status_bar_);
-  lv_label_set_text(battery_label_, "");
-  lv_obj_set_style_text_font(battery_label_, &font_awesome_16_4, 0);
-  lv_obj_set_style_text_color(battery_label_, current_theme_.text, 0);
-  lv_obj_set_style_margin_left(battery_label_, 5, 0);  // 添加左边距，与前面的元素分隔
-
-  low_battery_popup_ = lv_obj_create(screen);
-  lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
-  lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.9, &font_puhui_16_4->line_height * 2);
-  lv_obj_align(low_battery_popup_, LV_ALIGN_BOTTOM_MID, 0, 0);
-  lv_obj_set_style_bg_color(low_battery_popup_, current_theme_.low_battery, 0);
-  lv_obj_set_style_radius(low_battery_popup_, 10, 0);
-  lv_obj_t* low_battery_label = lv_label_create(low_battery_popup_);
-  lv_label_set_text(low_battery_label, Lang::Strings::BATTERY_NEED_CHARGE);
-  lv_obj_set_style_text_color(low_battery_label, lv_color_white(), 0);
-  lv_obj_center(low_battery_label);
-  lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
-#endif
   lvgl_port_unlock();
 }
 
@@ -381,6 +502,18 @@ void Display::SetChatMessage(const Role role, const std::string& content) {
 
   // Store reference to the latest message label
   chat_message_label_ = msg_text;
+
+  // Update virtual robot face subtitle if active
+  if (subtitle_label_ != nullptr) {
+    if (role == Role::kUser) {
+      lv_label_set_text(subtitle_label_, ("▲ 你: " + content).c_str());
+    } else if (role == Role::kAssistant) {
+      lv_label_set_text(subtitle_label_, ("◈ Enco: " + content).c_str());
+    } else {
+      lv_label_set_text(subtitle_label_, content.c_str());
+    }
+  }
+
   lvgl_port_unlock();
 }
 
@@ -389,6 +522,34 @@ void Display::ShowStatus(const char* status) {
   lv_label_set_text(status_label_, status);
   lv_obj_clear_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+
+  std::string s(status);
+  if (s == "说话中") {
+    is_speaking_ = true;
+  } else {
+    is_speaking_ = false;
+  }
+
+  if (subtitle_label_ != nullptr) {
+    if (s == "聆听中") {
+      lv_label_set_text(subtitle_label_, "👂 正在聆听你的指令...");
+      UpdateRobotFaceEmotion("neutral");
+      if (eye_left_ && eye_right_) {
+        lv_obj_set_size(eye_left_, 54, 72);
+        lv_obj_set_size(eye_right_, 54, 72);
+      }
+    } else if (s == "待命") {
+      lv_label_set_text(subtitle_label_, "🤖 Enco 正在待命...");
+      UpdateRobotFaceEmotion("neutral");
+    } else if (s == "连接中...") {
+      lv_label_set_text(subtitle_label_, "⚡ 正在连接小智云端...");
+    } else if (s == "网络已连接") {
+      lv_label_set_text(subtitle_label_, "🌐 网络已连接");
+    } else if (s == "网络配置中" || s == "热点配网模式") {
+      lv_label_set_text(subtitle_label_, "📶 请使用手机进行配网");
+    }
+  }
+
   lvgl_port_unlock();
 }
 
@@ -402,16 +563,193 @@ void Display::SetEmotion(const std::string& emotion) {
   auto it = emotion_map.find(emotion);
 
   lvgl_port_lock(0);
-  if (emotion_label_ == nullptr) {
-    lvgl_port_unlock();
+  if (emotion_label_ != nullptr) {
+    lv_obj_set_style_text_font(emotion_label_, font_emoji_32_init(), 0);
+    if (it != emotion_map.end()) {
+      lv_label_set_text(emotion_label_, it->second);
+    } else {
+      lv_label_set_text(emotion_label_, "😶");
+    }
+  }
+
+  UpdateRobotFaceEmotion(emotion);
+  lvgl_port_unlock();
+}
+
+void Display::SetUiMode(UiMode mode) {
+  lvgl_port_lock(0);
+  ui_mode_ = mode;
+  if (ui_mode_ == UiMode::kRobotFace) {
+    if (content_) lv_obj_add_flag(content_, LV_OBJ_FLAG_HIDDEN);
+    if (face_container_) lv_obj_clear_flag(face_container_, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    if (face_container_) lv_obj_add_flag(face_container_, LV_OBJ_FLAG_HIDDEN);
+    if (content_) lv_obj_clear_flag(content_, LV_OBJ_FLAG_HIDDEN);
+  }
+  lvgl_port_unlock();
+}
+
+void Display::ToggleUiMode() {
+  if (ui_mode_ == UiMode::kRobotFace) {
+    SetUiMode(UiMode::kChatText);
+  } else {
+    SetUiMode(UiMode::kRobotFace);
+  }
+}
+
+void Display::UpdateRobotFaceEmotion(const std::string& emotion) {
+  current_emotion_ = emotion;
+  if (!eye_left_ || !eye_right_) return;
+
+  // Reset default geometry
+  current_eye_width_ = 50;
+  current_eye_height_ = 68;
+  current_eye_color_ = current_theme_.jarvis_cyan; // #00f0ff
+  bool show_blush = false;
+  bool show_pupil = true;
+
+  if (emotion == "happy" || emotion == "laughing" || emotion == "funny") {
+    // Happy squint: wide crescent slits with glowing smile
+    current_eye_height_ = 20;
+    current_eye_width_ = 52;
+    current_eye_color_ = lv_color_hex(0x38bdf8);
+    show_blush = true;
+    show_pupil = false;
+  } else if (emotion == "loving" || emotion == "kissy") {
+    // Warm glowing rose eyes + blush
+    current_eye_height_ = 48;
+    current_eye_width_ = 52;
+    current_eye_color_ = lv_color_hex(0xf43f5e); // Rose Pink
+    show_blush = true;
+    show_pupil = true;
+  } else if (emotion == "sad" || emotion == "crying") {
+    // Droopy sad eyes
+    current_eye_height_ = 36;
+    current_eye_width_ = 48;
+    current_eye_color_ = lv_color_hex(0x0284c7); // Deep tear blue
+    show_blush = false;
+  } else if (emotion == "angry") {
+    // Fierce sharp glowing orange-red
+    current_eye_height_ = 32;
+    current_eye_width_ = 52;
+    current_eye_color_ = lv_color_hex(0xef4444); // Crimson red
+    show_blush = false;
+  } else if (emotion == "surprised" || emotion == "shocked") {
+    // Big dilated circular eyes (O O)
+    current_eye_height_ = 64;
+    current_eye_width_ = 64;
+    current_eye_color_ = lv_color_hex(0xa5f3fc); // Intense bright cyan
+    show_blush = false;
+  } else if (emotion == "thinking" || emotion == "confused") {
+    // Curious inquisitive expression
+    current_eye_height_ = 50;
+    current_eye_color_ = current_theme_.jarvis_gold; // Stark Gold
+    show_blush = false;
+  } else if (emotion == "cool" || emotion == "confident") {
+    // Narrow confident visor eyes
+    current_eye_height_ = 24;
+    current_eye_width_ = 56;
+    current_eye_color_ = current_theme_.jarvis_cyan;
+    show_blush = false;
+    show_pupil = false;
+  } else if (emotion == "sleepy") {
+    // Closed peaceful lines
+    current_eye_height_ = 4;
+    current_eye_width_ = 46;
+    current_eye_color_ = current_theme_.jarvis_cyan_dim;
+    show_blush = false;
+    show_pupil = false;
+  } else if (emotion == "winking") {
+    // Wink: Left eye open, right eye closed line
+    lv_obj_set_size(eye_left_, 50, 68);
+    lv_obj_set_size(eye_right_, 50, 4);
+    lv_obj_set_style_bg_color(eye_left_, current_theme_.jarvis_cyan, 0);
+    lv_obj_set_style_bg_color(eye_right_, current_theme_.jarvis_cyan, 0);
+    if (pupil_left_) lv_obj_clear_flag(pupil_left_, LV_OBJ_FLAG_HIDDEN);
+    if (pupil_right_) lv_obj_add_flag(pupil_right_, LV_OBJ_FLAG_HIDDEN);
+    if (blush_left_) lv_obj_clear_flag(blush_left_, LV_OBJ_FLAG_HIDDEN);
+    if (blush_right_) lv_obj_clear_flag(blush_right_, LV_OBJ_FLAG_HIDDEN);
     return;
   }
 
-  lv_obj_set_style_text_font(emotion_label_, font_emoji_32_init(), 0);
-  if (it != emotion_map.end()) {
-    lv_label_set_text(emotion_label_, it->second);
-  } else {
-    lv_label_set_text(emotion_label_, "😶");
+  // Apply geometry
+  lv_obj_set_size(eye_left_, current_eye_width_, current_eye_height_);
+  lv_obj_set_size(eye_right_, current_eye_width_, current_eye_height_);
+  lv_obj_set_style_bg_color(eye_left_, current_eye_color_, 0);
+  lv_obj_set_style_bg_color(eye_right_, current_eye_color_, 0);
+
+  if (pupil_left_) {
+    if (show_pupil) lv_obj_clear_flag(pupil_left_, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(pupil_left_, LV_OBJ_FLAG_HIDDEN);
   }
-  lvgl_port_unlock();
+  if (pupil_right_) {
+    if (show_pupil) lv_obj_clear_flag(pupil_right_, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(pupil_right_, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  if (blush_left_) {
+    if (show_blush) lv_obj_clear_flag(blush_left_, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(blush_left_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (blush_right_) {
+    if (show_blush) lv_obj_clear_flag(blush_right_, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(blush_right_, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+void Display::OnBlinkTimer(lv_timer_t* timer) {
+  auto* self = static_cast<Display*>(lv_timer_get_user_data(timer));
+  if (!self || self->ui_mode_ != UiMode::kRobotFace) return;
+  if (self->current_emotion_ == "sleepy" || self->current_emotion_ == "winking") return;
+  if (!self->eye_left_ || !self->eye_right_) return;
+
+  // Quick cute blink
+  lv_obj_set_height(self->eye_left_, 4);
+  lv_obj_set_height(self->eye_right_, 4);
+  if (self->pupil_left_) lv_obj_add_flag(self->pupil_left_, LV_OBJ_FLAG_HIDDEN);
+  if (self->pupil_right_) lv_obj_add_flag(self->pupil_right_, LV_OBJ_FLAG_HIDDEN);
+
+  lv_timer_t* restore_timer = lv_timer_create(
+      [](lv_timer_t* t) {
+        auto* d = static_cast<Display*>(lv_timer_get_user_data(t));
+        if (d && d->ui_mode_ == UiMode::kRobotFace && d->eye_left_ && d->eye_right_) {
+          lv_obj_set_height(d->eye_left_, d->current_eye_height_);
+          lv_obj_set_height(d->eye_right_, d->current_eye_height_);
+          if (d->pupil_left_) lv_obj_clear_flag(d->pupil_left_, LV_OBJ_FLAG_HIDDEN);
+          if (d->pupil_right_) lv_obj_clear_flag(d->pupil_right_, LV_OBJ_FLAG_HIDDEN);
+        }
+      },
+      120, self);
+  lv_timer_set_repeat_count(restore_timer, 1);
+  lv_timer_set_auto_delete(restore_timer, true);
+}
+
+void Display::OnVoiceAnimTimer(lv_timer_t* timer) {
+  auto* self = static_cast<Display*>(lv_timer_get_user_data(timer));
+  if (!self || self->ui_mode_ != UiMode::kRobotFace) return;
+
+  static uint8_t anim_step = 0;
+  anim_step = (anim_step + 1) % 6;
+
+  if (self->is_speaking_) {
+    const int heights[6][5] = {
+        {6, 16, 24, 14, 8},
+        {12, 22, 10, 20, 14},
+        {18, 12, 26, 16, 6},
+        {8, 24, 14, 22, 12},
+        {14, 18, 20, 10, 18},
+        {20, 10, 16, 24, 8},
+    };
+    for (int i = 0; i < 5; ++i) {
+      if (self->wave_bars_[i]) {
+        lv_obj_set_height(self->wave_bars_[i], heights[anim_step][i]);
+      }
+    }
+  } else {
+    for (int i = 0; i < 5; ++i) {
+      if (self->wave_bars_[i]) {
+        lv_obj_set_height(self->wave_bars_[i], 6);
+      }
+    }
+  }
 }

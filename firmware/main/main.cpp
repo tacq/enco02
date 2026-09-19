@@ -39,6 +39,8 @@
 // #define WIFI_SSID "your_wifi_ssid"
 // #define WIFI_PASSWORD "your_wifi_password"
 
+std::unique_ptr<Display> g_display;
+
 namespace {
 // Wi-Fi configurations
 /**
@@ -87,7 +89,6 @@ constexpr bool kDisplayInvertColor = true;
 constexpr bool kDisplaySwapXY = false;
 constexpr auto kDisplayRgbElementOrder = LCD_RGB_ELEMENT_ORDER_RGB;
 
-std::unique_ptr<Display> g_display;
 auto g_observer = std::make_shared<ai_vox::Observer>();
 auto g_audio_output_device = std::make_shared<ai_vox::AudioOutputDeviceI2sStd>(kSpeakerPinSck, kSpeakerPinWs, kSpeakerPinSd);
 button_handle_t g_button_boot_handle = nullptr;
@@ -441,6 +442,16 @@ void InitMcpTools() {
                         {"pin", ai_vox::ParamSchema<int64_t>{.default_value = 0, .min = 0, .max = 26}},
                         {"angle", ai_vox::ParamSchema<int64_t>{.default_value = 70, .min = 20, .max = 120}},
                     });
+
+  engine.AddMcpTool("self.screen.set_mode",
+                    "Switch robot screen display mode between virtual face and chat text (切换屏幕模式: face 表情模式, chat 对话模式).",
+                    {
+                        {"mode", ai_vox::ParamSchema<std::string>{.default_value = "face"}},
+                    });
+
+  engine.AddMcpTool("self.screen.toggle_mode",
+                    "Toggle robot screen display mode between virtual face and chat text (切换屏幕显示模式).",
+                    {});
 }
 }  // namespace
 
@@ -500,6 +511,18 @@ void setup() {
       [](void* button_handle, void* usr_data) {
         printf("boot button pressed\n");
         ai_vox::Engine::GetInstance().Advance();
+      },
+      nullptr));
+
+  ESP_ERROR_CHECK(iot_button_register_cb(
+      g_button_boot_handle,
+      BUTTON_DOUBLE_CLICK,
+      nullptr,
+      [](void* button_handle, void* usr_data) {
+        printf("boot button double clicked: toggle UI mode\n");
+        if (g_display) {
+          g_display->ToggleUiMode();
+        }
       },
       nullptr));
 
@@ -685,6 +708,17 @@ void loop() {
         } else {
           engine.SendMcpCallError(mcp_tool_call_event->id, "Missing pin or angle");
         }
+      } else if ("self.screen.set_mode" == mcp_tool_call_event->name) {
+        const auto mode_ptr = mcp_tool_call_event->param<std::string>("mode");
+        if (mode_ptr != nullptr && (*mode_ptr == "chat" || *mode_ptr == "text")) {
+          g_display->SetUiMode(Display::UiMode::kChatText);
+        } else {
+          g_display->SetUiMode(Display::UiMode::kRobotFace);
+        }
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+      } else if ("self.screen.toggle_mode" == mcp_tool_call_event->name) {
+        g_display->ToggleUiMode();
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
       }
     }
   }

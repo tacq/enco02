@@ -4,6 +4,9 @@
 #include <WiFi.h>
 #include <esp_log.h>
 #include "servo_controller.h"
+#include "display.h"
+
+extern std::unique_ptr<Display> g_display;
 
 [[maybe_unused]] static const char* TAG = "ServoWebServer";
 
@@ -292,6 +295,13 @@ static const char kServoIndexHtml[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       <button class="btn-action" onclick="runSweep()">🔄 巡航测试</button>
     </div>
 
+    <!-- Screen UI Mode Switch Action -->
+    <div style="margin-top: 4px;">
+      <button class="btn-action" style="width: 100%; background: linear-gradient(135deg, #0284c7, #6366f1); border: none; box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);" onclick="toggleUiMode()" id="btn-uimode">
+        📺 屏幕模式: 虚拟表情 (点击切换为对话)
+      </button>
+    </div>
+
     <!-- Diagnostics Info -->
     <div class="card info-box">
       <div>设备 IP: <span id="info-ip">加载中...</span></div>
@@ -356,6 +366,25 @@ static const char kServoIndexHtml[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       setTimeout(syncStatus, 1500);
     }
 
+    function toggleUiMode() {
+      fetch('/api/ui_mode?action=toggle')
+        .then(r => r.json())
+        .then(data => {
+          if (data.mode) updateUiModeButton(data.mode);
+        })
+        .catch(e => console.error(e));
+    }
+
+    function updateUiModeButton(mode) {
+      const btn = document.getElementById('btn-uimode');
+      if (!btn) return;
+      if (mode === 'face') {
+        btn.innerText = '📺 屏幕模式: 虚拟表情 (点击切换为对话)';
+      } else {
+        btn.innerText = '📺 屏幕模式: 对话文本 (点击切换为表情)';
+      }
+    }
+
     function syncStatus() {
       fetch('/api/status')
         .then(r => r.json())
@@ -366,6 +395,9 @@ static const char kServoIndexHtml[] PROGMEM = R"rawliteral(<!DOCTYPE html>
             updateUiValues(26, Math.round(data.servo26));
           } else if (data.servo15 !== undefined) {
             updateUiValues(26, Math.round(data.servo15));
+          }
+          if (data.ui_mode) {
+            updateUiModeButton(data.ui_mode);
           }
           document.getElementById('info-ip').innerText = data.ip;
           document.getElementById('info-heap').innerText = Math.round(data.heap / 1024);
@@ -407,6 +439,8 @@ void ServoWebServer::SetupRoutes() {
   server_->on("/api/sweep", HTTP_GET, [this]() { HandleApiSweep(); });
   server_->on("/api/bobble", HTTP_GET, [this]() { HandleApiBobble(); });
   server_->on("/api/bobble", HTTP_POST, [this]() { HandleApiBobble(); });
+  server_->on("/api/ui_mode", HTTP_GET, [this]() { HandleApiUiMode(); });
+  server_->on("/api/ui_mode", HTTP_POST, [this]() { HandleApiUiMode(); });
   server_->onNotFound([this]() { HandleNotFound(); });
 }
 
@@ -462,9 +496,10 @@ void ServoWebServer::HandleApiStatus() {
   uint32_t free_heap = esp_get_free_heap_size();
 
   char json[256];
+  const char* mode_str = (g_display && g_display->GetUiMode() == Display::UiMode::kRobotFace) ? "face" : "chat";
   snprintf(json, sizeof(json),
-           "{\"servo0\":%.1f,\"servo25\":%.1f,\"servo26\":%.1f,\"servo15\":%.1f,\"ip\":\"%s\",\"heap\":%lu}",
-           a0, a25, a26, a26, WiFi.localIP().toString().c_str(), static_cast<unsigned long>(free_heap));
+           "{\"servo0\":%.1f,\"servo25\":%.1f,\"servo26\":%.1f,\"servo15\":%.1f,\"ui_mode\":\"%s\",\"ip\":\"%s\",\"heap\":%lu}",
+           a0, a25, a26, a26, mode_str, WiFi.localIP().toString().c_str(), static_cast<unsigned long>(free_heap));
 
   server_->sendHeader("Access-Control-Allow-Origin", "*");
   server_->send(200, "application/json", json);
@@ -503,6 +538,32 @@ void ServoWebServer::HandleApiBobble() {
   server_->sendHeader("Access-Control-Allow-Origin", "*");
   server_->send(200, "application/json", "{\"success\":true,\"action\":\"head_bobble\"}");
   ServoController::GetInstance().TriggerHeadBobble();
+}
+
+void ServoWebServer::HandleApiUiMode() {
+  if (!g_display) {
+    server_->send(500, "application/json", "{\"error\":\"Display not ready\"}");
+    return;
+  }
+
+  if (server_->hasArg("mode")) {
+    String m = server_->arg("mode");
+    if (m == "face") {
+      g_display->SetUiMode(Display::UiMode::kRobotFace);
+    } else if (m == "chat" || m == "text") {
+      g_display->SetUiMode(Display::UiMode::kChatText);
+    } else if (m == "toggle") {
+      g_display->ToggleUiMode();
+    }
+  } else if (server_->hasArg("action") && server_->arg("action") == "toggle") {
+    g_display->ToggleUiMode();
+  }
+
+  bool is_face = (g_display->GetUiMode() == Display::UiMode::kRobotFace);
+  char json[128];
+  snprintf(json, sizeof(json), "{\"success\":true,\"mode\":\"%s\"}", is_face ? "face" : "chat");
+  server_->sendHeader("Access-Control-Allow-Origin", "*");
+  server_->send(200, "application/json", json);
 }
 
 void ServoWebServer::HandleNotFound() {
