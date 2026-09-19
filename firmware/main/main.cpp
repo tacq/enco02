@@ -13,7 +13,9 @@
 #include "components/espressif/button/iot_button.h"
 #include "components/espressif/esp_audio_codec/esp_audio_simple_dec.h"
 #include "components/espressif/esp_audio_codec/esp_mp3_dec.h"
+#include <Preferences.h>
 #include "components/wifi_configurator/wifi_configurator.h"
+#include "web_wifi_configurator.h"
 #include "display.h"
 #include "network_config_mode_mp3.h"
 #include "network_connected_mp3.h"
@@ -109,7 +111,7 @@ void InitDisplay() {
       .isr_cpu_id = ESP_INTR_CPU_AFFINITY_AUTO,
       .intr_flags = 0,
   };
-  ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO));
+  ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
   esp_lcd_panel_io_handle_t panel_io = nullptr;
   esp_lcd_panel_handle_t panel = nullptr;
@@ -118,11 +120,11 @@ void InitDisplay() {
   io_config.cs_gpio_num = kDisplayCsPin;
   io_config.dc_gpio_num = kDisplayDcPin;
   io_config.spi_mode = kDisplaySpiMode;
-  io_config.pclk_hz = 40 * 1000 * 1000;
+  io_config.pclk_hz = 20 * 1000 * 1000;
   io_config.trans_queue_depth = 10;
   io_config.lcd_cmd_bits = 8;
   io_config.lcd_param_bits = 8;
-  ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &panel_io));
+  ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI2_HOST, &io_config, &panel_io));
 
   esp_lcd_panel_dev_config_t panel_config = {};
   panel_config.reset_gpio_num = kDisplayRstPin;
@@ -254,25 +256,52 @@ void ConfigureWifi() {
   printf("configure wifi\n");
   auto wifi_configurator = std::make_unique<WifiConfigurator>(WiFi, kSmartConfigType);
 
-  ESP_ERROR_CHECK(iot_button_register_cb(
-      g_button_boot_handle,
-      BUTTON_PRESS_DOWN,
-      nullptr,
-      [](void*, void* data) {
-        printf("boot button pressed\n");
-        static_cast<WifiConfigurator*>(data)->StartSmartConfig();
-      },
-      wifi_configurator.get()));
-
   g_display->ShowStatus("网络配置中");
   PlayMp3(kNotification0mp3, sizeof(kNotification0mp3));
 
 #if defined(WIFI_SSID) && defined(WIFI_PASSWORD)
-  printf("wifi config start with wifi: %s, %s\n", WIFI_SSID, WIFI_PASSWORD);
+  printf("wifi config start with hardcoded wifi: %s, %s\n", WIFI_SSID, WIFI_PASSWORD);
   wifi_configurator->Start(WIFI_SSID, WIFI_PASSWORD);
 #else
-  printf("wifi config start\n");
-  wifi_configurator->Start();
+  Preferences prefs;
+  prefs.begin("WiFiConnector", false);
+  String saved_ssid = "";
+  if (prefs.isKey("ssid")) {
+    saved_ssid = prefs.getString("ssid");
+  }
+  prefs.end();
+
+  if (saved_ssid.length() > 0) {
+    printf("wifi config start with saved wifi: %s\n", saved_ssid.c_str());
+    g_display->ShowStatus("连接已保存Wi-Fi");
+    char msg[128];
+    snprintf(msg, sizeof(msg), "正在连接已保存网络:\n%s", saved_ssid.c_str());
+    g_display->SetChatMessage(Display::Role::kSystem, msg);
+    wifi_configurator->Start();
+  } else {
+    // Start SoftAP Web Config Mode (xiaozhi-xxxx)
+    WebWifiConfigurator web_config;
+    String ap_name = web_config.StartApAndServer();
+
+    g_display->ShowStatus("热点配网模式");
+    PlayMp3(kNetworkConfigModeMp3, sizeof(kNetworkConfigModeMp3));
+
+    char msg[160];
+    snprintf(msg, sizeof(msg), "【Wi-Fi 配网模式】\n1. 连接手机热点:\n   %s\n2. 浏览器打开:\n   192.168.4.1", ap_name.c_str());
+    g_display->SetChatMessage(Display::Role::kSystem, msg);
+
+    while (!web_config.IsConfigured()) {
+      web_config.HandleClient();
+      delay(2);
+    }
+
+    g_display->ShowStatus("保存成功，连接中");
+    g_display->SetChatMessage(Display::Role::kSystem, "Wi-Fi设置成功！\n正在连接网络，请稍候...");
+    web_config.Stop();
+    delay(200);
+
+    wifi_configurator->Start();
+  }
 #endif
 
   while (true) {
@@ -289,8 +318,6 @@ void ConfigureWifi() {
     }
   }
 
-  iot_button_unregister_cb(g_button_boot_handle, BUTTON_PRESS_DOWN, nullptr);
-
   printf("wifi connected\n");
   printf("- mac address: %s\n", WiFi.macAddress().c_str());
   printf("- bssid:       %s\n", WiFi.BSSIDstr().c_str());
@@ -300,6 +327,9 @@ void ConfigureWifi() {
   printf("- subnet mask: %s\n", WiFi.subnetMask().toString().c_str());
 
   g_display->ShowStatus("网络已连接");
+  char conn_msg[128];
+  snprintf(conn_msg, sizeof(conn_msg), "网络已连接: %s\nIP: %s\n小智 AI 正在启动...", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+  g_display->SetChatMessage(Display::Role::kSystem, conn_msg);
   PlayMp3(kNetworkConnectedMp3, sizeof(kNetworkConnectedMp3));
 }
 

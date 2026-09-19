@@ -56,8 +56,8 @@ Display::Display(esp_lcd_panel_io_handle_t panel_io,
   lv_init();
 
   lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
-  port_cfg.task_priority = tskIDLE_PRIORITY;
-  port_cfg.timer_period_ms = 50;
+  port_cfg.task_priority = 2;
+  port_cfg.timer_period_ms = 20;
   lvgl_port_init(&port_cfg);
 
   const lvgl_port_display_cfg_t display_cfg = {
