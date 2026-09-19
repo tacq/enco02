@@ -16,6 +16,8 @@
 #include <Preferences.h>
 #include "components/wifi_configurator/wifi_configurator.h"
 #include "web_wifi_configurator.h"
+#include "servo_controller.h"
+#include "servo_web_server.h"
 #include "display.h"
 #include "network_config_mode_mp3.h"
 #include "network_connected_mp3.h"
@@ -327,10 +329,14 @@ void ConfigureWifi() {
   printf("- subnet mask: %s\n", WiFi.subnetMask().toString().c_str());
 
   g_display->ShowStatus("网络已连接");
-  char conn_msg[128];
-  snprintf(conn_msg, sizeof(conn_msg), "网络已连接: %s\nIP: %s\n小智 AI 正在启动...", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+  char conn_msg[160];
+  snprintf(conn_msg, sizeof(conn_msg), "网络已连接: %s\nIP: %s\n调试页面: http://%s/\n小智 AI 正在启动...",
+           WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.localIP().toString().c_str());
   g_display->SetChatMessage(Display::Role::kSystem, conn_msg);
   PlayMp3(kNetworkConnectedMp3, sizeof(kNetworkConnectedMp3));
+
+  // Start Servo Web Server and mDNS (http://enco02.local / http://<ip>/)
+  ServoWebServer::GetInstance().Start();
 }
 
 void InitMcpTools() {
@@ -379,12 +385,40 @@ void InitMcpTools() {
                         // empty
                     }  // parameter schema
   );
+
+  engine.AddMcpTool("self.servo.set_angle",
+                    "Set the rotation angle of a servo motor (0 to 180 degrees). Pin 0 is Yaw (horizontal), Pin 25 is Pitch (vertical).",
+                    {
+                        {
+                            "pin",
+                            ai_vox::ParamSchema<int64_t>{
+                                .default_value = 0,
+                                .min = 0,
+                                .max = 25,
+                            },
+                        },
+                        {
+                            "angle",
+                            ai_vox::ParamSchema<int64_t>{
+                                .default_value = 90,
+                                .min = 0,
+                                .max = 180,
+                            },
+                        },
+                    });
+
+  engine.AddMcpTool("self.servo.center",
+                    "Center both servo motors (Pin 0 and Pin 25) to 90 degrees.",
+                    {});
 }
 }  // namespace
 
 void setup() {
   Serial.begin(115200);
   printf("setup\n");
+
+  // Immediately initialize MG92B servos to 90 degrees
+  ServoController::GetInstance().Init();
 
   pinMode(kLedPin, OUTPUT);
   digitalWrite(kLedPin, LOW);
@@ -551,7 +585,25 @@ void loop() {
         const auto state = digitalRead(kLedPin) == HIGH;
         printf("on mcp tool call: self.led.get, state: %d\n", state);
         engine.SendMcpCallResponse(mcp_tool_call_event->id, state);
+      } else if ("self.servo.set_angle" == mcp_tool_call_event->name) {
+        const auto pin_ptr = mcp_tool_call_event->param<int64_t>("pin");
+        const auto angle_ptr = mcp_tool_call_event->param<int64_t>("angle");
+        if (pin_ptr != nullptr && angle_ptr != nullptr) {
+          printf("on mcp tool call: self.servo.set_angle, pin: %lld, angle: %lld\n", *pin_ptr, *angle_ptr);
+          ServoController::GetInstance().SetAngle(static_cast<int>(*pin_ptr), static_cast<float>(*angle_ptr));
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        } else {
+          engine.SendMcpCallError(mcp_tool_call_event->id, "Missing pin or angle");
+        }
+      } else if ("self.servo.center" == mcp_tool_call_event->name) {
+        printf("on mcp tool call: self.servo.center\n");
+        ServoController::GetInstance().CenterAll();
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
       }
     }
   }
+
+  // Handle Web UI requests for servo testing
+  ServoWebServer::GetInstance().HandleClient();
+  delay(2);
 }
