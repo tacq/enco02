@@ -284,8 +284,8 @@ void ServoController::RunHeadBobble() {
     float pitch_delta = 12.0f * cosf(4.0f * M_PI * p) * envelope;
     float pitch_angle = kDefaultAngle + pitch_delta;
 
-    // Servo 2 (Pin 26, Yaw / Rotate): expressive rotation centered around 70 deg (safe: 52 to 88 deg, safe range 20-120)
-    float yaw_delta = 18.0f * sinf(4.0f * M_PI * p + (M_PI / 4.0f)) * envelope;
+    // Servo 2 (Pin 26, Yaw / Rotate): gentle rotation centered around 70 deg (safe: 60 to 80 deg, limited to +-10 deg)
+    float yaw_delta = 10.0f * sinf(4.0f * M_PI * p + (M_PI / 4.0f)) * envelope;
     float yaw_angle = kServo2DefaultAngle + yaw_delta;
 
     SetAllAngles(pitch_angle, tilt_angle, yaw_angle);

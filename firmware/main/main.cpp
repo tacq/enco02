@@ -428,7 +428,7 @@ void InitMcpTools() {
                     });
 
   engine.AddMcpTool("self.head.bobble",
-                    "Cute 3-axis head bobble/shake gesture (摇头晃脑/摇摇头).",
+                    "Cute 3-axis head bobble/shake gesture (摇头/摇头晃脑/摇摇头). Gentle motion within 10 degrees.",
                     {});
 
   engine.AddMcpTool("self.head.center",
