@@ -263,31 +263,31 @@ static const char kServoIndexHtml[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     <div class="card">
       <div class="card-title">
         <span>📍 舵机 3：GPIO 26 (整头水平旋转 / Yaw)</span>
-        <span class="angle-val" id="val26">90°</span>
+        <span class="angle-val" id="val26">70°</span>
       </div>
-      <p style="font-size:11px;color:var(--primary);margin-top:-6px;margin-bottom:8px;">安全限位：20° ~ 160° (角小向左看，角大向右看)</p>
+      <p style="font-size:11px;color:var(--primary);margin-top:-6px;margin-bottom:8px;">安全限位：20° ~ 120° (角小向左看，角大向右看，70°正视)</p>
       <div class="slider-container">
-        <input type="range" id="slider26" min="20" max="160" value="90" oninput="onSliderInput(26, this.value)">
+        <input type="range" id="slider26" min="20" max="120" value="70" oninput="onSliderInput(26, this.value)">
         <div class="scale-labels">
           <span>20° (向左极)</span>
-          <span>55°</span>
-          <span>90° (正视)</span>
-          <span>125°</span>
-          <span>160° (向右极)</span>
+          <span>45°</span>
+          <span>70° (正视)</span>
+          <span>95°</span>
+          <span>120° (向右极)</span>
         </div>
       </div>
       <div class="btn-group">
         <button class="btn" onclick="setAngle(26, 20)">20° 左极</button>
-        <button class="btn" onclick="setAngle(26, 60)">60°</button>
-        <button class="btn" onclick="setAngle(26, 90)">90° 正视</button>
-        <button class="btn" onclick="setAngle(26, 120)">120°</button>
-        <button class="btn" onclick="setAngle(26, 160)">160° 右极</button>
+        <button class="btn" onclick="setAngle(26, 45)">45°</button>
+        <button class="btn" onclick="setAngle(26, 70)">70° 正视</button>
+        <button class="btn" onclick="setAngle(26, 95)">95°</button>
+        <button class="btn" onclick="setAngle(26, 120)">120° 右极</button>
       </div>
     </div>
 
     <!-- Quick Global Actions -->
     <div class="action-row" style="grid-template-columns: 1fr 1.2fr 1fr;">
-      <button class="btn-action primary" onclick="centerAll()">🎯 全部位归中 (90°)</button>
+      <button class="btn-action primary" onclick="centerAll()">🎯 全部位归中 (正视)</button>
       <button class="btn-action" style="background: linear-gradient(135deg, #ec4899, #8b5cf6); border: none; box-shadow: 0 4px 15px rgba(236, 72, 153, 0.35);" onclick="runHeadBobble()">🕺 摇头晃脑</button>
       <button class="btn-action" onclick="runSweep()">🔄 巡航测试</button>
     </div>
@@ -342,7 +342,7 @@ static const char kServoIndexHtml[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     function centerAll() {
       updateUiValues(0, 90);
       updateUiValues(25, 90);
-      updateUiValues(26, 90);
+      updateUiValues(26, 70);
       fetch('/api/center').catch(e => console.error(e));
     }
 

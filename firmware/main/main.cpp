@@ -343,150 +343,6 @@ void ConfigureWifi() {
 
 uint32_t g_last_motion_exec_time = 0;
 
-bool ProcessVoiceMotionCommand(const std::string& text) {
-  auto& controller = ServoController::GetInstance();
-  std::string lower = text;
-  std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-
-  // 1. 摇头晃脑 / Shake head / Bobble
-  if (text.find("摇头晃脑") != std::string::npos ||
-      text.find("摇摇头") != std::string::npos ||
-      text.find("晃脑") != std::string::npos ||
-      text.find("摇晃") != std::string::npos ||
-      lower.find("shake head") != std::string::npos ||
-      lower.find("bobble") != std::string::npos) {
-    printf("[Voice Motion] Recognized '摇头晃脑 / Bobble'\n");
-    controller.TriggerHeadBobble();
-    g_last_motion_exec_time = millis();
-    return true;
-  }
-
-  // 2. 头摆正 / 复位 / Center
-  if (text.find("头摆正") != std::string::npos ||
-      text.find("摆正") != std::string::npos ||
-      text.find("头归中") != std::string::npos ||
-      text.find("看前方") != std::string::npos ||
-      text.find("正视") != std::string::npos ||
-      text.find("复位") != std::string::npos ||
-      lower.find("center head") != std::string::npos ||
-      lower.find("reset head") != std::string::npos ||
-      lower.find("look forward") != std::string::npos) {
-    printf("[Voice Motion] Recognized '头摆正 / Center'\n");
-    controller.CenterAll();
-    g_last_motion_exec_time = millis();
-    return true;
-  }
-
-  // Helper lambda to extract degree from speech text (e.g., "30度", "30 degrees", "30", etc.)
-  // If not specified or 0, default to 10.0f
-  auto extract_degrees = [&](size_t keyword_pos, size_t keyword_len) -> float {
-    float deg = 10.0f;
-    // Check right after the keyword first
-    size_t search_start = keyword_pos + keyword_len;
-    bool found = false;
-    for (size_t i = search_start; i < text.length(); ++i) {
-      if (isdigit((unsigned char)text[i])) {
-        deg = atof(&text[i]);
-        found = true;
-        break;
-      }
-    }
-    // If not found after keyword, check before keyword (e.g., "30度抬头")
-    if (!found) {
-      for (size_t i = 0; i < keyword_pos; ++i) {
-        if (isdigit((unsigned char)text[i])) {
-          deg = atof(&text[i]);
-          found = true;
-          break;
-        }
-      }
-    }
-    if (deg <= 0.0f) deg = 10.0f;
-    if (deg > 90.0f) deg = 90.0f;  // safe maximum delta
-    return deg;
-  };
-
-  // Helper macro/lambda for matching keyword list
-  auto find_keyword = [&](const std::vector<std::string>& keywords, size_t& match_len) -> size_t {
-    for (const auto& kw : keywords) {
-      size_t pos = text.find(kw);
-      if (pos != std::string::npos) {
-        match_len = kw.length();
-        return pos;
-      }
-      pos = lower.find(kw);
-      if (pos != std::string::npos) {
-        match_len = kw.length();
-        return pos;
-      }
-    }
-    return std::string::npos;
-  };
-
-  // 3. 抬头 / Look Up (Servo 0: Pitch decreases)
-  size_t kw_len = 0;
-  size_t p_up = find_keyword({"抬头", "往上看", "向上看", "仰头", "抬高", "look up", "tilt up", "head up"}, kw_len);
-  if (p_up != std::string::npos) {
-    float deg = extract_degrees(p_up, kw_len);
-    printf("[Voice Motion] Recognized '抬头 / Look Up' (%.1f deg)\n", deg);
-    controller.LookUp(deg);
-    g_last_motion_exec_time = millis();
-    return true;
-  }
-
-  // 4. 低头 / Look Down (Servo 0: Pitch increases)
-  size_t p_down = find_keyword({"低头", "往下看", "向下看", "俯视", "look down", "tilt down", "head down"}, kw_len);
-  if (p_down != std::string::npos) {
-    float deg = extract_degrees(p_down, kw_len);
-    printf("[Voice Motion] Recognized '低头 / Look Down' (%.1f deg)\n", deg);
-    controller.LookDown(deg);
-    g_last_motion_exec_time = millis();
-    return true;
-  }
-
-  // 5. 向左歪头 / Tilt Left (Servo 1: Roll decreases)
-  size_t p_tleft = find_keyword({"向左歪", "往左歪", "左歪", "向左偏", "往左偏", "左倾", "tilt left", "lean left"}, kw_len);
-  if (p_tleft != std::string::npos) {
-    float deg = extract_degrees(p_tleft, kw_len);
-    printf("[Voice Motion] Recognized '向左歪头 / Tilt Left' (%.1f deg)\n", deg);
-    controller.TiltLeft(deg);
-    g_last_motion_exec_time = millis();
-    return true;
-  }
-
-  // 6. 向右歪头 / Tilt Right (Servo 1: Roll increases)
-  size_t p_tright = find_keyword({"向右歪", "往右歪", "右歪", "向右偏", "往右偏", "右倾", "tilt right", "lean right"}, kw_len);
-  if (p_tright != std::string::npos) {
-    float deg = extract_degrees(p_tright, kw_len);
-    printf("[Voice Motion] Recognized '向右歪头 / Tilt Right' (%.1f deg)\n", deg);
-    controller.TiltRight(deg);
-    g_last_motion_exec_time = millis();
-    return true;
-  }
-
-  // 7. 向左转头 / Turn Left (Servo 2: Yaw decreases)
-  size_t p_turnleft = find_keyword({"向左转", "往左转", "左转头", "左转", "转到左边", "看左边", "往左看", "turn left", "rotate left", "head left"}, kw_len);
-  if (p_turnleft != std::string::npos) {
-    float deg = extract_degrees(p_turnleft, kw_len);
-    printf("[Voice Motion] Recognized '向左转头 / Turn Left' (%.1f deg)\n", deg);
-    controller.TurnLeft(deg);
-    g_last_motion_exec_time = millis();
-    return true;
-  }
-
-  // 8. 向右转头 / Turn Right (Servo 2: Yaw increases)
-  size_t p_turnright = find_keyword({"向右转", "往右转", "右转头", "右转", "转到右边", "看右边", "往右看", "turn right", "rotate right", "head right"}, kw_len);
-  if (p_turnright != std::string::npos) {
-    float deg = extract_degrees(p_turnright, kw_len);
-    printf("[Voice Motion] Recognized '向右转头 / Turn Right' (%.1f deg)\n", deg);
-    controller.TurnRight(deg);
-    g_last_motion_exec_time = millis();
-    return true;
-  }
-
-  return false;
-}
-
 void InitMcpTools() {
   auto& engine = ai_vox::Engine::GetInstance();
   engine.AddMcpTool("self.audio_speaker.set_volume",         // tool name
@@ -518,6 +374,7 @@ void InitMcpTools() {
                     {
                         {
                             "state",  // parameter name
+
                             ai_vox::ParamSchema<bool>{
                                 // parameter type can be bool, std::string or int64_t
                                 .default_value = std::nullopt,  // default value, set to std::nullopt if not specified
@@ -535,54 +392,54 @@ void InitMcpTools() {
   );
 
   engine.AddMcpTool("self.head.look_up",
-                    "Make robot look up (抬头). Default step 10 deg.",
+                    "Make robot look up (抬头/仰头/往上看). Default step 10 deg.",
                     {
                         {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
                     });
 
   engine.AddMcpTool("self.head.look_down",
-                    "Make robot look down (低头). Default step 10 deg.",
+                    "Make robot look down (低头/俯视/往下看). Default step 10 deg.",
                     {
                         {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
                     });
 
   engine.AddMcpTool("self.head.tilt_left",
-                    "Tilt robot head left (向左歪头). Default step 10 deg.",
+                    "Tilt robot head left (向左歪头/左偏). Default step 10 deg.",
                     {
                         {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
                     });
 
   engine.AddMcpTool("self.head.tilt_right",
-                    "Tilt robot head right (向右歪头). Default step 10 deg.",
+                    "Tilt robot head right (向右歪头/右偏). Default step 10 deg.",
                     {
                         {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
                     });
 
   engine.AddMcpTool("self.head.turn_left",
-                    "Rotate robot head left (向左转头). Default step 10 deg.",
+                    "Rotate robot head left (向左转头/往左看/左转). Default step 10 deg.",
                     {
-                        {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 70}},
+                        {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 50}},
                     });
 
   engine.AddMcpTool("self.head.turn_right",
-                    "Rotate robot head right (向右转头). Default step 10 deg.",
+                    "Rotate robot head right (向右转头/往右看/右转). Default step 10 deg.",
                     {
-                        {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 70}},
+                        {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 50}},
                     });
 
   engine.AddMcpTool("self.head.bobble",
-                    "Cute 3-axis head bobble/shake gesture (摇头晃脑).",
+                    "Cute 3-axis head bobble/shake gesture (摇头晃脑/摇摇头).",
                     {});
 
   engine.AddMcpTool("self.head.center",
-                    "Reset all 3 head servos to 90 degrees (头摆正/复位).",
+                    "Reset all 3 head servos to neutral looking front: Pitch 90, Roll 90, Yaw 70 (头摆正/正视/复位).",
                     {});
 
   engine.AddMcpTool("self.servo.set_angle",
-                    "Set servo angle (Pin 0/25/26, safe range: 20-160 deg).",
+                    "Set servo angle (Pin 0 Pitch: 40-120, Pin 25 Roll: 50-110, Pin 26 Yaw: 20-120).",
                     {
                         {"pin", ai_vox::ParamSchema<int64_t>{.default_value = 0, .min = 0, .max = 26}},
-                        {"angle", ai_vox::ParamSchema<int64_t>{.default_value = 90, .min = 20, .max = 160}},
+                        {"angle", ai_vox::ParamSchema<int64_t>{.default_value = 70, .min = 20, .max = 120}},
                     });
 }
 }  // namespace
@@ -727,9 +584,6 @@ void loop() {
         case ai_vox::ChatRole::kUser: {
           printf("role: user, content: %s\n", chat_message_event->content.c_str());
           g_display->SetChatMessage(Display::Role::kUser, chat_message_event->content);
-          if (millis() - g_last_motion_exec_time > 1500) {
-            ProcessVoiceMotionCommand(chat_message_event->content);
-          }
           break;
         }
       }
