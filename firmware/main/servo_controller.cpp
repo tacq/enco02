@@ -115,7 +115,7 @@ void ServoController::SetAngle(int pin, float angle) {
     ledc_update_duty(LEDC_LOW_SPEED_MODE, kChannel1);
     ESP_LOGD(TAG, "Servo 1 / Roll (Pin 25) set to %.1f deg [safe: %.0f-%.0f] (duty: %u)",
              angle, kServo1MinAngle, kServo1MaxAngle, duty);
-  } else if (pin == 26 || pin == kPinServo2) {
+  } else if (pin == 26 || pin == 15 || pin == kPinServo2) {
     if (angle < kServo2MinAngle) angle = kServo2MinAngle;
     if (angle > kServo2MaxAngle) angle = kServo2MaxAngle;
     angle_servo2_ = angle;
@@ -155,7 +155,7 @@ float ServoController::GetAngle(int pin) const {
     return angle_servo0_;
   } else if (pin == 25 || pin == kPinServo1) {
     return angle_servo1_;
-  } else if (pin == 26 || pin == kPinServo2) {
+  } else if (pin == 26 || pin == 15 || pin == kPinServo2) {
     return angle_servo2_;
   }
   return 90.0f;

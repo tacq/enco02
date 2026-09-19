@@ -11,6 +11,9 @@ static const char kServoIndexHtml[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>ENCO-02 舵机调试控制台</title>
   <style>
@@ -445,7 +448,9 @@ void ServoWebServer::HandleClient() {
 }
 
 void ServoWebServer::HandleRoot() {
-  server_->sendHeader("Cache-Control", "no-cache");
+  server_->sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  server_->sendHeader("Pragma", "no-cache");
+  server_->sendHeader("Expires", "0");
   server_->send(200, "text/html", kServoIndexHtml);
 }
 
@@ -458,8 +463,8 @@ void ServoWebServer::HandleApiStatus() {
 
   char json[256];
   snprintf(json, sizeof(json),
-           "{\"servo0\":%.1f,\"servo25\":%.1f,\"servo26\":%.1f,\"ip\":\"%s\",\"heap\":%lu}",
-           a0, a25, a26, WiFi.localIP().toString().c_str(), static_cast<unsigned long>(free_heap));
+           "{\"servo0\":%.1f,\"servo25\":%.1f,\"servo26\":%.1f,\"servo15\":%.1f,\"ip\":\"%s\",\"heap\":%lu}",
+           a0, a25, a26, a26, WiFi.localIP().toString().c_str(), static_cast<unsigned long>(free_heap));
 
   server_->sendHeader("Access-Control-Allow-Origin", "*");
   server_->send(200, "application/json", json);
