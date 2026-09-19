@@ -74,7 +74,7 @@ constexpr gpio_num_t kLedPin = GPIO_NUM_2;
 constexpr gpio_num_t kDisplayBacklightPin = GPIO_NUM_NC;  // Internally pulled high
 constexpr gpio_num_t kDisplayMosiPin = GPIO_NUM_16;       // SDA
 constexpr gpio_num_t kDisplayClkPin = GPIO_NUM_17;        // SCL
-constexpr gpio_num_t kDisplayDcPin = GPIO_NUM_4;          // DC (moved from GPIO 15 to free 15 for 3rd servo)
+constexpr gpio_num_t kDisplayDcPin = GPIO_NUM_15;         // DC
 constexpr gpio_num_t kDisplayRstPin = GPIO_NUM_NC;        // Internally pulled high
 constexpr gpio_num_t kDisplayCsPin = GPIO_NUM_14;         // CS
 
@@ -621,14 +621,14 @@ void InitMcpTools() {
                     {});
 
   engine.AddMcpTool("self.servo.set_angle",
-                    "Set the rotation angle of a servo motor within hardware safe limits (Pin 0 Pitch safe: 40-120; Pin 25 Roll safe: 50-110; Pin 15 Yaw safe: 20-160).",
+                    "Set the rotation angle of a servo motor within hardware safe limits (Pin 0 Pitch safe: 40-120; Pin 25 Roll safe: 50-110; Pin 26 Yaw safe: 20-160).",
                     {
                         {
                             "pin",
                             ai_vox::ParamSchema<int64_t>{
                                 .default_value = 0,
                                 .min = 0,
-                                .max = 25,
+                                .max = 26,
                             },
                         },
                         {
@@ -642,7 +642,7 @@ void InitMcpTools() {
                     });
 
   engine.AddMcpTool("self.servo.center",
-                    "Center all 3 servo motors (Pin 0, Pin 25, Pin 15) to safe 90 degrees.",
+                    "Center all 3 servo motors (Pin 0, Pin 25, Pin 26) to safe 90 degrees.",
                     {});
 
   engine.AddMcpTool("self.servo.bobble",

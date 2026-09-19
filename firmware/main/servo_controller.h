@@ -10,7 +10,7 @@ class ServoController {
  public:
   static constexpr gpio_num_t kPinServo0 = GPIO_NUM_0;   // Servo 1: Pitch (俯仰: 抬头/低头)
   static constexpr gpio_num_t kPinServo1 = GPIO_NUM_25;  // Servo 2: Roll (偏侧: 左歪/右歪)
-  static constexpr gpio_num_t kPinServo2 = GPIO_NUM_15;  // Servo 3: Yaw (整头水平旋转: 左转/右转)
+  static constexpr gpio_num_t kPinServo2 = GPIO_NUM_26;  // Servo 3: Yaw (整头水平旋转: 左转/右转)
 
   static constexpr ledc_channel_t kChannel0 = LEDC_CHANNEL_0;
   static constexpr ledc_channel_t kChannel1 = LEDC_CHANNEL_1;
@@ -31,8 +31,8 @@ class ServoController {
   static constexpr float kServo0MaxAngle = 120.0f;        // GPIO 0 Pitch Max (低头极限)
   static constexpr float kServo1MinAngle = 50.0f;         // GPIO 25 Roll Min (左歪极限)
   static constexpr float kServo1MaxAngle = 110.0f;        // GPIO 25 Roll Max (右歪极限)
-  static constexpr float kServo2MinAngle = 20.0f;         // GPIO 15 Yaw Min (左转极限)
-  static constexpr float kServo2MaxAngle = 160.0f;        // GPIO 15 Yaw Max (右转极限)
+  static constexpr float kServo2MinAngle = 20.0f;         // GPIO 26 Yaw Min (左转极限)
+  static constexpr float kServo2MaxAngle = 160.0f;        // GPIO 26 Yaw Max (右转极限)
 
   static constexpr float kDefaultStepDeg = 10.0f;         // Default single step (10 degrees)
 
@@ -41,7 +41,7 @@ class ServoController {
   // Initialize LEDC timers, channels, and position all 3 servos to 90 degrees
   void Init();
 
-  // Set angle for a specific pin (0, 25, or 15)
+  // Set angle for a specific pin (0, 25, or 26)
   void SetAngle(int pin, float angle);
 
   // Set angle by channel index (0, 1, or 2)
@@ -49,9 +49,9 @@ class ServoController {
 
   // Set two or three angles at once
   void SetBothAngles(float angle0, float angle25);
-  void SetAllAngles(float angle0, float angle25, float angle15);
+  void SetAllAngles(float angle0, float angle25, float angle26);
 
-  // Get current angle for a pin (0, 25, or 15)
+  // Get current angle for a pin (0, 25, or 26)
   float GetAngle(int pin) const;
 
   // Center all 3 servos to 90 degrees
@@ -62,8 +62,8 @@ class ServoController {
   void LookDown(float delta_deg = kDefaultStepDeg);   // Pin 0 Pitch increases (低头, max 120)
   void TiltLeft(float delta_deg = kDefaultStepDeg);   // Pin 25 Roll decreases (向左歪头, min 50)
   void TiltRight(float delta_deg = kDefaultStepDeg);  // Pin 25 Roll increases (向右歪头, max 110)
-  void TurnLeft(float delta_deg = kDefaultStepDeg);   // Pin 15 Yaw decreases (向左转头, min 20)
-  void TurnRight(float delta_deg = kDefaultStepDeg);  // Pin 15 Yaw increases (向右转头, max 160)
+  void TurnLeft(float delta_deg = kDefaultStepDeg);   // Pin 26 Yaw decreases (向左转头, min 20)
+  void TurnRight(float delta_deg = kDefaultStepDeg);  // Pin 26 Yaw increases (向右转头, max 160)
 
   // Sweep test for calibration
   void RunSweepTest();

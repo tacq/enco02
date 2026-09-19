@@ -70,7 +70,7 @@ void ServoController::Init() {
     ESP_LOGE(TAG, "ledc_channel_config Ch1 failed: %d", err);
   }
 
-  // 4. Configure Channel 2 on GPIO 15 (Yaw: Entire Head Rotation)
+  // 4. Configure Channel 2 on GPIO 26 (Yaw: Entire Head Rotation)
   ledc_channel_config_t ch2_conf = {};
   ch2_conf.gpio_num = kPinServo2;
   ch2_conf.speed_mode = LEDC_LOW_SPEED_MODE;
@@ -115,14 +115,14 @@ void ServoController::SetAngle(int pin, float angle) {
     ledc_update_duty(LEDC_LOW_SPEED_MODE, kChannel1);
     ESP_LOGD(TAG, "Servo 1 / Roll (Pin 25) set to %.1f deg [safe: %.0f-%.0f] (duty: %u)",
              angle, kServo1MinAngle, kServo1MaxAngle, duty);
-  } else if (pin == 15 || pin == kPinServo2) {
+  } else if (pin == 26 || pin == kPinServo2) {
     if (angle < kServo2MinAngle) angle = kServo2MinAngle;
     if (angle > kServo2MaxAngle) angle = kServo2MaxAngle;
     angle_servo2_ = angle;
     uint32_t duty = AngleToDuty(angle);
     ledc_set_duty(LEDC_LOW_SPEED_MODE, kChannel2, duty);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, kChannel2);
-    ESP_LOGD(TAG, "Servo 2 / Yaw (Pin 15) set to %.1f deg [safe: %.0f-%.0f] (duty: %u)",
+    ESP_LOGD(TAG, "Servo 2 / Yaw (Pin 26) set to %.1f deg [safe: %.0f-%.0f] (duty: %u)",
              angle, kServo2MinAngle, kServo2MaxAngle, duty);
   } else {
     ESP_LOGW(TAG, "Unknown servo pin: %d", pin);
@@ -144,10 +144,10 @@ void ServoController::SetBothAngles(float angle0, float angle25) {
   SetAngle(kPinServo1, angle25);
 }
 
-void ServoController::SetAllAngles(float angle0, float angle25, float angle15) {
+void ServoController::SetAllAngles(float angle0, float angle25, float angle26) {
   SetAngle(kPinServo0, angle0);
   SetAngle(kPinServo1, angle25);
-  SetAngle(kPinServo2, angle15);
+  SetAngle(kPinServo2, angle26);
 }
 
 float ServoController::GetAngle(int pin) const {
@@ -155,7 +155,7 @@ float ServoController::GetAngle(int pin) const {
     return angle_servo0_;
   } else if (pin == 25 || pin == kPinServo1) {
     return angle_servo1_;
-  } else if (pin == 15 || pin == kPinServo2) {
+  } else if (pin == 26 || pin == kPinServo2) {
     return angle_servo2_;
   }
   return 90.0f;
@@ -281,7 +281,7 @@ void ServoController::RunHeadBobble() {
     float pitch_delta = 12.0f * cosf(4.0f * M_PI * p) * envelope;
     float pitch_angle = 90.0f + pitch_delta;
 
-    // Servo 2 (Pin 15, Yaw / Rotate): expressive rotation (safe: 72 to 108 deg)
+    // Servo 2 (Pin 26, Yaw / Rotate): expressive rotation (safe: 72 to 108 deg)
     float yaw_delta = 18.0f * sinf(4.0f * M_PI * p + (M_PI / 4.0f)) * envelope;
     float yaw_angle = 90.0f + yaw_delta;
 
