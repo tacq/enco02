@@ -74,7 +74,7 @@ constexpr gpio_num_t kLedPin = GPIO_NUM_2;
 constexpr gpio_num_t kDisplayBacklightPin = GPIO_NUM_NC;  // Internally pulled high
 constexpr gpio_num_t kDisplayMosiPin = GPIO_NUM_16;       // SDA
 constexpr gpio_num_t kDisplayClkPin = GPIO_NUM_17;        // SCL
-constexpr gpio_num_t kDisplayDcPin = GPIO_NUM_15;         // DC
+constexpr gpio_num_t kDisplayDcPin = GPIO_NUM_4;          // DC (moved from GPIO 15 to free 15 for 3rd servo)
 constexpr gpio_num_t kDisplayRstPin = GPIO_NUM_NC;        // Internally pulled high
 constexpr gpio_num_t kDisplayCsPin = GPIO_NUM_14;         // CS
 
@@ -377,78 +377,109 @@ bool ProcessVoiceMotionCommand(const std::string& text) {
     return true;
   }
 
-  auto extract_degrees = [&](size_t pos) -> float {
-    float deg = 5.0f;
-    for (size_t i = pos; i < text.length(); ++i) {
+  // Helper lambda to extract degree from speech text (e.g., "30度", "30 degrees", "30", etc.)
+  // If not specified or 0, default to 10.0f
+  auto extract_degrees = [&](size_t keyword_pos, size_t keyword_len) -> float {
+    float deg = 10.0f;
+    // Check right after the keyword first
+    size_t search_start = keyword_pos + keyword_len;
+    bool found = false;
+    for (size_t i = search_start; i < text.length(); ++i) {
       if (isdigit((unsigned char)text[i])) {
         deg = atof(&text[i]);
-        if (deg <= 0.0f) deg = 5.0f;
-        if (deg > 45.0f) deg = 45.0f;
+        found = true;
         break;
       }
     }
+    // If not found after keyword, check before keyword (e.g., "30度抬头")
+    if (!found) {
+      for (size_t i = 0; i < keyword_pos; ++i) {
+        if (isdigit((unsigned char)text[i])) {
+          deg = atof(&text[i]);
+          found = true;
+          break;
+        }
+      }
+    }
+    if (deg <= 0.0f) deg = 10.0f;
+    if (deg > 90.0f) deg = 90.0f;  // safe maximum delta
     return deg;
   };
 
-  // 3. 抬头 / Look Up (Servo 0: angle decreases by 5 degrees)
-  size_t p_up = text.find("抬头");
-  if (p_up == std::string::npos) p_up = text.find("往上看");
-  if (p_up == std::string::npos) p_up = text.find("向上看");
-  if (p_up == std::string::npos) p_up = text.find("仰头");
-  if (p_up == std::string::npos) p_up = text.find("抬高");
-  if (p_up == std::string::npos) p_up = lower.find("look up");
-  if (p_up == std::string::npos) p_up = lower.find("tilt up");
+  // Helper macro/lambda for matching keyword list
+  auto find_keyword = [&](const std::vector<std::string>& keywords, size_t& match_len) -> size_t {
+    for (const auto& kw : keywords) {
+      size_t pos = text.find(kw);
+      if (pos != std::string::npos) {
+        match_len = kw.length();
+        return pos;
+      }
+      pos = lower.find(kw);
+      if (pos != std::string::npos) {
+        match_len = kw.length();
+        return pos;
+      }
+    }
+    return std::string::npos;
+  };
+
+  // 3. 抬头 / Look Up (Servo 0: Pitch decreases)
+  size_t kw_len = 0;
+  size_t p_up = find_keyword({"抬头", "往上看", "向上看", "仰头", "抬高", "look up", "tilt up", "head up"}, kw_len);
   if (p_up != std::string::npos) {
-    float deg = extract_degrees(p_up);
+    float deg = extract_degrees(p_up, kw_len);
     printf("[Voice Motion] Recognized '抬头 / Look Up' (%.1f deg)\n", deg);
     controller.LookUp(deg);
     g_last_motion_exec_time = millis();
     return true;
   }
 
-  // 4. 低头 / Look Down (Servo 0: angle increases by 5 degrees)
-  size_t p_down = text.find("低头");
-  if (p_down == std::string::npos) p_down = text.find("往下看");
-  if (p_down == std::string::npos) p_down = text.find("向下看");
-  if (p_down == std::string::npos) p_down = text.find("俯视");
-  if (p_down == std::string::npos) p_down = lower.find("look down");
-  if (p_down == std::string::npos) p_down = lower.find("tilt down");
+  // 4. 低头 / Look Down (Servo 0: Pitch increases)
+  size_t p_down = find_keyword({"低头", "往下看", "向下看", "俯视", "look down", "tilt down", "head down"}, kw_len);
   if (p_down != std::string::npos) {
-    float deg = extract_degrees(p_down);
+    float deg = extract_degrees(p_down, kw_len);
     printf("[Voice Motion] Recognized '低头 / Look Down' (%.1f deg)\n", deg);
     controller.LookDown(deg);
     g_last_motion_exec_time = millis();
     return true;
   }
 
-  // 5. 向左歪头 / Tilt Left (Servo 1: angle decreases by 5 degrees)
-  size_t p_left = text.find("左歪");
-  if (p_left == std::string::npos) p_left = text.find("向左偏");
-  if (p_left == std::string::npos) p_left = text.find("往左偏");
-  if (p_left == std::string::npos) p_left = text.find("向左倾");
-  if (p_left == std::string::npos) p_left = text.find("左倾");
-  if (p_left == std::string::npos) p_left = lower.find("tilt left");
-  if (p_left == std::string::npos) p_left = lower.find("lean left");
-  if (p_left != std::string::npos) {
-    float deg = extract_degrees(p_left);
+  // 5. 向左歪头 / Tilt Left (Servo 1: Roll decreases)
+  size_t p_tleft = find_keyword({"向左歪", "往左歪", "左歪", "向左偏", "往左偏", "左倾", "tilt left", "lean left"}, kw_len);
+  if (p_tleft != std::string::npos) {
+    float deg = extract_degrees(p_tleft, kw_len);
     printf("[Voice Motion] Recognized '向左歪头 / Tilt Left' (%.1f deg)\n", deg);
     controller.TiltLeft(deg);
     g_last_motion_exec_time = millis();
     return true;
   }
 
-  // 6. 向右歪头 / Tilt Right (Servo 1: angle increases by 5 degrees)
-  size_t p_right = text.find("右歪");
-  if (p_right == std::string::npos) p_right = text.find("向右偏");
-  if (p_right == std::string::npos) p_right = text.find("往右偏");
-  if (p_right == std::string::npos) p_right = text.find("向右倾");
-  if (p_right == std::string::npos) p_right = text.find("右倾");
-  if (p_right == std::string::npos) p_right = lower.find("tilt right");
-  if (p_right == std::string::npos) p_right = lower.find("lean right");
-  if (p_right != std::string::npos) {
-    float deg = extract_degrees(p_right);
+  // 6. 向右歪头 / Tilt Right (Servo 1: Roll increases)
+  size_t p_tright = find_keyword({"向右歪", "往右歪", "右歪", "向右偏", "往右偏", "右倾", "tilt right", "lean right"}, kw_len);
+  if (p_tright != std::string::npos) {
+    float deg = extract_degrees(p_tright, kw_len);
     printf("[Voice Motion] Recognized '向右歪头 / Tilt Right' (%.1f deg)\n", deg);
     controller.TiltRight(deg);
+    g_last_motion_exec_time = millis();
+    return true;
+  }
+
+  // 7. 向左转头 / Turn Left (Servo 2: Yaw decreases)
+  size_t p_turnleft = find_keyword({"向左转", "往左转", "左转头", "左转", "转到左边", "看左边", "往左看", "turn left", "rotate left", "head left"}, kw_len);
+  if (p_turnleft != std::string::npos) {
+    float deg = extract_degrees(p_turnleft, kw_len);
+    printf("[Voice Motion] Recognized '向左转头 / Turn Left' (%.1f deg)\n", deg);
+    controller.TurnLeft(deg);
+    g_last_motion_exec_time = millis();
+    return true;
+  }
+
+  // 8. 向右转头 / Turn Right (Servo 2: Yaw increases)
+  size_t p_turnright = find_keyword({"向右转", "往右转", "右转头", "右转", "转到右边", "看右边", "往右看", "turn right", "rotate right", "head right"}, kw_len);
+  if (p_turnright != std::string::npos) {
+    float deg = extract_degrees(p_turnright, kw_len);
+    printf("[Voice Motion] Recognized '向右转头 / Turn Right' (%.1f deg)\n", deg);
+    controller.TurnRight(deg);
     g_last_motion_exec_time = millis();
     return true;
   }
@@ -504,67 +535,93 @@ void InitMcpTools() {
   );
 
   engine.AddMcpTool("self.head.look_up",
-                    "Make the robot look up (抬头). Default step 5 degrees. Call when user asks to look up, 抬头, 往上看, 抬起头, etc.",
+                    "Make the robot look up (抬头). Default step 10 degrees, can specify angle up to 60. Call when user asks to look up, 抬头, 往上看, 抬起头, etc.",
                     {
                         {
                             "step",
                             ai_vox::ParamSchema<int64_t>{
-                                .default_value = 5,
+                                .default_value = 10,
                                 .min = 1,
-                                .max = 30,
+                                .max = 60,
                             },
                         },
                     });
 
   engine.AddMcpTool("self.head.look_down",
-                    "Make the robot look down (低头). Default step 5 degrees. Call when user asks to look down, 低头, 往下看, 低下头, etc.",
+                    "Make the robot look down (低头). Default step 10 degrees, can specify angle up to 60. Call when user asks to look down, 低头, 往下看, 低下头, etc.",
                     {
                         {
                             "step",
                             ai_vox::ParamSchema<int64_t>{
-                                .default_value = 5,
+                                .default_value = 10,
                                 .min = 1,
-                                .max = 30,
+                                .max = 60,
                             },
                         },
                     });
 
   engine.AddMcpTool("self.head.tilt_left",
-                    "Tilt robot's head to the left (向左歪头). Default step 5 degrees. Call when user asks to tilt left, 向左歪头, 往左歪, etc.",
+                    "Tilt robot's head to the left (向左歪头). Default step 10 degrees, can specify angle up to 60. Call when user asks to tilt left, 向左歪头, 往左歪, etc.",
                     {
                         {
                             "step",
                             ai_vox::ParamSchema<int64_t>{
-                                .default_value = 5,
+                                .default_value = 10,
                                 .min = 1,
-                                .max = 30,
+                                .max = 60,
                             },
                         },
                     });
 
   engine.AddMcpTool("self.head.tilt_right",
-                    "Tilt robot's head to the right (向右歪头). Default step 5 degrees. Call when user asks to tilt right, 向右歪头, 往右歪, etc.",
+                    "Tilt robot's head to the right (向右歪头). Default step 10 degrees, can specify angle up to 60. Call when user asks to tilt right, 向右歪头, 往右歪, etc.",
                     {
                         {
                             "step",
                             ai_vox::ParamSchema<int64_t>{
-                                .default_value = 5,
+                                .default_value = 10,
                                 .min = 1,
-                                .max = 30,
+                                .max = 60,
+                            },
+                        },
+                    });
+
+  engine.AddMcpTool("self.head.turn_left",
+                    "Rotate robot's entire head to the left (向左转头). Default step 10 degrees, can specify angle up to 70. Call when user asks to turn left, rotate left, 向左转, 左转头, etc.",
+                    {
+                        {
+                            "step",
+                            ai_vox::ParamSchema<int64_t>{
+                                .default_value = 10,
+                                .min = 1,
+                                .max = 70,
+                            },
+                        },
+                    });
+
+  engine.AddMcpTool("self.head.turn_right",
+                    "Rotate robot's entire head to the right (向右转头). Default step 10 degrees, can specify angle up to 70. Call when user asks to turn right, rotate right, 向右转, 右转头, etc.",
+                    {
+                        {
+                            "step",
+                            ai_vox::ParamSchema<int64_t>{
+                                .default_value = 10,
+                                .min = 1,
+                                .max = 70,
                             },
                         },
                     });
 
   engine.AddMcpTool("self.head.bobble",
-                    "Perform a cute '摇头晃脑' (head bobble and tilt) gesture. Call when user asks to shake head, 摇头晃脑, 摇摇头, etc.",
+                    "Perform a cute '摇头晃脑' (head bobble and tilt) gesture across all 3 axes. Call when user asks to shake head, 摇头晃脑, 摇摇头, etc.",
                     {});
 
   engine.AddMcpTool("self.head.center",
-                    "Center/reset both servo motors to safe 90 degrees. Call when user asks to center head, 头摆正, 复位, 正视前方, etc.",
+                    "Center/reset all 3 servo motors to safe 90 degrees. Call when user asks to center head, 头摆正, 复位, 正视前方, etc.",
                     {});
 
   engine.AddMcpTool("self.servo.set_angle",
-                    "Set the rotation angle of a servo motor within hardware safe limits (Pin 0 Yaw safe range: 40 to 120 deg; Pin 25 Pitch safe range: 50 to 110 deg).",
+                    "Set the rotation angle of a servo motor within hardware safe limits (Pin 0 Pitch safe: 40-120; Pin 25 Roll safe: 50-110; Pin 15 Yaw safe: 20-160).",
                     {
                         {
                             "pin",
@@ -578,18 +635,18 @@ void InitMcpTools() {
                             "angle",
                             ai_vox::ParamSchema<int64_t>{
                                 .default_value = 90,
-                                .min = 40,
-                                .max = 120,
+                                .min = 20,
+                                .max = 160,
                             },
                         },
                     });
 
   engine.AddMcpTool("self.servo.center",
-                    "Center both servo motors (Pin 0 and Pin 25) to safe 90 degrees.",
+                    "Center all 3 servo motors (Pin 0, Pin 25, Pin 15) to safe 90 degrees.",
                     {});
 
   engine.AddMcpTool("self.servo.bobble",
-                    "Perform a cute '摇头晃脑' (head bobble and tilt) gesture.",
+                    "Perform a cute '摇头晃脑' (head bobble and tilt) gesture across all 3 axes.",
                     {});
 }
 }  // namespace
@@ -770,7 +827,7 @@ void loop() {
         printf("on mcp tool call: self.led.get, state: %d\n", state);
         engine.SendMcpCallResponse(mcp_tool_call_event->id, state);
       } else if ("self.head.look_up" == mcp_tool_call_event->name) {
-        float step = 5.0f;
+        float step = 10.0f;
         const auto step_ptr = mcp_tool_call_event->param<int64_t>("step");
         if (step_ptr != nullptr) step = static_cast<float>(*step_ptr);
         printf("on mcp tool call: self.head.look_up (%.1f deg)\n", step);
@@ -778,7 +835,7 @@ void loop() {
         g_last_motion_exec_time = millis();
         engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
       } else if ("self.head.look_down" == mcp_tool_call_event->name) {
-        float step = 5.0f;
+        float step = 10.0f;
         const auto step_ptr = mcp_tool_call_event->param<int64_t>("step");
         if (step_ptr != nullptr) step = static_cast<float>(*step_ptr);
         printf("on mcp tool call: self.head.look_down (%.1f deg)\n", step);
@@ -786,7 +843,7 @@ void loop() {
         g_last_motion_exec_time = millis();
         engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
       } else if ("self.head.tilt_left" == mcp_tool_call_event->name) {
-        float step = 5.0f;
+        float step = 10.0f;
         const auto step_ptr = mcp_tool_call_event->param<int64_t>("step");
         if (step_ptr != nullptr) step = static_cast<float>(*step_ptr);
         printf("on mcp tool call: self.head.tilt_left (%.1f deg)\n", step);
@@ -794,11 +851,27 @@ void loop() {
         g_last_motion_exec_time = millis();
         engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
       } else if ("self.head.tilt_right" == mcp_tool_call_event->name) {
-        float step = 5.0f;
+        float step = 10.0f;
         const auto step_ptr = mcp_tool_call_event->param<int64_t>("step");
         if (step_ptr != nullptr) step = static_cast<float>(*step_ptr);
         printf("on mcp tool call: self.head.tilt_right (%.1f deg)\n", step);
         ServoController::GetInstance().TiltRight(step);
+        g_last_motion_exec_time = millis();
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+      } else if ("self.head.turn_left" == mcp_tool_call_event->name) {
+        float step = 10.0f;
+        const auto step_ptr = mcp_tool_call_event->param<int64_t>("step");
+        if (step_ptr != nullptr) step = static_cast<float>(*step_ptr);
+        printf("on mcp tool call: self.head.turn_left (%.1f deg)\n", step);
+        ServoController::GetInstance().TurnLeft(step);
+        g_last_motion_exec_time = millis();
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+      } else if ("self.head.turn_right" == mcp_tool_call_event->name) {
+        float step = 10.0f;
+        const auto step_ptr = mcp_tool_call_event->param<int64_t>("step");
+        if (step_ptr != nullptr) step = static_cast<float>(*step_ptr);
+        printf("on mcp tool call: self.head.turn_right (%.1f deg)\n", step);
+        ServoController::GetInstance().TurnRight(step);
         g_last_motion_exec_time = millis();
         engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
       } else if ("self.head.bobble" == mcp_tool_call_event->name || "self.servo.bobble" == mcp_tool_call_event->name) {

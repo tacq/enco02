@@ -256,9 +256,35 @@ static const char kServoIndexHtml[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- Servo 2: PIN 15 -->
+    <div class="card">
+      <div class="card-title">
+        <span>📍 舵机 3：GPIO 15 (整头水平旋转 / Yaw)</span>
+        <span class="angle-val" id="val15">90°</span>
+      </div>
+      <p style="font-size:11px;color:var(--primary);margin-top:-6px;margin-bottom:8px;">安全限位：20° ~ 160° (角小向左看，角大向右看)</p>
+      <div class="slider-container">
+        <input type="range" id="slider15" min="20" max="160" value="90" oninput="onSliderInput(15, this.value)">
+        <div class="scale-labels">
+          <span>20° (向左极)</span>
+          <span>55°</span>
+          <span>90° (正视)</span>
+          <span>125°</span>
+          <span>160° (向右极)</span>
+        </div>
+      </div>
+      <div class="btn-group">
+        <button class="btn" onclick="setAngle(15, 20)">20° 左极</button>
+        <button class="btn" onclick="setAngle(15, 60)">60°</button>
+        <button class="btn" onclick="setAngle(15, 90)">90° 正视</button>
+        <button class="btn" onclick="setAngle(15, 120)">120°</button>
+        <button class="btn" onclick="setAngle(15, 160)">160° 右极</button>
+      </div>
+    </div>
+
     <!-- Quick Global Actions -->
     <div class="action-row" style="grid-template-columns: 1fr 1.2fr 1fr;">
-      <button class="btn-action primary" onclick="centerAll()">🎯 归中 (90°)</button>
+      <button class="btn-action primary" onclick="centerAll()">🎯 全部位归中 (90°)</button>
       <button class="btn-action" style="background: linear-gradient(135deg, #ec4899, #8b5cf6); border: none; box-shadow: 0 4px 15px rgba(236, 72, 153, 0.35);" onclick="runHeadBobble()">🕺 摇头晃脑</button>
       <button class="btn-action" onclick="runSweep()">🔄 巡航测试</button>
     </div>
@@ -282,6 +308,9 @@ static const char kServoIndexHtml[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       } else if (pin === 25) {
         document.getElementById('slider25').value = angle;
         document.getElementById('val25').innerText = angle + '°';
+      } else if (pin === 15) {
+        document.getElementById('slider15').value = angle;
+        document.getElementById('val15').innerText = angle + '°';
       }
     }
 
@@ -310,6 +339,7 @@ static const char kServoIndexHtml[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     function centerAll() {
       updateUiValues(0, 90);
       updateUiValues(25, 90);
+      updateUiValues(15, 90);
       fetch('/api/center').catch(e => console.error(e));
     }
 
@@ -329,6 +359,9 @@ static const char kServoIndexHtml[] PROGMEM = R"rawliteral(<!DOCTYPE html>
         .then(data => {
           updateUiValues(0, Math.round(data.servo0));
           updateUiValues(25, Math.round(data.servo25));
+          if (data.servo15 !== undefined) {
+            updateUiValues(15, Math.round(data.servo15));
+          }
           document.getElementById('info-ip').innerText = data.ip;
           document.getElementById('info-heap').innerText = Math.round(data.heap / 1024);
         })
@@ -418,12 +451,13 @@ void ServoWebServer::HandleApiStatus() {
   auto& controller = ServoController::GetInstance();
   float a0 = controller.GetAngle(0);
   float a25 = controller.GetAngle(25);
+  float a15 = controller.GetAngle(15);
   uint32_t free_heap = esp_get_free_heap_size();
 
   char json[256];
   snprintf(json, sizeof(json),
-           "{\"servo0\":%.1f,\"servo25\":%.1f,\"ip\":\"%s\",\"heap\":%lu}",
-           a0, a25, WiFi.localIP().toString().c_str(), static_cast<unsigned long>(free_heap));
+           "{\"servo0\":%.1f,\"servo25\":%.1f,\"servo15\":%.1f,\"ip\":\"%s\",\"heap\":%lu}",
+           a0, a25, a15, WiFi.localIP().toString().c_str(), static_cast<unsigned long>(free_heap));
 
   server_->sendHeader("Access-Control-Allow-Origin", "*");
   server_->send(200, "application/json", json);

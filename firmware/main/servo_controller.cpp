@@ -25,7 +25,7 @@ void ServoController::Init() {
     return;
   }
 
-  ESP_LOGI(TAG, "Initializing MG92B servos on Pin 0 (LEDC Ch0) and Pin 25 (LEDC Ch1)...");
+  ESP_LOGI(TAG, "Initializing 3x MG92B servos on Pin 0 (Pitch), Pin 25 (Roll), Pin 15 (Yaw)...");
 
   // 1. Configure LEDC Timer (50 Hz, 14-bit)
   ledc_timer_config_t timer_conf = {};
@@ -42,7 +42,7 @@ void ServoController::Init() {
 
   uint32_t default_duty = AngleToDuty(kDefaultAngle);
 
-  // 2. Configure Channel 0 on GPIO 0
+  // 2. Configure Channel 0 on GPIO 0 (Pitch)
   ledc_channel_config_t ch0_conf = {};
   ch0_conf.gpio_num = kPinServo0;
   ch0_conf.speed_mode = LEDC_LOW_SPEED_MODE;
@@ -56,7 +56,7 @@ void ServoController::Init() {
     ESP_LOGE(TAG, "ledc_channel_config Ch0 failed: %d", err);
   }
 
-  // 3. Configure Channel 1 on GPIO 25
+  // 3. Configure Channel 1 on GPIO 25 (Roll)
   ledc_channel_config_t ch1_conf = {};
   ch1_conf.gpio_num = kPinServo1;
   ch1_conf.speed_mode = LEDC_LOW_SPEED_MODE;
@@ -70,11 +70,26 @@ void ServoController::Init() {
     ESP_LOGE(TAG, "ledc_channel_config Ch1 failed: %d", err);
   }
 
+  // 4. Configure Channel 2 on GPIO 15 (Yaw: Entire Head Rotation)
+  ledc_channel_config_t ch2_conf = {};
+  ch2_conf.gpio_num = kPinServo2;
+  ch2_conf.speed_mode = LEDC_LOW_SPEED_MODE;
+  ch2_conf.channel = kChannel2;
+  ch2_conf.intr_type = LEDC_INTR_DISABLE;
+  ch2_conf.timer_sel = LEDC_TIMER_0;
+  ch2_conf.duty = default_duty;
+  ch2_conf.hpoint = 0;
+  err = ledc_channel_config(&ch2_conf);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "ledc_channel_config Ch2 failed: %d", err);
+  }
+
   angle_servo0_ = kDefaultAngle;
   angle_servo1_ = kDefaultAngle;
+  angle_servo2_ = kDefaultAngle;
   initialized_ = true;
 
-  ESP_LOGI(TAG, "Servos initialized at 90 degrees (Duty: %u)", default_duty);
+  ESP_LOGI(TAG, "All 3 servos initialized at 90 degrees (Duty: %u)", default_duty);
 }
 
 void ServoController::SetAngle(int pin, float angle) {
@@ -89,7 +104,7 @@ void ServoController::SetAngle(int pin, float angle) {
     uint32_t duty = AngleToDuty(angle);
     ledc_set_duty(LEDC_LOW_SPEED_MODE, kChannel0, duty);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, kChannel0);
-    ESP_LOGD(TAG, "Servo 0 (Pin 0) set to %.1f deg [safe: %.0f-%.0f] (duty: %u)",
+    ESP_LOGD(TAG, "Servo 0 / Pitch (Pin 0) set to %.1f deg [safe: %.0f-%.0f] (duty: %u)",
              angle, kServo0MinAngle, kServo0MaxAngle, duty);
   } else if (pin == 25 || pin == kPinServo1) {
     if (angle < kServo1MinAngle) angle = kServo1MinAngle;
@@ -98,8 +113,17 @@ void ServoController::SetAngle(int pin, float angle) {
     uint32_t duty = AngleToDuty(angle);
     ledc_set_duty(LEDC_LOW_SPEED_MODE, kChannel1, duty);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, kChannel1);
-    ESP_LOGD(TAG, "Servo 1 (Pin 25) set to %.1f deg [safe: %.0f-%.0f] (duty: %u)",
+    ESP_LOGD(TAG, "Servo 1 / Roll (Pin 25) set to %.1f deg [safe: %.0f-%.0f] (duty: %u)",
              angle, kServo1MinAngle, kServo1MaxAngle, duty);
+  } else if (pin == 15 || pin == kPinServo2) {
+    if (angle < kServo2MinAngle) angle = kServo2MinAngle;
+    if (angle > kServo2MaxAngle) angle = kServo2MaxAngle;
+    angle_servo2_ = angle;
+    uint32_t duty = AngleToDuty(angle);
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, kChannel2, duty);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, kChannel2);
+    ESP_LOGD(TAG, "Servo 2 / Yaw (Pin 15) set to %.1f deg [safe: %.0f-%.0f] (duty: %u)",
+             angle, kServo2MinAngle, kServo2MaxAngle, duty);
   } else {
     ESP_LOGW(TAG, "Unknown servo pin: %d", pin);
   }
@@ -110,6 +134,8 @@ void ServoController::SetAngleByIndex(int index, float angle) {
     SetAngle(kPinServo0, angle);
   } else if (index == 1) {
     SetAngle(kPinServo1, angle);
+  } else if (index == 2) {
+    SetAngle(kPinServo2, angle);
   }
 }
 
@@ -118,18 +144,26 @@ void ServoController::SetBothAngles(float angle0, float angle25) {
   SetAngle(kPinServo1, angle25);
 }
 
+void ServoController::SetAllAngles(float angle0, float angle25, float angle15) {
+  SetAngle(kPinServo0, angle0);
+  SetAngle(kPinServo1, angle25);
+  SetAngle(kPinServo2, angle15);
+}
+
 float ServoController::GetAngle(int pin) const {
   if (pin == 0 || pin == kPinServo0) {
     return angle_servo0_;
   } else if (pin == 25 || pin == kPinServo1) {
     return angle_servo1_;
+  } else if (pin == 15 || pin == kPinServo2) {
+    return angle_servo2_;
   }
   return 90.0f;
 }
 
 void ServoController::CenterAll() {
-  SetBothAngles(90.0f, 90.0f);
-  ESP_LOGI(TAG, "Both servos centered to 90 degrees (safe center)");
+  SetAllAngles(90.0f, 90.0f, 90.0f);
+  ESP_LOGI(TAG, "All 3 servos centered to 90 degrees (safe center)");
 }
 
 void ServoController::LookUp(float delta_deg) {
@@ -160,22 +194,38 @@ void ServoController::TiltRight(float delta_deg) {
   SetAngle(kPinServo1, target);
 }
 
+void ServoController::TurnLeft(float delta_deg) {
+  float current = GetAngle(kPinServo2);
+  float target = current - delta_deg;
+  ESP_LOGI(TAG, "TurnLeft: %.1f -> %.1f deg", current, target);
+  SetAngle(kPinServo2, target);
+}
+
+void ServoController::TurnRight(float delta_deg) {
+  float current = GetAngle(kPinServo2);
+  float target = current + delta_deg;
+  ESP_LOGI(TAG, "TurnRight: %.1f -> %.1f deg", current, target);
+  SetAngle(kPinServo2, target);
+}
+
 void ServoController::RunSweepTest() {
-  ESP_LOGI(TAG, "Starting servo sweep test within safe ranges...");
-  // 1. Move to lower safe bounds (Pin 0: 50 deg, Pin 25: 60 deg)
+  ESP_LOGI(TAG, "Starting 3-axis servo sweep test within safe ranges...");
+  // 1. Move to lower safe bounds (Pin 0: 50, Pin 25: 60, Pin 15: 45)
   for (int step = 0; step <= 30; step += 2) {
     float a0 = 90.0f - (40.0f * step / 30.0f); // 90 -> 50
     float a1 = 90.0f - (30.0f * step / 30.0f); // 90 -> 60
-    SetBothAngles(a0, a1);
+    float a2 = 90.0f - (45.0f * step / 30.0f); // 90 -> 45
+    SetAllAngles(a0, a1, a2);
     delay(20);
   }
   delay(150);
 
-  // 2. Move to upper safe bounds (Pin 0: 115 deg, Pin 25: 105 deg)
+  // 2. Move to upper safe bounds (Pin 0: 115, Pin 25: 105, Pin 15: 135)
   for (int step = 0; step <= 30; step += 2) {
     float a0 = 50.0f + (65.0f * step / 30.0f); // 50 -> 115
     float a1 = 60.0f + (45.0f * step / 30.0f); // 60 -> 105
-    SetBothAngles(a0, a1);
+    float a2 = 45.0f + (90.0f * step / 30.0f); // 45 -> 135
+    SetAllAngles(a0, a1, a2);
     delay(20);
   }
   delay(150);
@@ -184,11 +234,12 @@ void ServoController::RunSweepTest() {
   for (int step = 0; step <= 30; step += 2) {
     float a0 = 115.0f - (25.0f * step / 30.0f); // 115 -> 90
     float a1 = 105.0f - (15.0f * step / 30.0f); // 105 -> 90
-    SetBothAngles(a0, a1);
+    float a2 = 135.0f - (45.0f * step / 30.0f); // 135 -> 90
+    SetAllAngles(a0, a1, a2);
     delay(20);
   }
   CenterAll();
-  ESP_LOGI(TAG, "Servo sweep test completed at 90 degrees");
+  ESP_LOGI(TAG, "Servo 3-axis sweep test completed at 90 degrees");
 }
 
 void ServoController::TriggerHeadBobble() {
@@ -212,8 +263,8 @@ void ServoController::TriggerHeadBobble() {
 }
 
 void ServoController::RunHeadBobble() {
-  ESP_LOGI(TAG, "Executing cute '摇头晃脑' (head bobble) gesture...");
-  // 2 complete gentle cycles of combined tilt & nod
+  ESP_LOGI(TAG, "Executing cute 3-axis '摇头晃脑' (head bobble) gesture...");
+  // 2 complete gentle cycles of combined tilt, nod & rotation
   const int total_steps = 72;
   const int delay_ms = 25;
 
@@ -222,19 +273,22 @@ void ServoController::RunHeadBobble() {
     // Hanning-style smooth envelope (starts 0, peaks at middle, ends at 0)
     float envelope = sinf(M_PI * p);
 
-    // Servo 1 (Pin 25, Tilt): swings left and right (safe: 74 to 106 deg)
+    // Servo 1 (Pin 25, Roll / Tilt): swings left and right (safe: 74 to 106 deg)
     float tilt_delta = 16.0f * sinf(4.0f * M_PI * p) * envelope;
     float tilt_angle = 90.0f + tilt_delta;
 
-    // Servo 0 (Pin 0, Pitch): playful nod / lift (safe: 78 to 102 deg)
-    // Larger angle is nod down, smaller angle is head up
+    // Servo 0 (Pin 0, Pitch / Nod): playful nod / lift (safe: 78 to 102 deg)
     float pitch_delta = 12.0f * cosf(4.0f * M_PI * p) * envelope;
     float pitch_angle = 90.0f + pitch_delta;
 
-    SetBothAngles(pitch_angle, tilt_angle);
+    // Servo 2 (Pin 15, Yaw / Rotate): expressive rotation (safe: 72 to 108 deg)
+    float yaw_delta = 18.0f * sinf(4.0f * M_PI * p + (M_PI / 4.0f)) * envelope;
+    float yaw_angle = 90.0f + yaw_delta;
+
+    SetAllAngles(pitch_angle, tilt_angle, yaw_angle);
     vTaskDelay(pdMS_TO_TICKS(delay_ms));
   }
 
   CenterAll();
-  ESP_LOGI(TAG, "'摇头晃脑' gesture complete at center (90, 90)");
+  ESP_LOGI(TAG, "'摇头晃脑' 3-axis gesture complete at center (90, 90, 90)");
 }

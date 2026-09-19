@@ -8,11 +8,13 @@
 
 class ServoController {
  public:
-  static constexpr gpio_num_t kPinServo0 = GPIO_NUM_0;   // Servo 1 (e.g. Yaw / Horizontal)
-  static constexpr gpio_num_t kPinServo1 = GPIO_NUM_25;  // Servo 2 (e.g. Pitch / Vertical)
+  static constexpr gpio_num_t kPinServo0 = GPIO_NUM_0;   // Servo 1: Pitch (俯仰: 抬头/低头)
+  static constexpr gpio_num_t kPinServo1 = GPIO_NUM_25;  // Servo 2: Roll (偏侧: 左歪/右歪)
+  static constexpr gpio_num_t kPinServo2 = GPIO_NUM_15;  // Servo 3: Yaw (整头水平旋转: 左转/右转)
 
   static constexpr ledc_channel_t kChannel0 = LEDC_CHANNEL_0;
   static constexpr ledc_channel_t kChannel1 = LEDC_CHANNEL_1;
+  static constexpr ledc_channel_t kChannel2 = LEDC_CHANNEL_2;
 
   static constexpr uint32_t kPwmFreqHz = 50;              // 50Hz for standard RC servos
   static constexpr ledc_timer_bit_t kPwmResolution = LEDC_TIMER_14_BIT;
@@ -25,41 +27,48 @@ class ServoController {
   static constexpr float kDefaultAngle = 90.0f;           // Neutral center
 
   // Safe operating angle ranges
-  static constexpr float kServo0MinAngle = 40.0f;         // GPIO 0 Min safe angle
-  static constexpr float kServo0MaxAngle = 120.0f;        // GPIO 0 Max safe angle
-  static constexpr float kServo1MinAngle = 50.0f;         // GPIO 25 Min safe angle
-  static constexpr float kServo1MaxAngle = 110.0f;        // GPIO 25 Max safe angle
+  static constexpr float kServo0MinAngle = 40.0f;         // GPIO 0 Pitch Min (抬头极限)
+  static constexpr float kServo0MaxAngle = 120.0f;        // GPIO 0 Pitch Max (低头极限)
+  static constexpr float kServo1MinAngle = 50.0f;         // GPIO 25 Roll Min (左歪极限)
+  static constexpr float kServo1MaxAngle = 110.0f;        // GPIO 25 Roll Max (右歪极限)
+  static constexpr float kServo2MinAngle = 20.0f;         // GPIO 15 Yaw Min (左转极限)
+  static constexpr float kServo2MaxAngle = 160.0f;        // GPIO 15 Yaw Max (右转极限)
+
+  static constexpr float kDefaultStepDeg = 10.0f;         // Default single step (10 degrees)
 
   static ServoController& GetInstance();
 
-  // Initialize LEDC timers, channels, and position both servos to 90 degrees
+  // Initialize LEDC timers, channels, and position all 3 servos to 90 degrees
   void Init();
 
-  // Set angle (0.0 to 180.0 degrees) for a specific pin (0 or 25)
+  // Set angle for a specific pin (0, 25, or 15)
   void SetAngle(int pin, float angle);
 
-  // Set angle by channel index (0 or 1)
+  // Set angle by channel index (0, 1, or 2)
   void SetAngleByIndex(int index, float angle);
 
-  // Set both angles at once
+  // Set two or three angles at once
   void SetBothAngles(float angle0, float angle25);
+  void SetAllAngles(float angle0, float angle25, float angle15);
 
-  // Get current angle for a pin (0 or 25)
+  // Get current angle for a pin (0, 25, or 15)
   float GetAngle(int pin) const;
 
-  // Center both servos to 90 degrees
+  // Center all 3 servos to 90 degrees
   void CenterAll();
 
-  // Relative head motion methods (5 degrees by default, strictly bounded by safe limits)
-  void LookUp(float delta_deg = 5.0f);     // Pin 0 angle decreases (40 deg min)
-  void LookDown(float delta_deg = 5.0f);   // Pin 0 angle increases (120 deg max)
-  void TiltLeft(float delta_deg = 5.0f);   // Pin 25 angle decreases (50 deg min)
-  void TiltRight(float delta_deg = 5.0f);  // Pin 25 angle increases (110 deg max)
+  // Relative head motion methods (default 10 degrees, strictly bounded by safe limits)
+  void LookUp(float delta_deg = kDefaultStepDeg);     // Pin 0 Pitch decreases (抬头, min 40)
+  void LookDown(float delta_deg = kDefaultStepDeg);   // Pin 0 Pitch increases (低头, max 120)
+  void TiltLeft(float delta_deg = kDefaultStepDeg);   // Pin 25 Roll decreases (向左歪头, min 50)
+  void TiltRight(float delta_deg = kDefaultStepDeg);  // Pin 25 Roll increases (向右歪头, max 110)
+  void TurnLeft(float delta_deg = kDefaultStepDeg);   // Pin 15 Yaw decreases (向左转头, min 20)
+  void TurnRight(float delta_deg = kDefaultStepDeg);  // Pin 15 Yaw increases (向右转头, max 160)
 
   // Sweep test for calibration
   void RunSweepTest();
 
-  // Trigger cute "摇头晃脑" action (smooth tilt + nod bobble)
+  // Trigger cute "摇头晃脑" action (smooth 3-axis tilt + nod + rotate bobble)
   void TriggerHeadBobble();
   void RunHeadBobble();
   bool IsAnimating() const { return is_animating_; }
@@ -76,6 +85,7 @@ class ServoController {
   volatile bool is_animating_ = false;
   float angle_servo0_ = kDefaultAngle;
   float angle_servo1_ = kDefaultAngle;
+  float angle_servo2_ = kDefaultAngle;
 };
 
 #endif  // _SERVO_CONTROLLER_H_
