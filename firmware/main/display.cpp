@@ -199,7 +199,7 @@ void Display::Start() {
   lv_label_set_long_mode(status_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
   lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_set_style_text_color(status_label_, current_theme_.jarvis_gold, 0);
-  lv_label_set_text(status_label_, "J.A.R.V.I.S ONLINE");
+  lv_label_set_text(status_label_, "ENCO ONLINE");
 
   mute_label_ = lv_label_create(status_bar_);
   lv_label_set_text(mute_label_, "");
@@ -264,10 +264,10 @@ void Display::SetChatMessage(const Role role, const std::string& content) {
   lv_obj_set_style_border_width(msg_bubble, 1, 0);
   lv_obj_set_style_pad_all(msg_bubble, 7, 0);
 
-  // Format Sci-Fi content with Jarvis / HUD prefixes
+  // Format Sci-Fi content with Enco / HUD prefixes
   std::string formatted_content;
   if (role == Role::kAssistant) {
-    formatted_content = "◈ J.A.R.V.I.S:\n" + content;
+    formatted_content = "◈ Enco:\n" + content;
   } else if (role == Role::kUser) {
     formatted_content = "▲ PILOT:\n" + content;
   } else {
