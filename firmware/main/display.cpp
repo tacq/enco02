@@ -13,16 +13,21 @@ LV_FONT_DECLARE(font_puhui_16_4);
 LV_FONT_DECLARE(font_awesome_30_4);
 LV_FONT_DECLARE(font_awesome_16_4);
 
-// Color definitions for light theme
-#define LIGHT_BACKGROUND_COLOR lv_color_white()             // White background
-#define LIGHT_TEXT_COLOR lv_color_black()                   // Black text
-#define LIGHT_CHAT_BACKGROUND_COLOR lv_color_hex(0xE0E0E0)  // Light gray background
-#define LIGHT_USER_BUBBLE_COLOR lv_color_hex(0x95EC69)      // WeChat green
-#define LIGHT_ASSISTANT_BUBBLE_COLOR lv_color_white()       // White
-#define LIGHT_SYSTEM_BUBBLE_COLOR lv_color_hex(0xE0E0E0)    // Light gray
-#define LIGHT_SYSTEM_TEXT_COLOR lv_color_hex(0x666666)      // Dark gray text
-#define LIGHT_BORDER_COLOR lv_color_hex(0xE0E0E0)           // Light gray border
-#define LIGHT_LOW_BATTERY_COLOR lv_color_black()            // Black for light mode
+// Sci-Fi HUD Jarvis Theme Color Definitions
+#define SCI_FI_BG_COLOR lv_color_hex(0x060c14)             // Deep space holographic dark
+#define SCI_FI_TEXT_COLOR lv_color_hex(0x7dd3fc)           // Glowing cyan blue text
+#define SCI_FI_CHAT_BG_COLOR lv_color_hex(0x0a1526)        // HUD panel background
+#define SCI_FI_USER_BUBBLE_COLOR lv_color_hex(0x132a13)    // Tactical targeting green tint
+#define SCI_FI_ASSISTANT_BUBBLE_COLOR lv_color_hex(0x0c253d) // Jarvis holographic blue tint
+#define SCI_FI_SYSTEM_BUBBLE_COLOR lv_color_hex(0x1a1c29)  // Deep system telemetry slate
+#define SCI_FI_SYSTEM_TEXT_COLOR lv_color_hex(0x38bdf8)    // Cyan status text
+#define SCI_FI_BORDER_COLOR lv_color_hex(0x0284c7)         // Arc-reactor cyan border
+#define SCI_FI_LOW_BATTERY_COLOR lv_color_hex(0xef4444)    // Warning red
+#define SCI_FI_JARVIS_CYAN lv_color_hex(0x00f0ff)          // Neon arc cyan
+#define SCI_FI_JARVIS_CYAN_DIM lv_color_hex(0x0369a1)      // Dim cyan glow
+#define SCI_FI_JARVIS_GOLD lv_color_hex(0xfbbf24)          // Iron Man Stark Gold
+#define SCI_FI_USER_TEXT lv_color_hex(0x86efac)            // Bright tactical green
+#define SCI_FI_ASSISTANT_TEXT lv_color_hex(0xe0f2fe)       // Crisp hologram white-blue
 
 Display::Display(esp_lcd_panel_io_handle_t panel_io,
                  esp_lcd_panel_handle_t panel,
@@ -36,18 +41,23 @@ Display::Display(esp_lcd_panel_io_handle_t panel_io,
     : width_(width),
       height_(height),
       current_theme_{
-          .background = LIGHT_BACKGROUND_COLOR,
-          .text = LIGHT_TEXT_COLOR,
-          .chat_background = LIGHT_CHAT_BACKGROUND_COLOR,
-          .user_bubble = LIGHT_USER_BUBBLE_COLOR,
-          .assistant_bubble = LIGHT_ASSISTANT_BUBBLE_COLOR,
-          .system_bubble = LIGHT_SYSTEM_BUBBLE_COLOR,
-          .system_text = LIGHT_SYSTEM_TEXT_COLOR,
-          .border = LIGHT_BORDER_COLOR,
-          .low_battery = LIGHT_LOW_BATTERY_COLOR,
+          .background = SCI_FI_BG_COLOR,
+          .text = SCI_FI_TEXT_COLOR,
+          .chat_background = SCI_FI_CHAT_BG_COLOR,
+          .user_bubble = SCI_FI_USER_BUBBLE_COLOR,
+          .assistant_bubble = SCI_FI_ASSISTANT_BUBBLE_COLOR,
+          .system_bubble = SCI_FI_SYSTEM_BUBBLE_COLOR,
+          .system_text = SCI_FI_SYSTEM_TEXT_COLOR,
+          .border = SCI_FI_BORDER_COLOR,
+          .low_battery = SCI_FI_LOW_BATTERY_COLOR,
+          .jarvis_cyan = SCI_FI_JARVIS_CYAN,
+          .jarvis_cyan_dim = SCI_FI_JARVIS_CYAN_DIM,
+          .jarvis_gold = SCI_FI_JARVIS_GOLD,
+          .user_text = SCI_FI_USER_TEXT,
+          .assistant_text = SCI_FI_ASSISTANT_TEXT,
       } {
-  // draw white
-  std::vector<uint16_t> buffer(width_, 0xFFFF);
+  // Clear screen to deep space black initially
+  std::vector<uint16_t> buffer(width_, 0x0821);
   for (int y = 0; y < height_; y++) {
     esp_lcd_panel_draw_bitmap(panel, 0, y, width_, y + 1, buffer.data());
   }
@@ -123,21 +133,27 @@ void Display::Start() {
   lv_obj_set_style_bg_color(container_, current_theme_.background, 0);
   lv_obj_set_style_border_color(container_, current_theme_.border, 0);
 
-  /* Status bar */
+  /* Status bar - Sci-Fi Top HUD Bar */
   status_bar_ = lv_obj_create(container_);
   lv_obj_set_size(status_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
   lv_obj_set_style_radius(status_bar_, 0, 0);
-  lv_obj_set_style_bg_color(status_bar_, current_theme_.background, 0);
-  lv_obj_set_style_text_color(status_bar_, current_theme_.text, 0);
+  lv_obj_set_style_bg_color(status_bar_, lv_color_hex(0x040910), 0);
+  lv_obj_set_style_bg_opa(status_bar_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(status_bar_, 0, 0);
+  lv_obj_set_style_border_color(status_bar_, current_theme_.border, 0);
+  lv_obj_set_style_border_side(status_bar_, LV_BORDER_SIDE_BOTTOM, 0);
+  lv_obj_set_style_text_color(status_bar_, current_theme_.jarvis_cyan, 0);
 
-  /* Content - Chat area */
+  /* Content - Sci-Fi Chat area */
   content_ = lv_obj_create(container_);
   lv_obj_set_style_radius(content_, 0, 0);
   lv_obj_set_width(content_, LV_HOR_RES);
   lv_obj_set_flex_grow(content_, 1);
-  lv_obj_set_style_pad_all(content_, 10, 0);
-  lv_obj_set_style_bg_color(content_, current_theme_.chat_background, 0);  // Background for chat area
-  lv_obj_set_style_border_color(content_, current_theme_.border, 0);       // Border color for chat area
+  lv_obj_set_style_pad_all(content_, 8, 0);
+  lv_obj_set_style_bg_color(content_, current_theme_.chat_background, 0);
+  lv_obj_set_style_border_width(content_, 1, 0);
+  lv_obj_set_style_border_color(content_, current_theme_.border, 0);
+  lv_obj_set_style_border_side(content_, LV_BORDER_SIDE_TOP, 0);
 
   // Enable scrolling for chat content
   lv_obj_set_scrollbar_mode(content_, LV_SCROLLBAR_MODE_OFF);
@@ -167,14 +183,14 @@ void Display::Start() {
   // 创建emotion_label_在状态栏最左侧
   emotion_label_ = lv_label_create(status_bar_);
   lv_obj_set_style_text_font(emotion_label_, &font_awesome_30_4, 0);
-  lv_obj_set_style_text_color(emotion_label_, current_theme_.text, 0);
+  lv_obj_set_style_text_color(emotion_label_, current_theme_.jarvis_cyan, 0);
   lv_label_set_text(emotion_label_, FONT_AWESOME_AI_CHIP);
   lv_obj_set_style_margin_right(emotion_label_, 5, 0);  // 添加右边距，与后面的元素分隔
 
   notification_label_ = lv_label_create(status_bar_);
   lv_obj_set_flex_grow(notification_label_, 1);
   lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_text_color(notification_label_, current_theme_.text, 0);
+  lv_obj_set_style_text_color(notification_label_, current_theme_.jarvis_gold, 0);
   lv_label_set_text(notification_label_, "");
   lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
 
@@ -182,18 +198,18 @@ void Display::Start() {
   lv_obj_set_flex_grow(status_label_, 1);
   lv_label_set_long_mode(status_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
   lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_text_color(status_label_, current_theme_.text, 0);
-  lv_label_set_text(status_label_, "初始化");
+  lv_obj_set_style_text_color(status_label_, current_theme_.jarvis_gold, 0);
+  lv_label_set_text(status_label_, "J.A.R.V.I.S ONLINE");
 
   mute_label_ = lv_label_create(status_bar_);
   lv_label_set_text(mute_label_, "");
   lv_obj_set_style_text_font(mute_label_, &font_awesome_16_4, 0);
-  lv_obj_set_style_text_color(mute_label_, current_theme_.text, 0);
+  lv_obj_set_style_text_color(mute_label_, current_theme_.jarvis_cyan, 0);
 
   network_label_ = lv_label_create(status_bar_);
   lv_label_set_text(network_label_, "");
   lv_obj_set_style_text_font(network_label_, &font_awesome_16_4, 0);
-  lv_obj_set_style_text_color(network_label_, current_theme_.text, 0);
+  lv_obj_set_style_text_color(network_label_, current_theme_.jarvis_cyan, 0);
   lv_obj_set_style_margin_left(network_label_, 5, 0);  // 添加左边距，与前面的元素分隔
 
 #if 0
@@ -241,24 +257,33 @@ void Display::SetChatMessage(const Role role, const std::string& content) {
     }
   }
 
-  // Create a message bubble
+  // Create a Sci-Fi message bubble
   lv_obj_t* msg_bubble = lv_obj_create(content_);
-  lv_obj_set_style_radius(msg_bubble, 8, 0);
+  lv_obj_set_style_radius(msg_bubble, 4, 0);  // High-tech angular bevels
   lv_obj_set_scrollbar_mode(msg_bubble, LV_SCROLLBAR_MODE_OFF);
   lv_obj_set_style_border_width(msg_bubble, 1, 0);
-  lv_obj_set_style_border_color(msg_bubble, current_theme_.border, 0);
-  lv_obj_set_style_pad_all(msg_bubble, 8, 0);
+  lv_obj_set_style_pad_all(msg_bubble, 7, 0);
+
+  // Format Sci-Fi content with Jarvis / HUD prefixes
+  std::string formatted_content;
+  if (role == Role::kAssistant) {
+    formatted_content = "◈ J.A.R.V.I.S:\n" + content;
+  } else if (role == Role::kUser) {
+    formatted_content = "▲ PILOT:\n" + content;
+  } else {
+    formatted_content = "SYS // " + content;
+  }
 
   // Create the message text
   lv_obj_t* msg_text = lv_label_create(msg_bubble);
-  lv_label_set_text(msg_text, content.c_str());
+  lv_label_set_text(msg_text, formatted_content.c_str());
 
   // 计算文本实际宽度
-  lv_coord_t text_width = lv_txt_get_width(content.c_str(), content.size(), &font_puhui_16_4, 0);
+  lv_coord_t text_width = lv_txt_get_width(formatted_content.c_str(), formatted_content.size(), &font_puhui_16_4, 0);
 
   // 计算气泡宽度
-  lv_coord_t max_width = LV_HOR_RES * 85 / 100 - 16;  // 屏幕宽度的85%
-  lv_coord_t min_width = 20;
+  lv_coord_t max_width = LV_HOR_RES * 88 / 100 - 16;  // 屏幕宽度的88%
+  lv_coord_t min_width = 30;
   lv_coord_t bubble_width;
 
   // 确保文本宽度不小于最小宽度
@@ -266,7 +291,6 @@ void Display::SetChatMessage(const Role role, const std::string& content) {
     text_width = min_width;
   }
 
-  // 如果文本宽度小于最大宽度，使用文本宽度
   if (text_width < max_width) {
     bubble_width = text_width;
   } else {
@@ -274,98 +298,75 @@ void Display::SetChatMessage(const Role role, const std::string& content) {
   }
 
   // 设置消息文本的宽度
-  lv_obj_set_width(msg_text, bubble_width);  // 减去padding
+  lv_obj_set_width(msg_text, bubble_width);
   lv_label_set_long_mode(msg_text, LV_LABEL_LONG_WRAP);
   lv_obj_set_style_text_font(msg_text, &font_puhui_16_4, 0);
 
-  // 设置气泡宽度
+  // 设置气泡宽度与高度
   lv_obj_set_width(msg_bubble, bubble_width);
   lv_obj_set_height(msg_bubble, LV_SIZE_CONTENT);
 
-  // Set alignment and style based on message role
+  // Set Sci-Fi HUD alignment and style based on message role
   if (role == Role::kUser) {
-    // User messages are right-aligned with green background
+    // User / Pilot message: Tactical dark green tinted panel with bright green HUD border
     lv_obj_set_style_bg_color(msg_bubble, current_theme_.user_bubble, 0);
-    // Set text color for contrast
-    lv_obj_set_style_text_color(msg_text, current_theme_.text, 0);
+    lv_obj_set_style_bg_opa(msg_bubble, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(msg_bubble, lv_color_hex(0x22c55e), 0);  // Tactical HUD green border
+    lv_obj_set_style_text_color(msg_text, current_theme_.user_text, 0);
 
-    // 设置自定义属性标记气泡类型
     lv_obj_set_user_data(msg_bubble, (void*)"user");
-
-    // Set appropriate width for content
     lv_obj_set_width(msg_bubble, LV_SIZE_CONTENT);
     lv_obj_set_height(msg_bubble, LV_SIZE_CONTENT);
-
-    // Don't grow
     lv_obj_set_style_flex_grow(msg_bubble, 0, 0);
   } else if (role == Role::kAssistant) {
-    // Assistant messages are left-aligned with white background
+    // Jarvis AI message: Deep cyan holographic glass with neon arc cyan border
     lv_obj_set_style_bg_color(msg_bubble, current_theme_.assistant_bubble, 0);
-    // Set text color for contrast
-    lv_obj_set_style_text_color(msg_text, current_theme_.text, 0);
+    lv_obj_set_style_bg_opa(msg_bubble, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(msg_bubble, current_theme_.jarvis_cyan, 0);  // Glowing Arc Cyan border
+    lv_obj_set_style_text_color(msg_text, current_theme_.assistant_text, 0);
 
-    // 设置自定义属性标记气泡类型
     lv_obj_set_user_data(msg_bubble, (void*)"assistant");
-
-    // Set appropriate width for content
     lv_obj_set_width(msg_bubble, LV_SIZE_CONTENT);
     lv_obj_set_height(msg_bubble, LV_SIZE_CONTENT);
-
-    // Don't grow
     lv_obj_set_style_flex_grow(msg_bubble, 0, 0);
   } else if (role == Role::kSystem) {
-    // System messages are center-aligned with light gray background
+    // System message: Arc reactor gold / dark telemetry
     lv_obj_set_style_bg_color(msg_bubble, current_theme_.system_bubble, 0);
-    // Set text color for contrast
+    lv_obj_set_style_bg_opa(msg_bubble, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(msg_bubble, current_theme_.jarvis_gold, 0);  // Stark Gold border
     lv_obj_set_style_text_color(msg_text, current_theme_.system_text, 0);
 
-    // 设置自定义属性标记气泡类型
     lv_obj_set_user_data(msg_bubble, (void*)"system");
-
-    // Set appropriate width for content
     lv_obj_set_width(msg_bubble, LV_SIZE_CONTENT);
     lv_obj_set_height(msg_bubble, LV_SIZE_CONTENT);
-
-    // Don't grow
     lv_obj_set_style_flex_grow(msg_bubble, 0, 0);
   }
 
   // Create a full-width container for user messages to ensure right alignment
   if (role == Role::kUser) {
-    // Create a full-width container
     lv_obj_t* container = lv_obj_create(content_);
     lv_obj_set_width(container, LV_HOR_RES);
     lv_obj_set_height(container, LV_SIZE_CONTENT);
 
-    // Make container transparent and borderless
     lv_obj_set_style_bg_opa(container, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(container, 0, 0);
     lv_obj_set_style_pad_all(container, 0, 0);
 
-    // Move the message bubble into this container
     lv_obj_set_parent(msg_bubble, container);
-
-    // Right align the bubble in the container
-    lv_obj_align(msg_bubble, LV_ALIGN_RIGHT_MID, -25, 0);
-
-    // Auto-scroll to this container
+    lv_obj_align(msg_bubble, LV_ALIGN_RIGHT_MID, -18, 0);
     lv_obj_scroll_to_view_recursive(container, LV_ANIM_ON);
   } else if (role == Role::kSystem) {
-    // 为系统消息创建全宽容器以确保居中对齐
     lv_obj_t* container = lv_obj_create(content_);
     lv_obj_set_width(container, LV_HOR_RES);
     lv_obj_set_height(container, LV_SIZE_CONTENT);
 
-    // 使容器透明且无边框
     lv_obj_set_style_bg_opa(container, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(container, 0, 0);
     lv_obj_set_style_pad_all(container, 0, 0);
 
-    // 将消息气泡移入此容器
     lv_obj_set_parent(msg_bubble, container);
-
-    // 将气泡居中对齐在容器中
     lv_obj_align(msg_bubble, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_scroll_to_view_recursive(container, LV_ANIM_ON);
 
     // 自动滚动底部
     lv_obj_scroll_to_view_recursive(container, LV_ANIM_ON);

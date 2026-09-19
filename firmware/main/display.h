@@ -42,6 +42,11 @@ class Display {
     lv_color_t system_text;
     lv_color_t border;
     lv_color_t low_battery;
+    lv_color_t jarvis_cyan;
+    lv_color_t jarvis_cyan_dim;
+    lv_color_t jarvis_gold;
+    lv_color_t user_text;
+    lv_color_t assistant_text;
   };
   uint32_t width_ = 0;
   uint32_t height_ = 0;
