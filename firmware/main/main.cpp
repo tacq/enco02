@@ -535,119 +535,55 @@ void InitMcpTools() {
   );
 
   engine.AddMcpTool("self.head.look_up",
-                    "Make the robot look up (抬头). Default step 10 degrees, can specify angle up to 60. Call when user asks to look up, 抬头, 往上看, 抬起头, etc.",
+                    "Make robot look up (抬头). Default step 10 deg.",
                     {
-                        {
-                            "step",
-                            ai_vox::ParamSchema<int64_t>{
-                                .default_value = 10,
-                                .min = 1,
-                                .max = 60,
-                            },
-                        },
+                        {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
                     });
 
   engine.AddMcpTool("self.head.look_down",
-                    "Make the robot look down (低头). Default step 10 degrees, can specify angle up to 60. Call when user asks to look down, 低头, 往下看, 低下头, etc.",
+                    "Make robot look down (低头). Default step 10 deg.",
                     {
-                        {
-                            "step",
-                            ai_vox::ParamSchema<int64_t>{
-                                .default_value = 10,
-                                .min = 1,
-                                .max = 60,
-                            },
-                        },
+                        {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
                     });
 
   engine.AddMcpTool("self.head.tilt_left",
-                    "Tilt robot's head to the left (向左歪头). Default step 10 degrees, can specify angle up to 60. Call when user asks to tilt left, 向左歪头, 往左歪, etc.",
+                    "Tilt robot head left (向左歪头). Default step 10 deg.",
                     {
-                        {
-                            "step",
-                            ai_vox::ParamSchema<int64_t>{
-                                .default_value = 10,
-                                .min = 1,
-                                .max = 60,
-                            },
-                        },
+                        {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
                     });
 
   engine.AddMcpTool("self.head.tilt_right",
-                    "Tilt robot's head to the right (向右歪头). Default step 10 degrees, can specify angle up to 60. Call when user asks to tilt right, 向右歪头, 往右歪, etc.",
+                    "Tilt robot head right (向右歪头). Default step 10 deg.",
                     {
-                        {
-                            "step",
-                            ai_vox::ParamSchema<int64_t>{
-                                .default_value = 10,
-                                .min = 1,
-                                .max = 60,
-                            },
-                        },
+                        {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
                     });
 
   engine.AddMcpTool("self.head.turn_left",
-                    "Rotate robot's entire head to the left (向左转头). Default step 10 degrees, can specify angle up to 70. Call when user asks to turn left, rotate left, 向左转, 左转头, etc.",
+                    "Rotate robot head left (向左转头). Default step 10 deg.",
                     {
-                        {
-                            "step",
-                            ai_vox::ParamSchema<int64_t>{
-                                .default_value = 10,
-                                .min = 1,
-                                .max = 70,
-                            },
-                        },
+                        {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 70}},
                     });
 
   engine.AddMcpTool("self.head.turn_right",
-                    "Rotate robot's entire head to the right (向右转头). Default step 10 degrees, can specify angle up to 70. Call when user asks to turn right, rotate right, 向右转, 右转头, etc.",
+                    "Rotate robot head right (向右转头). Default step 10 deg.",
                     {
-                        {
-                            "step",
-                            ai_vox::ParamSchema<int64_t>{
-                                .default_value = 10,
-                                .min = 1,
-                                .max = 70,
-                            },
-                        },
+                        {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 70}},
                     });
 
   engine.AddMcpTool("self.head.bobble",
-                    "Perform a cute '摇头晃脑' (head bobble and tilt) gesture across all 3 axes. Call when user asks to shake head, 摇头晃脑, 摇摇头, etc.",
+                    "Cute 3-axis head bobble/shake gesture (摇头晃脑).",
                     {});
 
   engine.AddMcpTool("self.head.center",
-                    "Center/reset all 3 servo motors to safe 90 degrees. Call when user asks to center head, 头摆正, 复位, 正视前方, etc.",
+                    "Reset all 3 head servos to 90 degrees (头摆正/复位).",
                     {});
 
   engine.AddMcpTool("self.servo.set_angle",
-                    "Set the rotation angle of a servo motor within hardware safe limits (Pin 0 Pitch safe: 40-120; Pin 25 Roll safe: 50-110; Pin 26 Yaw safe: 20-160).",
+                    "Set servo angle (Pin 0/25/26, safe range: 20-160 deg).",
                     {
-                        {
-                            "pin",
-                            ai_vox::ParamSchema<int64_t>{
-                                .default_value = 0,
-                                .min = 0,
-                                .max = 26,
-                            },
-                        },
-                        {
-                            "angle",
-                            ai_vox::ParamSchema<int64_t>{
-                                .default_value = 90,
-                                .min = 20,
-                                .max = 160,
-                            },
-                        },
+                        {"pin", ai_vox::ParamSchema<int64_t>{.default_value = 0, .min = 0, .max = 26}},
+                        {"angle", ai_vox::ParamSchema<int64_t>{.default_value = 90, .min = 20, .max = 160}},
                     });
-
-  engine.AddMcpTool("self.servo.center",
-                    "Center all 3 servo motors (Pin 0, Pin 25, Pin 26) to safe 90 degrees.",
-                    {});
-
-  engine.AddMcpTool("self.servo.bobble",
-                    "Perform a cute '摇头晃脑' (head bobble and tilt) gesture across all 3 axes.",
-                    {});
 }
 }  // namespace
 

@@ -14,8 +14,15 @@ std::unique_ptr<cJSON, CjsonDeleter> ArrayMakeUnique() {
 }
 
 std::string ToString(const cJSON* const obj, const bool format) {
-  return format ? std::unique_ptr<char, CjsonFreeDeleter>(cJSON_Print(obj)).get()
-                : std::unique_ptr<char, CjsonFreeDeleter>(cJSON_PrintUnformatted(obj)).get();
+  if (obj == nullptr) {
+    return "";
+  }
+  char* raw_str = format ? cJSON_Print(obj) : cJSON_PrintUnformatted(obj);
+  if (raw_str == nullptr) {
+    return "";
+  }
+  std::unique_ptr<char, CjsonFreeDeleter> str_ptr(raw_str);
+  return std::string(str_ptr.get());
 }
 
 std::string ToString(const std::unique_ptr<cJSON, CjsonDeleter>& obj, const bool format) {

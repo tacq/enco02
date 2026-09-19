@@ -91,8 +91,8 @@ EngineImpl::EngineImpl()
       websocket_headers_{
           {"Authorization", "Bearer test-token"},
       },
-      task_queue_("AiVoxMain", 1024 * 4, tskIDLE_PRIORITY + 1),
-      network_task_queue_("AiVoxNetwork", 1024 * 4, tskIDLE_PRIORITY + 1, true) {
+      task_queue_("AiVoxMain", 1024 * 6, tskIDLE_PRIORITY + 1),
+      network_task_queue_("AiVoxNetwork", 1024 * 6, tskIDLE_PRIORITY + 1, true) {
 }
 
 EngineImpl::~EngineImpl() {

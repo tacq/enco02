@@ -20,7 +20,6 @@ struct Tool {
 
   auto ToJson() const {
     auto root_json_obj = cjson_util::MakeUnique();
-    // cJSON_AddStringToObject(root_json_obj, "name", name_.c_str());
     cJSON_AddStringToObject(root_json_obj.get(), "description", description.c_str());
 
     cJSON *input_schema_obj = cJSON_CreateObject();
@@ -31,17 +30,26 @@ struct Tool {
 
     for (const auto &[k, v] : param_schemas) {
       if (auto param_scheme = std::get_if<ParamSchema<int64_t>>(&v)) {
-        cJSON_AddItemToObject(properties_obj, k.c_str(), param_scheme->ToJson().release());
+        auto p_obj = param_scheme->ToJson();
+        if (p_obj) {
+          cJSON_AddItemToObject(properties_obj, k.c_str(), p_obj.release());
+        }
         if (!param_scheme->default_value) {
           cJSON_AddItemToArray(required_array_obj, cJSON_CreateString(k.c_str()));
         }
       } else if (auto param_scheme = std::get_if<ParamSchema<std::string>>(&v)) {
-        cJSON_AddItemToObject(properties_obj, k.c_str(), param_scheme->ToJson().release());
+        auto p_obj = param_scheme->ToJson();
+        if (p_obj) {
+          cJSON_AddItemToObject(properties_obj, k.c_str(), p_obj.release());
+        }
         if (!param_scheme->default_value) {
           cJSON_AddItemToArray(required_array_obj, cJSON_CreateString(k.c_str()));
         }
       } else if (auto param_scheme = std::get_if<ParamSchema<bool>>(&v)) {
-        cJSON_AddItemToObject(properties_obj, k.c_str(), param_scheme->ToJson().release());
+        auto p_obj = param_scheme->ToJson();
+        if (p_obj) {
+          cJSON_AddItemToObject(properties_obj, k.c_str(), p_obj.release());
+        }
         if (!param_scheme->default_value) {
           cJSON_AddItemToArray(required_array_obj, cJSON_CreateString(k.c_str()));
         }
@@ -74,9 +82,12 @@ class ToolManager {
     cJSON *tools_array_obj = cJSON_CreateArray();
 
     for (const auto &[name, tool] : tools_) {
-      auto tool_json_obj = tool.ToJson().release();
-      cJSON_AddStringToObject(tool_json_obj, "name", name.c_str());
-      cJSON_AddItemToArray(tools_array_obj, tool_json_obj);
+      auto tool_json = tool.ToJson();
+      if (tool_json) {
+        cJSON *tool_json_obj = tool_json.release();
+        cJSON_AddStringToObject(tool_json_obj, "name", name.c_str());
+        cJSON_AddItemToArray(tools_array_obj, tool_json_obj);
+      }
     }
 
     cJSON_AddItemToObject(root_json_obj.get(), "tools", tools_array_obj);
