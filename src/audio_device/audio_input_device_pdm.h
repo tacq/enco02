@@ -56,6 +56,7 @@ class PdmAudioInputDevice : public AudioInputDevice {
     sample_rate_ = 0;
   }
   size_t Read(int16_t* buffer, uint32_t samples) override {
+    if (!buffer || samples == 0) return 0;
     i2s_channel_read(i2s_rx_handle_, buffer, samples * sizeof(int16_t), nullptr, 1000);
     return samples;
   }
