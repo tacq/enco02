@@ -90,6 +90,21 @@ void ServoController::Init() {
   angle_servo2_ = kServo2DefaultAngle;
   initialized_ = true;
 
+  // Create the gesture task up front, while the heap is still empty and a contiguous block is
+  // guaranteed. The stack is a plain static buffer so this cannot fail later on.
+  if (animation_task_ == nullptr) {
+    static StaticTask_t animation_task_buffer;
+    static StackType_t animation_task_stack[kAnimationTaskStackSize];
+    animation_task_ = xTaskCreateStaticPinnedToCore(&ServoController::AnimationTaskEntry,
+                                                    "servo_anim",
+                                                    kAnimationTaskStackSize,
+                                                    this,
+                                                    3,
+                                                    animation_task_stack,
+                                                    &animation_task_buffer,
+                                                    1);
+  }
+
   ESP_LOGI(TAG, "All 3 servos initialized: Pitch 90°, Roll 90°, Yaw 70° (Front)");
 }
 
@@ -310,26 +325,31 @@ void ServoController::RunSweepTest() {
   ESP_LOGI(TAG, "Servo 3-axis sweep test completed at front center (90, 90, 70)");
 }
 
+void ServoController::AnimationTaskEntry(void* arg) {
+  static_cast<ServoController*>(arg)->AnimationTaskLoop();
+}
+
+void ServoController::AnimationTaskLoop() {
+  while (true) {
+    // Park here until a gesture is requested. Notifications coalesce, which is exactly the desired
+    // behaviour: several triggers arriving during one animation replay it at most once.
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    RunHeadBobble();
+    is_animating_ = false;
+  }
+}
+
 void ServoController::TriggerHeadBobble() {
+  if (animation_task_ == nullptr) {
+    ESP_LOGW(TAG, "Gesture task not running, ignoring head bobble trigger");
+    return;
+  }
   if (is_animating_) {
     ESP_LOGW(TAG, "Already animating, ignoring head bobble trigger");
     return;
   }
   is_animating_ = true;
-  // Use priority 3 pinned to Core 1 so audio Opus decoding and network don't cause jitter/lag
-  xTaskCreatePinnedToCore(
-      [](void* arg) {
-        auto* controller = static_cast<ServoController*>(arg);
-        controller->RunHeadBobble();
-        controller->is_animating_ = false;
-        vTaskDelete(nullptr);
-      },
-      "head_bobble",
-      3072,
-      this,
-      3,
-      nullptr,
-      1);
+  xTaskNotifyGive(animation_task_);
 }
 
 void ServoController::RunHeadBobble() {

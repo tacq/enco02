@@ -40,6 +40,8 @@ class AudioInputEngine {
   // would fragment the (very limited) internal heap until malloc() eventually returns nullptr.
   std::vector<int16_t> pcm_buffer_;
   std::vector<uint8_t> opus_buffer_;
+  // Only used when the microphone cannot run at the engine's 16kHz capture rate.
+  std::vector<int16_t> resampled_buffer_;
 };
 
 #endif

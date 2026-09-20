@@ -128,21 +128,23 @@ void AudioInputEngine::PullData(const uint32_t samples) {
 
   const int16_t *encode_src = pcm_buffer_.data();
   uint32_t encode_samples = samples;
-  FlexArray<int16_t> resampled(0);
   if (resampler_) {
-    FlexArray<int16_t> raw(samples);
-    if (!raw.data()) {
+    const size_t needed = resampler_->OutputSamplesFor(samples);
+    if (resampled_buffer_.size() < needed) {
+      resampled_buffer_.resize(needed);
+    }
+    if (resampled_buffer_.size() < needed) {
+      CLOGE("resample buffer unavailable, free heap: %u", static_cast<unsigned>(esp_get_free_heap_size()));
       task_queue_->Enqueue([this, samples]() { PullData(samples); });
       return;
     }
-    std::copy(pcm_buffer_.begin(), pcm_buffer_.begin() + samples, raw.data());
-    resampled = resampler_->Resample(std::move(raw));
-    if (!resampled.data() || resampled.size() == 0) {
+    const size_t written = resampler_->Resample(pcm_buffer_.data(), samples, resampled_buffer_.data(), resampled_buffer_.size());
+    if (written == 0) {
       task_queue_->Enqueue([this, samples]() { PullData(samples); });
       return;
     }
-    encode_src = resampled.data();
-    encode_samples = resampled.size();
+    encode_src = resampled_buffer_.data();
+    encode_samples = static_cast<uint32_t>(written);
   }
 
   const auto ret = opus_encode(opus_encoder_, encode_src, encode_samples, opus_buffer_.data(), opus_buffer_.size());

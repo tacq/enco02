@@ -35,5 +35,7 @@ class AudioOutputEngine {
   StackType_t* task_stack_ = nullptr;
   // Persistent decode scratch buffer; see ProcessData().
   std::vector<int16_t> pcm_buffer_;
+  // Persistent resample scratch buffer; only used when the device cannot run at 24kHz.
+  std::vector<int16_t> resampled_buffer_;
   const uint32_t samples_ = 0;
 };

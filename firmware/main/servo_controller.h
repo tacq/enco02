@@ -37,6 +37,10 @@ class ServoController {
 
   static constexpr float kDefaultStepDeg = 10.0f;         // Default single step (10 degrees)
 
+  // Bytes, not words: the ESP-IDF Xtensa port defines StackType_t as uint8_t. The gesture task only
+  // does float math, LEDC register writes and one ESP_LOGI, so this is generous.
+  static constexpr uint32_t kAnimationTaskStackSize = 2560;
+
   static ServoController& GetInstance();
 
   // Initialize LEDC timers, channels, and position all 3 servos to 90 degrees
@@ -86,8 +90,16 @@ class ServoController {
 
   uint32_t AngleToDuty(float angle) const;
 
+  // Gestures run on their own task so the caller (the MCP tool handler) is not blocked for the ~2s
+  // the animation takes. That task used to be created on demand, which meant asking a nearly
+  // exhausted heap for a ~3.3KB contiguous stack at the exact moment TTS playback was running. It
+  // is now created once at Init() on a statically allocated stack and parked on a notification.
+  static void AnimationTaskEntry(void* arg);
+  void AnimationTaskLoop();
+
   bool initialized_ = false;
   volatile bool is_animating_ = false;
+  TaskHandle_t animation_task_ = nullptr;
   float angle_servo0_ = kDefaultAngle;
   float angle_servo1_ = kDefaultAngle;
   float angle_servo2_ = kServo2DefaultAngle;

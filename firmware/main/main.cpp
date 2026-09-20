@@ -2,9 +2,13 @@
 #include <algorithm>
 #include <cctype>
 #include <driver/spi_common.h>
+#include <esp_debug_helpers.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_rom_sys.h>
 #include <esp_lcd_panel_io.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
 
@@ -108,14 +112,44 @@ void LogHeap(const char* stage) {
 // This firmware is built with -fno-exceptions, so a failed `operator new` goes straight to
 // std::terminate() -> abort() -> reboot with no indication of what was being allocated. Hooking the
 // allocator means any future out-of-memory condition names itself in the log instead.
+//
+// The hook runs on whatever task hit the wall, so it must not allocate: `esp_rom_printf` writes
+// straight to the UART FIFO, unlike `printf` which goes through newlib's (allocating) stdio. The
+// first few failures also dump a call stack - run the printed addresses through
+// `xtensa-esp32-elf-addr2line -pfiaC -e .pio/build/enco02_main/firmware.elf ...` to get the exact
+// caller. After that the failure is almost always the same one repeating every frame, so the log
+// collapses to a periodic one-liner instead of thousands of identical dumps.
 void OnHeapAllocFailed(size_t size, uint32_t caps, const char* function_name) {
-  printf("[heap] ALLOC FAILED: %u bytes, caps 0x%x, in %s | free: %u, largest: %u, min ever: %u\n",
-         static_cast<unsigned>(size),
-         static_cast<unsigned>(caps),
-         function_name ? function_name : "?",
-         static_cast<unsigned>(esp_get_free_heap_size()),
-         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
-         static_cast<unsigned>(esp_get_minimum_free_heap_size()));
+  static uint32_t fail_count = 0;
+  constexpr uint32_t kDetailedReports = 4;
+  constexpr uint32_t kSummaryInterval = 200;
+
+  ++fail_count;
+  const unsigned free_bytes = static_cast<unsigned>(esp_get_free_heap_size());
+  const unsigned largest = static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
+  if (fail_count > kDetailedReports) {
+    if ((fail_count % kSummaryInterval) == 0) {
+      esp_rom_printf("[heap] ALLOC FAILED x%u (same size %u) | free: %u, largest: %u\n",
+                     static_cast<unsigned>(fail_count),
+                     static_cast<unsigned>(size),
+                     free_bytes,
+                     largest);
+    }
+    return;
+  }
+
+  const char* task_name = pcTaskGetName(nullptr);
+  esp_rom_printf("[heap] ALLOC FAILED #%u: %u bytes, caps 0x%x, in %s, task '%s' | free: %u, largest: %u, min ever: %u\n",
+                 static_cast<unsigned>(fail_count),
+                 static_cast<unsigned>(size),
+                 static_cast<unsigned>(caps),
+                 function_name ? function_name : "?",
+                 task_name ? task_name : "?",
+                 free_bytes,
+                 largest,
+                 static_cast<unsigned>(esp_get_minimum_free_heap_size()));
+  esp_backtrace_print(16);
 }
 
 // The debug console (WebServer + mDNS) costs ~8.5KB of heap and an extra task. With the TLS session
@@ -192,11 +226,14 @@ void InitDisplay() {
   g_display->Start();
 }
 
+// Notification sounds are a nicety, never a reason to reboot: this used to abort() whenever the
+// decoder could not be created, which on a heap-starved board turned "play the network-connected
+// chime" into a boot loop.
 void PlayMp3(const uint8_t* data, size_t size) {
   auto ret = esp_mp3_dec_register();
   if (ret != ESP_AUDIO_ERR_OK) {
-    printf("Failed to register mp3 decoder: %d\n", ret);
-    abort();
+    printf("Failed to register mp3 decoder: %d, skipping sound\n", ret);
+    return;
   }
 
   esp_audio_simple_dec_handle_t decoder = nullptr;
@@ -207,9 +244,19 @@ void PlayMp3(const uint8_t* data, size_t size) {
   };
   ret = esp_audio_simple_dec_open(&audio_dec_cfg, &decoder);
   if (ret != ESP_AUDIO_ERR_OK) {
-    printf("Failed to open mp3 decoder: %d\n", ret);
-    abort();
+    printf("Failed to open mp3 decoder: %d, skipping sound\n", ret);
+    esp_audio_dec_unregister(ESP_AUDIO_TYPE_MP3);
+    return;
   }
+
+  uint8_t* frame_data = static_cast<uint8_t*>(malloc(4096));
+  if (frame_data == nullptr) {
+    printf("Not enough heap for the mp3 frame buffer, skipping sound\n");
+    esp_audio_simple_dec_close(decoder);
+    esp_audio_dec_unregister(ESP_AUDIO_TYPE_MP3);
+    return;
+  }
+
   g_audio_output_device->OpenOutput(16000);
 
   esp_audio_simple_dec_raw_t raw = {
@@ -220,7 +267,6 @@ void PlayMp3(const uint8_t* data, size_t size) {
       .frame_recover = ESP_AUDIO_SIMPLE_DEC_RECOVERY_NONE,
   };
 
-  uint8_t* frame_data = (uint8_t*)malloc(4096);
   esp_audio_simple_dec_out_t out_frame = {
       .buffer = frame_data,
       .len = 4096,
@@ -231,11 +277,14 @@ void PlayMp3(const uint8_t* data, size_t size) {
   while (raw.len > 0) {
     const auto ret = esp_audio_simple_dec_process(decoder, &raw, &out_frame);
     if (ret == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
-      // Handle output buffer not enough case
-      out_frame.buffer = reinterpret_cast<uint8_t*>(realloc(out_frame.buffer, out_frame.needed_size));
-      if (out_frame.buffer == nullptr) {
+      // Handle output buffer not enough case. Keep `frame_data` in sync with the live pointer,
+      // otherwise the free() below releases the stale block and leaks the new one.
+      auto* grown = static_cast<uint8_t*>(realloc(out_frame.buffer, out_frame.needed_size));
+      if (grown == nullptr) {
         break;
       }
+      frame_data = grown;
+      out_frame.buffer = grown;
       out_frame.len = out_frame.needed_size;
       continue;
     }
@@ -601,7 +650,42 @@ void setup() {
   g_display->ShowStatus("AI引擎已启动");
 }
 
+// Every task stack is DRAM permanently taken away from the heap, and on this no-PSRAM board the
+// audio engines alone hold a shared 24KB stack that was sized by guesswork. `unused` below is the
+// stack high-water mark: whatever is reported there can be handed straight back to the heap by
+// shrinking the corresponding stack constant. Only tasks that currently exist are listed, so the
+// audio rows appear while listening/speaking and disappear in between.
+void ReportMemory() {
+  static const char* const kInterestingTasks[] = {
+      "AiVoxMain",
+      "AiVoxNetwork",
+      "AudioInput",
+      "AudioOutput",
+      "servo_anim",
+      "taskLVGL",
+      "loopTask",
+      "websocket_task",
+  };
+
+  printf("[mem] free: %u, largest: %u, min ever: %u\n",
+         static_cast<unsigned>(esp_get_free_heap_size()),
+         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+         static_cast<unsigned>(esp_get_minimum_free_heap_size()));
+  for (const char* name : kInterestingTasks) {
+    const TaskHandle_t handle = xTaskGetHandle(name);
+    if (handle == nullptr) {
+      continue;
+    }
+    printf("[mem]   task %-15s unused stack: %u\n", name, static_cast<unsigned>(uxTaskGetStackHighWaterMark(handle)));
+  }
+}
+
 void loop() {
+  static uint32_t s_last_mem_report = 0;
+  if (s_last_mem_report == 0 || millis() - s_last_mem_report >= 10000) {
+    s_last_mem_report = millis();
+    ReportMemory();
+  }
 #ifdef PRINT_HEAP_INFO_INTERVAL
   static uint32_t s_print_heap_info_time = 0;
   if (s_print_heap_info_time == 0 || millis() - s_print_heap_info_time >= PRINT_HEAP_INFO_INTERVAL) {

@@ -116,13 +116,20 @@ void AudioOutputEngine::WritePcm(const int16_t* pcm, const size_t samples) {
     return;
   }
   if (resampler_) {
-    FlexArray<int16_t> input(samples);
-    if (!input.data()) {
+    // Persistent buffer for the same reason as pcm_buffer_ above: this is the per-frame hot path.
+    const size_t needed = resampler_->OutputSamplesFor(samples);
+    if (resampled_buffer_.size() < needed) {
+      resampled_buffer_.resize(needed);
+    }
+    if (resampled_buffer_.size() < needed) {
+      CLOGE("dropping frame, no memory for resample buffer");
       return;
     }
-    std::copy(pcm, pcm + samples, input.data());
-    auto resampled_pcm = resampler_->Resample(std::move(input));
-    audio_output_device_->Write(resampled_pcm.data(), resampled_pcm.size());
+    const size_t written = resampler_->Resample(pcm, samples, resampled_buffer_.data(), resampled_buffer_.size());
+    if (written == 0) {
+      return;
+    }
+    audio_output_device_->Write(resampled_buffer_.data(), written);
   } else {
     audio_output_device_->Write(pcm, samples);
   }
