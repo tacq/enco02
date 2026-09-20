@@ -34,6 +34,8 @@ class AudioInputEngine {
   struct OpusEncoder *opus_encoder_ = nullptr;
   std::unique_ptr<SilkResampler> resampler_;
   ActiveTaskQueue *task_queue_ = nullptr;
+  // Borrowed from audio_task_stack; shared with AudioOutputEngine, returned in the destructor.
+  StackType_t *task_stack_ = nullptr;
   // Persistent scratch buffers. The capture loop runs continuously, so allocating these per frame
   // would fragment the (very limited) internal heap until malloc() eventually returns nullptr.
   std::vector<int16_t> pcm_buffer_;

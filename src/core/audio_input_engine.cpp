@@ -5,6 +5,7 @@
 
 #include <algorithm>
 
+#include "audio_task_stack.h"
 #include "libopus/opus.h"
 #include "opus_codec_pool.h"
 #include "silk_resampler.h"
@@ -25,12 +26,10 @@ constexpr uint32_t kDefaultSampleRate = 16000;                   // Hz
 constexpr uint32_t kDefaultChannels = 1;                         // Mono
 constexpr size_t kMaxFrameSize = 16000 / 1000 * kFrameDuration;  // 16000 Hz * 20 ms
 
-// The Opus encoder task is created and destroyed on every listen/speak transition. Asking the heap
-// for a ~24KB contiguous block each time fails once the heap fragments (WiFi + TLS + LVGL leave
-// very little contiguous internal RAM), and xTaskCreateStatic() then aborts the whole system.
-// Reserving the stack statically makes task creation infallible and removes the churn entirely.
-constexpr uint32_t kAudioInputStackSize = 24 * 1024;  // bytes (StackType_t is uint8_t on ESP-IDF)
-alignas(16) StackType_t g_audio_input_stack[kAudioInputStackSize];
+// The capture task's stack is shared with the playback task (they are never alive at the same
+// time) and statically reserved, because asking a fragmented heap for a 24KB contiguous block
+// fails and xTaskCreateStatic() then aborts the whole system.
+constexpr uint32_t kAudioInputStackSize = audio_task_stack::kStackSize;
 }  // namespace
 
 AudioInputEngine::AudioInputEngine(std::shared_ptr<ai_vox::AudioInputDevice> audio_input_device,
@@ -52,6 +51,8 @@ AudioInputEngine::AudioInputEngine(std::shared_ptr<ai_vox::AudioInputDevice> aud
     return;
   }
 
+  // nullptr means "no shared stack available" - ActiveTaskQueue then falls back to the heap.
+  task_stack_ = audio_task_stack::Acquire();
   const uint32_t stack_size = kAudioInputStackSize;
   CLOGI();
 
@@ -67,7 +68,7 @@ AudioInputEngine::AudioInputEngine(std::shared_ptr<ai_vox::AudioInputDevice> aud
   pcm_buffer_.resize(samples_per_frame);
   opus_buffer_.resize(kMaxOpusPacketSize);
 
-  task_queue_ = new ActiveTaskQueue("AudioInput", stack_size, tskIDLE_PRIORITY + 1, false, g_audio_input_stack);
+  task_queue_ = new ActiveTaskQueue("AudioInput", stack_size, tskIDLE_PRIORITY + 1, false, task_stack_);
   task_queue_->Enqueue([this, samples_per_frame]() { PullData(samples_per_frame); });
   printf("AudioInput started, stack: %u bytes, free heap: %u, largest block: %u\n",
          static_cast<unsigned>(stack_size),
@@ -79,6 +80,9 @@ AudioInputEngine::~AudioInputEngine() {
   CLOGI();
   delete task_queue_;
   task_queue_ = nullptr;
+  // Only safe once the task above has actually been deleted.
+  audio_task_stack::Release(task_stack_);
+  task_stack_ = nullptr;
   if (opus_encoder_ != nullptr) {
     // Only ever opened when the encoder was available.
     audio_input_device_->CloseInput();

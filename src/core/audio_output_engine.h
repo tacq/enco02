@@ -30,5 +30,7 @@ class AudioOutputEngine {
   struct OpusDecoder* opus_decoder_ = nullptr;
   std::unique_ptr<SilkResampler> resampler_;
   ActiveTaskQueue* task_queue_ = nullptr;
+  // Borrowed from audio_task_stack; shared with AudioInputEngine, returned in the destructor.
+  StackType_t* task_stack_ = nullptr;
   const uint32_t samples_ = 0;
 };

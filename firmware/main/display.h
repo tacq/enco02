@@ -42,6 +42,10 @@ class Display {
   void ToggleUiMode();
   void UpdateRobotFaceEmotion(const std::string& emotion);
   void LookDirection(const char* dir);
+  // Creates the ~45 LVGL objects that make up the 2D avatar. Called lazily the first time face mode
+  // is selected, because on this no-PSRAM ESP32 those objects cost more heap than the TLS handshake
+  // can spare at boot.
+  void BuildRobotFace();
 
  private:
   struct ThemeColors {
@@ -66,7 +70,12 @@ class Display {
   lv_obj_t* container_ = nullptr;
   lv_obj_t* status_bar_ = nullptr;
 
-  UiMode ui_mode_ = UiMode::kRobotFace;  // Default to Virtual Robot Face mode
+  // Boot into the plain text conversation view. Building the 2D avatar costs >20KB of heap, which
+  // on this no-PSRAM ESP32 is exactly what the mbedTLS handshake needs to reach the xiaozhi server.
+  // Face mode is still available on demand (boot button / MCP tool / web console) and is built the
+  // first time it is selected.
+  UiMode ui_mode_ = UiMode::kChatText;
+  bool face_built_ = false;
 
   // Chat Text Mode elements (preserved!)
   lv_obj_t* content_ = nullptr;

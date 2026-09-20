@@ -1,5 +1,6 @@
 #include "audio_output_engine.h"
 
+#include "audio_task_stack.h"
 #include "flex_array/flex_array.h"
 #include "libopus/opus.h"
 #include "opus_codec_pool.h"
@@ -16,10 +17,9 @@ constexpr uint32_t kDefaultChannels = 1;
 constexpr uint32_t kDefaultDurationMs = 20;  // Duration in milliseconds
 constexpr uint32_t kDefaultFrameSize = kDefaultSampleRate / 1000 * kDefaultChannels * kDefaultDurationMs;
 
-// Statically reserved so that recreating the decoder task on every TTS response can never fail on a
-// fragmented heap. Size is in bytes (StackType_t is uint8_t on ESP-IDF).
-constexpr uint32_t kAudioOutputStackSize = 12 * 1024;
-alignas(16) StackType_t g_audio_output_stack[kAudioOutputStackSize];
+// Shared with AudioInputEngine: the engine state machine never keeps both alive at once, so one
+// statically reserved stack is enough and saves 12KB of permanently occupied internal RAM.
+constexpr uint32_t kAudioOutputStackSize = audio_task_stack::kStackSize;
 }  // namespace
 
 AudioOutputEngine::AudioOutputEngine(std::shared_ptr<ai_vox::AudioOutputDevice> audio_output_device, const uint32_t frame_duration)
@@ -41,7 +41,9 @@ AudioOutputEngine::AudioOutputEngine(std::shared_ptr<ai_vox::AudioOutputDevice> 
     resampler_ = std::make_unique<SilkResampler>(kDefaultSampleRate, audio_output_device_->output_sample_rate());
   }
 
-  task_queue_ = new ActiveTaskQueue("AudioOutput", kAudioOutputStackSize, tskIDLE_PRIORITY + 1, false, g_audio_output_stack);
+  // nullptr means "no shared stack available" - ActiveTaskQueue then falls back to the heap.
+  task_stack_ = audio_task_stack::Acquire();
+  task_queue_ = new ActiveTaskQueue("AudioOutput", kAudioOutputStackSize, tskIDLE_PRIORITY + 1, false, task_stack_);
   CLOGI("OK");
 }
 
@@ -49,6 +51,9 @@ AudioOutputEngine::~AudioOutputEngine() {
   CLOGI();
   delete task_queue_;
   task_queue_ = nullptr;
+  // Only safe once the task above has actually been deleted.
+  audio_task_stack::Release(task_stack_);
+  task_stack_ = nullptr;
   if (opus_decoder_ != nullptr) {
     audio_output_device_->CloseOutput();
   }

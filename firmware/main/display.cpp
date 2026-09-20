@@ -175,6 +175,70 @@ void Display::Start() {
     lv_obj_add_flag(content_, LV_OBJ_FLAG_HIDDEN);
   }
 
+  // The 2D avatar is ~45 LVGL objects (>20KB of heap on this no-PSRAM board). Build it only
+  // when face mode is actually selected so the TLS handshake has enough RAM at boot.
+  if (ui_mode_ == UiMode::kRobotFace) {
+    BuildRobotFace();
+  }
+
+
+  /* Status bar */
+  lv_obj_set_flex_flow(status_bar_, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_all(status_bar_, 0, 0);
+  lv_obj_set_style_border_width(status_bar_, 0, 0);
+  lv_obj_set_style_pad_column(status_bar_, 0, 0);
+  lv_obj_set_style_pad_left(status_bar_, 10, 0);
+  lv_obj_set_style_pad_right(status_bar_, 10, 0);
+  lv_obj_set_style_pad_top(status_bar_, 2, 0);
+  lv_obj_set_style_pad_bottom(status_bar_, 2, 0);
+  lv_obj_set_scrollbar_mode(status_bar_, LV_SCROLLBAR_MODE_OFF);
+  // 设置状态栏的内容垂直居中
+  lv_obj_set_flex_align(status_bar_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+  // 创建emotion_label_在状态栏最左侧
+  emotion_label_ = lv_label_create(status_bar_);
+  lv_obj_set_style_text_font(emotion_label_, &font_awesome_30_4, 0);
+  lv_obj_set_style_text_color(emotion_label_, current_theme_.jarvis_cyan, 0);
+  lv_label_set_text(emotion_label_, FONT_AWESOME_AI_CHIP);
+  lv_obj_set_style_margin_right(emotion_label_, 5, 0);  // 添加右边距，与后面的元素分隔
+
+  notification_label_ = lv_label_create(status_bar_);
+  lv_obj_set_flex_grow(notification_label_, 1);
+  lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_text_color(notification_label_, current_theme_.jarvis_gold, 0);
+  lv_label_set_text(notification_label_, "");
+  lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+
+  status_label_ = lv_label_create(status_bar_);
+  lv_obj_set_flex_grow(status_label_, 1);
+  lv_label_set_long_mode(status_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+  lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_text_color(status_label_, current_theme_.jarvis_gold, 0);
+  lv_label_set_text(status_label_, "ENCO ONLINE");
+
+  mute_label_ = lv_label_create(status_bar_);
+  lv_label_set_text(mute_label_, "");
+  lv_obj_set_style_text_font(mute_label_, &font_awesome_16_4, 0);
+  lv_obj_set_style_text_color(mute_label_, current_theme_.jarvis_cyan, 0);
+
+  network_label_ = lv_label_create(status_bar_);
+  lv_label_set_text(network_label_, "");
+  lv_obj_set_style_text_font(network_label_, &font_awesome_16_4, 0);
+  lv_obj_set_style_text_color(network_label_, current_theme_.jarvis_cyan, 0);
+  lv_obj_set_style_margin_left(network_label_, 5, 0);  // 添加左边距，与前面的元素分隔
+
+  lvgl_port_unlock();
+}
+
+// Builds the whole procedural 2D anime avatar. Split out of Start() and called lazily: on an
+// ESP32 without PSRAM these objects are the difference between a successful and a failed TLS
+// handshake at boot. Caller must already hold the LVGL lock.
+void Display::BuildRobotFace() {
+  if (face_built_) {
+    return;
+  }
+  face_built_ = true;
+
   /* Virtual 2D Anime Avatar Container (Procedural Vector Anime Girl) */
   face_container_ = lv_obj_create(container_);
   lv_obj_set_style_radius(face_container_, 0, 0);
@@ -561,53 +625,6 @@ void Display::Start() {
   blink_timer_ = lv_timer_create(OnBlinkTimer, 3500, this);
   voice_anim_timer_ = lv_timer_create(OnVoiceAnimTimer, 120, this);
   ahoge_timer_ = lv_timer_create(OnAhogeTimer, 120, this);
-
-  /* Status bar */
-  lv_obj_set_flex_flow(status_bar_, LV_FLEX_FLOW_ROW);
-  lv_obj_set_style_pad_all(status_bar_, 0, 0);
-  lv_obj_set_style_border_width(status_bar_, 0, 0);
-  lv_obj_set_style_pad_column(status_bar_, 0, 0);
-  lv_obj_set_style_pad_left(status_bar_, 10, 0);
-  lv_obj_set_style_pad_right(status_bar_, 10, 0);
-  lv_obj_set_style_pad_top(status_bar_, 2, 0);
-  lv_obj_set_style_pad_bottom(status_bar_, 2, 0);
-  lv_obj_set_scrollbar_mode(status_bar_, LV_SCROLLBAR_MODE_OFF);
-  // 设置状态栏的内容垂直居中
-  lv_obj_set_flex_align(status_bar_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-
-  // 创建emotion_label_在状态栏最左侧
-  emotion_label_ = lv_label_create(status_bar_);
-  lv_obj_set_style_text_font(emotion_label_, &font_awesome_30_4, 0);
-  lv_obj_set_style_text_color(emotion_label_, current_theme_.jarvis_cyan, 0);
-  lv_label_set_text(emotion_label_, FONT_AWESOME_AI_CHIP);
-  lv_obj_set_style_margin_right(emotion_label_, 5, 0);  // 添加右边距，与后面的元素分隔
-
-  notification_label_ = lv_label_create(status_bar_);
-  lv_obj_set_flex_grow(notification_label_, 1);
-  lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_text_color(notification_label_, current_theme_.jarvis_gold, 0);
-  lv_label_set_text(notification_label_, "");
-  lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
-
-  status_label_ = lv_label_create(status_bar_);
-  lv_obj_set_flex_grow(status_label_, 1);
-  lv_label_set_long_mode(status_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
-  lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_text_color(status_label_, current_theme_.jarvis_gold, 0);
-  lv_label_set_text(status_label_, "ENCO ONLINE");
-
-  mute_label_ = lv_label_create(status_bar_);
-  lv_label_set_text(mute_label_, "");
-  lv_obj_set_style_text_font(mute_label_, &font_awesome_16_4, 0);
-  lv_obj_set_style_text_color(mute_label_, current_theme_.jarvis_cyan, 0);
-
-  network_label_ = lv_label_create(status_bar_);
-  lv_label_set_text(network_label_, "");
-  lv_obj_set_style_text_font(network_label_, &font_awesome_16_4, 0);
-  lv_obj_set_style_text_color(network_label_, current_theme_.jarvis_cyan, 0);
-  lv_obj_set_style_margin_left(network_label_, 5, 0);  // 添加左边距，与前面的元素分隔
-
-  lvgl_port_unlock();
 }
 
 #define MAX_MESSAGES (5)
@@ -849,6 +866,18 @@ void Display::SetEmotion(const std::string& emotion) {
 
 void Display::SetUiMode(UiMode mode) {
   lvgl_port_lock(0);
+  if (mode == UiMode::kRobotFace && !face_built_) {
+    // Building the avatar needs roughly 20KB. Refuse (and stay in text mode) rather than let LVGL
+    // hand out nullptrs halfway through and take the whole device down.
+    if (esp_get_free_heap_size() < 45000) {
+      printf("[display] not enough heap for face mode (free: %u), staying in text mode\n", static_cast<unsigned>(esp_get_free_heap_size()));
+      lvgl_port_unlock();
+      return;
+    }
+    BuildRobotFace();
+    printf("[display] face built, free heap: %u\n", static_cast<unsigned>(esp_get_free_heap_size()));
+  }
+
   ui_mode_ = mode;
   if (ui_mode_ == UiMode::kRobotFace) {
     if (content_) lv_obj_add_flag(content_, LV_OBJ_FLAG_HIDDEN);

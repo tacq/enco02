@@ -94,6 +94,28 @@ auto g_observer = std::make_shared<ai_vox::Observer>();
 auto g_audio_output_device = std::make_shared<ai_vox::AudioOutputDeviceI2sStd>(kSpeakerPinSck, kSpeakerPinWs, kSpeakerPinSd);
 button_handle_t g_button_boot_handle = nullptr;
 
+// Every boot stage is traced so we can see exactly where the internal RAM goes. The mbedTLS
+// handshake to api.tenclass.net needs roughly 40KB free with a >16KB contiguous block; if the log
+// shows less than that at "engine starting", the connection will fail with ESP_ERR_HTTP_CONNECT.
+void LogHeap(const char* stage) {
+  printf("[heap] %-22s free: %6u  largest: %6u\n",
+         stage,
+         static_cast<unsigned>(esp_get_free_heap_size()),
+         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
+}
+
+// The debug console (WebServer + mDNS) is started only after the device has reached the cloud, so
+// that it cannot steal the RAM the TLS handshake needs.
+void EnsureDebugServerStarted() {
+  static bool started = false;
+  if (started) {
+    return;
+  }
+  started = true;
+  ServoWebServer::GetInstance().Start();
+  LogHeap("debug server started");
+}
+
 void InitDisplay() {
   printf("init display\n");
   if (kDisplayBacklightPin != GPIO_NUM_NC) {
@@ -339,8 +361,11 @@ void ConfigureWifi() {
   g_display->SetChatMessage(Display::Role::kSystem, conn_msg);
   PlayMp3(kNetworkConnectedMp3, sizeof(kNetworkConnectedMp3));
 
-  // Start Servo Web Server and mDNS (http://enco02.local / http://<ip>/)
-  ServoWebServer::GetInstance().Start();
+  // NOTE: the servo web server + mDNS responder are deliberately NOT started here. They cost an
+  // extra task and several KB of heap, and the mbedTLS handshake that follows (OTA config fetch,
+  // then the WebSocket) needs every byte it can get on this no-PSRAM ESP32. They are started from
+  // loop() once the device has successfully reached the cloud - see EnsureDebugServerStarted().
+  LogHeap("wifi connected");
 }
 
 uint32_t g_last_motion_exec_time = 0;
@@ -484,11 +509,14 @@ void setup() {
   };
 
   ESP_ERROR_CHECK(iot_button_new_gpio_device(&btn_cfg, &gpio_cfg, &g_button_boot_handle));
+  LogHeap("after button");
 
   InitDisplay();
+  LogHeap("after display+lvgl");
   g_display->ShowStatus("初始化");
   ConfigureWifi();
   InitMcpTools();
+  LogHeap("after mcp tools");
 
 #if AUDIO_INPUT_DEVICE_TYPE == AUDIO_INPUT_DEVICE_TYPE_I2S_STD
   auto audio_input_device = std::make_shared<ai_vox::AudioInputDeviceI2sStd>(kMicPinSck, kMicPinWs, kMicPinSd);
@@ -504,10 +532,12 @@ void setup() {
                                 });
   printf("engine starting\n");
   g_display->ShowStatus("AI引擎启动中");
+  LogHeap("before engine start");
 
   ai_vox_engine.Start(audio_input_device, g_audio_output_device);
 
   printf("engine started\n");
+  LogHeap("after engine start");
 
   ESP_ERROR_CHECK(iot_button_register_cb(
       g_button_boot_handle,
@@ -572,12 +602,16 @@ void loop() {
         }
         case ai_vox::ChatState::kLoadingFailed: {
           printf("Loading failed, please retry\n");
+          // Almost always an out-of-memory failure in the mbedTLS handshake rather than a network
+          // problem, so record how much heap was actually available.
+          LogHeap("protocol load FAILED");
           g_display->ShowStatus("加载协议失败，请重试");
           break;
         }
         case ai_vox::ChatState::kStandby: {
           printf("Standby -> auto advance to connect & listen\n");
           g_display->ShowStatus("待命");
+          LogHeap("standby");
           // Automatically advance to connect and start listening without requiring button press
           engine.Advance();
           break;
@@ -590,6 +624,10 @@ void loop() {
         case ai_vox::ChatState::kListening: {
           printf("Listening...\n");
           g_display->ShowStatus("聆听中");
+          LogHeap("listening");
+          // The cloud session is up, so the handshake peak is behind us: it is now safe to bring up
+          // the debug console (http://enco02.local) without starving the TLS connection.
+          EnsureDebugServerStarted();
           break;
         }
         case ai_vox::ChatState::kSpeaking: {
