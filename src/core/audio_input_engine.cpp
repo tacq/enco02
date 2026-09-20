@@ -1,5 +1,9 @@
 #include "audio_input_engine.h"
 
+#include <esp_system.h>
+
+#include <algorithm>
+
 #include "libopus/opus.h"
 #include "silk_resampler.h"
 
@@ -31,12 +35,14 @@ AudioInputEngine::AudioInputEngine(std::shared_ptr<ai_vox::AudioInputDevice> aud
     return;
   }
 
-  uint32_t stack_size = 8 * 1024;
+  // Stack depth is expressed in BYTES (ESP-IDF FreeRTOS port semantics).
+  // Measured peak usage of opus_encode() at complexity 0 is ~18KB, so 24KB leaves a safe margin.
+  uint32_t stack_size = 32 * 1024;
   opus_encoder_ctl(opus_encoder_, OPUS_SET_DTX(0));
   if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0) {
     opus_encoder_ctl(opus_encoder_, OPUS_SET_COMPLEXITY(0));
     opus_encoder_ctl(opus_encoder_, OPUS_SET_BITRATE(8000));
-    stack_size = 6 * 1024;  // 6K words = 24KB stack (Peak Opus usage ~16.5KB, saving 57KB of internal RAM!)
+    stack_size = 24 * 1024;
   } else {
     opus_encoder_ctl(opus_encoder_, OPUS_SET_COMPLEXITY(5));
   }
@@ -49,9 +55,17 @@ AudioInputEngine::AudioInputEngine(std::shared_ptr<ai_vox::AudioInputDevice> aud
     resampler_ = std::make_unique<SilkResampler>(audio_input_device_->input_sample_rate(), kDefaultSampleRate);
   }
   CLOGI();
+
+  const uint32_t samples_per_frame = audio_input_device_->input_sample_rate() / 1000 * frame_duration;
+  pcm_buffer_.resize(samples_per_frame);
+  opus_buffer_.resize(kMaxOpusPacketSize);
+
   task_queue_ = new ActiveTaskQueue("AudioInput", stack_size, tskIDLE_PRIORITY + 1);
-  task_queue_->Enqueue([this, samples = audio_input_device_->input_sample_rate() / 1000 * frame_duration]() { PullData(samples); });
-  CLOGI("OK");
+  task_queue_->Enqueue([this, samples_per_frame]() { PullData(samples_per_frame); });
+  printf("AudioInput started, stack: %u bytes, free heap: %u, largest block: %u\n",
+         static_cast<unsigned>(stack_size),
+         static_cast<unsigned>(esp_get_free_heap_size()),
+         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
 }
 
 AudioInputEngine::~AudioInputEngine() {
@@ -76,38 +90,55 @@ FlexArray<int16_t> AudioInputEngine::ReadPcm(const uint32_t samples) {
   }
 }
 
-// FlexArray<int16_t> AudioInputEngine::Resample(FlexArray<int16_t> &&input_pcm) {
-//   if (silk_resampler_ == nullptr) {
-//     return input_pcm;
-//   }
-
-//   FlexArray<int16_t> resampled_pcm(input_pcm.size() * kDefaultSampleRate / audio_input_device_->input_sample_rate());
-//   const auto ret =
-//       silk_resampler(reinterpret_cast<silk_resampler_state_struct *>(silk_resampler_), resampled_pcm.data(), input_pcm.data(), input_pcm.size());
-//   if (ret != 0) {
-//     CLOGE("silk_resampler_process failed with: %d", ret);
-//     abort();
-//   }
-//   return resampled_pcm;
-// }
-
 void AudioInputEngine::PullData(const uint32_t samples) {
-  auto pcm = ReadPcm(samples);
-  if (!pcm.data() || pcm.size() == 0) {
-    CLOGE("Memory allocation failed for audio pcm buffer");
+  // Reuse persistent buffers: the capture loop runs ~17 times per second forever, so per-frame
+  // malloc()/free() would steadily fragment the heap until an allocation returns nullptr and the
+  // null pointer gets handed to opus_encode() (StoreProhibited crash).
+  if (pcm_buffer_.size() != samples) {
+    pcm_buffer_.resize(samples);
+  }
+  if (opus_buffer_.size() != kMaxOpusPacketSize) {
+    opus_buffer_.resize(kMaxOpusPacketSize);
+  }
+
+  if (pcm_buffer_.empty() || opus_buffer_.empty()) {
+    CLOGE("audio scratch buffers unavailable, free heap: %u", static_cast<unsigned>(esp_get_free_heap_size()));
     task_queue_->Enqueue([this, samples]() { PullData(samples); });
     return;
   }
-  FlexArray<uint8_t> data(kMaxOpusPacketSize);
-  if (!data.data() || data.size() == 0) {
-    CLOGE("Memory allocation failed for audio opus data buffer");
-    task_queue_->Enqueue([this, samples]() { PullData(samples); });
-    return;
+
+  audio_input_device_->Read(pcm_buffer_.data(), samples);
+
+  const int16_t *encode_src = pcm_buffer_.data();
+  uint32_t encode_samples = samples;
+  FlexArray<int16_t> resampled(0);
+  if (resampler_) {
+    FlexArray<int16_t> raw(samples);
+    if (!raw.data()) {
+      task_queue_->Enqueue([this, samples]() { PullData(samples); });
+      return;
+    }
+    std::copy(pcm_buffer_.begin(), pcm_buffer_.begin() + samples, raw.data());
+    resampled = resampler_->Resample(std::move(raw));
+    if (!resampled.data() || resampled.size() == 0) {
+      task_queue_->Enqueue([this, samples]() { PullData(samples); });
+      return;
+    }
+    encode_src = resampled.data();
+    encode_samples = resampled.size();
   }
-  const auto ret = opus_encode(opus_encoder_, pcm.data(), pcm.size(), data.data(), data.size());
+
+  const auto ret = opus_encode(opus_encoder_, encode_src, encode_samples, opus_buffer_.data(), opus_buffer_.size());
   if (ret > 0) {
-    data.Resize(ret);
-    handler_(std::move(data));
+    // Only the compressed payload (typically ~60 bytes) is allocated, instead of the full 1500 byte
+    // worst-case packet buffer.
+    FlexArray<uint8_t> packet(static_cast<size_t>(ret));
+    if (packet.data() != nullptr) {
+      std::copy(opus_buffer_.begin(), opus_buffer_.begin() + ret, packet.data());
+      handler_(std::move(packet));
+    } else {
+      CLOGE("dropping frame, free heap: %u", static_cast<unsigned>(esp_get_free_heap_size()));
+    }
   } else {
     CLOGE("opus_encode failed with: %d", ret);
   }

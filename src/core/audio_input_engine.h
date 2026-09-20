@@ -5,6 +5,7 @@
 
 #include <functional>
 #include <memory>
+#include <vector>
 
 #include "audio_device//audio_input_device.h"
 #include "components/task_queue/active_task_queue.h"
@@ -33,6 +34,10 @@ class AudioInputEngine {
   struct OpusEncoder *opus_encoder_ = nullptr;
   std::unique_ptr<SilkResampler> resampler_;
   ActiveTaskQueue *task_queue_ = nullptr;
+  // Persistent scratch buffers. The capture loop runs continuously, so allocating these per frame
+  // would fragment the (very limited) internal heap until malloc() eventually returns nullptr.
+  std::vector<int16_t> pcm_buffer_;
+  std::vector<uint8_t> opus_buffer_;
 };
 
 #endif

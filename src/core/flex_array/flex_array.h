@@ -26,6 +26,19 @@ class FlexArray {
     other.size_ = 0;
   }
 
+  FlexArray& operator=(FlexArray&& other) noexcept {
+    if (this != &other) {
+      if (buffer_ != nullptr) {
+        std::free(buffer_);
+      }
+      buffer_ = other.buffer_;
+      size_ = other.size_;
+      other.buffer_ = nullptr;
+      other.size_ = 0;
+    }
+    return *this;
+  }
+
   ~FlexArray() {
     if (buffer_ != nullptr) {
       std::free(buffer_);

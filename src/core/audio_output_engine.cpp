@@ -29,7 +29,8 @@ AudioOutputEngine::AudioOutputEngine(std::shared_ptr<ai_vox::AudioOutputDevice> 
     resampler_ = std::make_unique<SilkResampler>(kDefaultSampleRate, audio_output_device_->output_sample_rate());
   }
 
-  uint32_t stack_size = (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0) ? (5 * 1024) : (9 << 10);
+  // Stack depth is expressed in BYTES (ESP-IDF FreeRTOS port semantics).
+  uint32_t stack_size = 12 * 1024;
   task_queue_ = new ActiveTaskQueue("AudioOutput", stack_size, tskIDLE_PRIORITY + 1);
   CLOGI("OK");
 }
@@ -43,6 +44,12 @@ AudioOutputEngine::~AudioOutputEngine() {
 }
 
 void AudioOutputEngine::Write(FlexArray<uint8_t>&& data) {
+  // Without PSRAM the heap is tiny. If the decoder cannot keep up with the incoming TTS stream the
+  // queue would grow without bound, each entry holding a heap buffer, until malloc() fails.
+  if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0 && task_queue_->size() > 12) {
+    CLOGW("audio output backlog too deep, dropping frame");
+    return;
+  }
   task_queue_->Enqueue([this, data = std::move(data)]() mutable { ProcessData(std::move(data)); });
 }
 
@@ -51,7 +58,15 @@ void AudioOutputEngine::NotifyDataEnd(std::function<void()>&& callback) {
 }
 
 void AudioOutputEngine::ProcessData(FlexArray<uint8_t>&& data) {
+  if (!data.data() || data.size() == 0) {
+    return;
+  }
+
   auto pcm = FlexArray<int16_t>(samples_);
+  if (!pcm.data() || pcm.size() == 0) {
+    CLOGE("dropping frame, no memory for decode buffer");
+    return;
+  }
 
   const auto ret = opus_decode(opus_decoder_, data.data(), data.size(), pcm.data(), pcm.size(), 0);
   if (ret >= 0) {

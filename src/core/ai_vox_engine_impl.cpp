@@ -91,8 +91,10 @@ EngineImpl::EngineImpl()
       websocket_headers_{
           {"Authorization", "Bearer test-token"},
       },
-      task_queue_("AiVoxMain", 1024 * 6, tskIDLE_PRIORITY + 1),
-      network_task_queue_("AiVoxNetwork", 1024 * 6, tskIDLE_PRIORITY + 1, false) {
+      // Stack depths are expressed in BYTES (ESP-IDF FreeRTOS port semantics).
+      // AiVoxNetwork performs the HTTPS/TLS handshake, which needs generous headroom.
+      task_queue_("AiVoxMain", 8 * 1024, tskIDLE_PRIORITY + 1),
+      network_task_queue_("AiVoxNetwork", 10 * 1024, tskIDLE_PRIORITY + 1, false) {
 }
 
 EngineImpl::~EngineImpl() {

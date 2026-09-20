@@ -22,14 +22,17 @@
 
 class ActiveTaskQueue {
  public:
+  // NOTE: In ESP-IDF's FreeRTOS port, `xTaskCreateStatic()`'s `ulStackDepth` argument is expressed in
+  // BYTES (unlike vanilla FreeRTOS, which uses words). The stack buffer must therefore be exactly
+  // `stack_depth` bytes. Allocating `stack_depth * sizeof(StackType_t)` wasted 75% of every task stack.
   ActiveTaskQueue(const std::string& name, const uint32_t stack_depth, UBaseType_t priority, const bool internal_memory = false)
       :
 #if TASK_QUEUE_DEBUG
         name_(name),
 #endif
         stack_buffer_(static_cast<StackType_t*>(internal_memory
-                                                    ? heap_caps_malloc(stack_depth * sizeof(StackType_t), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL)
-                                                    : heap_caps_malloc(stack_depth * sizeof(StackType_t), MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT))),
+                                                    ? heap_caps_malloc(stack_depth, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL)
+                                                    : heap_caps_malloc(stack_depth, MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT))),
         task_handle_(xTaskCreateStatic(&Loop, name.c_str(), stack_depth, this, priority, stack_buffer_, &task_buffer_)) {
     assert(stack_buffer_ != nullptr && task_handle_ != nullptr);
     if (stack_buffer_ == nullptr || task_handle_ == nullptr) {
