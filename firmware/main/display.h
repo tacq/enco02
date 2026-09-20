@@ -84,17 +84,49 @@ class Display {
   lv_obj_t* eye_box_ = nullptr;
   lv_obj_t* eye_left_ = nullptr;
   lv_obj_t* eye_right_ = nullptr;
+  lv_obj_t* iris_left_ = nullptr;
+  lv_obj_t* iris_right_ = nullptr;
   lv_obj_t* pupil_left_ = nullptr;
   lv_obj_t* pupil_right_ = nullptr;
+  lv_obj_t* sparkle1_left_ = nullptr;
+  lv_obj_t* sparkle1_right_ = nullptr;
+  lv_obj_t* sparkle2_left_ = nullptr;
+  lv_obj_t* sparkle2_right_ = nullptr;
+  lv_obj_t* iris_glow_left_ = nullptr;
+  lv_obj_t* iris_glow_right_ = nullptr;
+  lv_obj_t* eyelash_left_ = nullptr;
+  lv_obj_t* eyelash_right_ = nullptr;
+  lv_obj_t* eyebrow_left_ = nullptr;
+  lv_obj_t* eyebrow_right_ = nullptr;
+
+  lv_obj_t* ahoge_ = nullptr;
+  lv_obj_t* hair_bang_center_ = nullptr;
+  lv_obj_t* hair_bang_left_ = nullptr;
+  lv_obj_t* hair_bang_right_ = nullptr;
+  lv_obj_t* hair_shine_ = nullptr;
+  lv_obj_t* hair_clip_ = nullptr;
+  lv_obj_t* side_hair_left_ = nullptr;
+  lv_obj_t* side_hair_right_ = nullptr;
+
   lv_obj_t* blush_left_ = nullptr;
   lv_obj_t* blush_right_ = nullptr;
+  lv_obj_t* blush_lines_left_ = nullptr;
+  lv_obj_t* blush_lines_right_ = nullptr;
+
   lv_obj_t* mouth_box_ = nullptr;
-  lv_obj_t* wave_bars_[5] = {nullptr};
+  lv_obj_t* mouth_smile_ = nullptr;
+  lv_obj_t* anime_mouth_ = nullptr;
+  lv_obj_t* mouth_tooth_ = nullptr;
+  lv_obj_t* mouth_tongue_ = nullptr;
+
+  lv_obj_t* emote_badge_ = nullptr;
+
   lv_obj_t* subtitle_box_ = nullptr;
   lv_obj_t* subtitle_label_ = nullptr;
 
   lv_timer_t* blink_timer_ = nullptr;
   lv_timer_t* voice_anim_timer_ = nullptr;
+  lv_timer_t* ahoge_timer_ = nullptr;
 
   std::string current_emotion_ = "neutral";
   bool is_speaking_ = false;
@@ -104,6 +136,7 @@ class Display {
 
   static void OnBlinkTimer(lv_timer_t* timer);
   static void OnVoiceAnimTimer(lv_timer_t* timer);
+  static void OnAhogeTimer(lv_timer_t* timer);
 
   ThemeColors current_theme_;
 };

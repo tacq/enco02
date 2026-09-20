@@ -1,6 +1,7 @@
 #include <esp_log.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <vector>
@@ -173,16 +174,18 @@ void Display::Start() {
     lv_obj_add_flag(content_, LV_OBJ_FLAG_HIDDEN);
   }
 
-  /* Virtual Robot Face Container (Default New Interaction Way) */
+  /* Virtual 2D Anime Avatar Container (Procedural Vector Anime Girl) */
   face_container_ = lv_obj_create(container_);
   lv_obj_set_style_radius(face_container_, 0, 0);
   lv_obj_set_width(face_container_, LV_HOR_RES);
   lv_obj_set_flex_grow(face_container_, 1);
   lv_obj_set_style_pad_all(face_container_, 0, 0);
-  lv_obj_set_style_bg_color(face_container_, lv_color_hex(0x050912), 0);
+  lv_obj_set_style_bg_color(face_container_, lv_color_hex(0x0a0c18), 0);
+  lv_obj_set_style_bg_grad_color(face_container_, lv_color_hex(0x191630), 0);
+  lv_obj_set_style_bg_grad_dir(face_container_, LV_GRAD_DIR_VER, 0);
   lv_obj_set_style_bg_opa(face_container_, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(face_container_, 1, 0);
-  lv_obj_set_style_border_color(face_container_, current_theme_.border, 0);
+  lv_obj_set_style_border_color(face_container_, lv_color_hex(0x38bdf8), 0);
   lv_obj_set_style_border_side(face_container_, LV_BORDER_SIDE_TOP, 0);
   lv_obj_set_scrollbar_mode(face_container_, LV_SCROLLBAR_MODE_OFF);
 
@@ -190,123 +193,383 @@ void Display::Start() {
     lv_obj_add_flag(face_container_, LV_OBJ_FLAG_HIDDEN);
   }
 
-  // 1. Eye Area Container
+  // 1. Anime Hairstyle Layer (Back hair / Side strands 姬发)
+  side_hair_left_ = lv_obj_create(face_container_);
+  lv_obj_set_size(side_hair_left_, 10, 130);
+  lv_obj_align(side_hair_left_, LV_ALIGN_TOP_LEFT, 6, 26);
+  lv_obj_set_style_radius(side_hair_left_, 5, 0);
+  lv_obj_set_style_bg_color(side_hair_left_, lv_color_hex(0x1e293b), 0);
+  lv_obj_set_style_bg_opa(side_hair_left_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(side_hair_left_, 0, 0);
+  lv_obj_set_scrollbar_mode(side_hair_left_, LV_SCROLLBAR_MODE_OFF);
+
+  side_hair_right_ = lv_obj_create(face_container_);
+  lv_obj_set_size(side_hair_right_, 10, 130);
+  lv_obj_align(side_hair_right_, LV_ALIGN_TOP_RIGHT, -6, 26);
+  lv_obj_set_style_radius(side_hair_right_, 5, 0);
+  lv_obj_set_style_bg_color(side_hair_right_, lv_color_hex(0x1e293b), 0);
+  lv_obj_set_style_bg_opa(side_hair_right_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(side_hair_right_, 0, 0);
+  lv_obj_set_scrollbar_mode(side_hair_right_, LV_SCROLLBAR_MODE_OFF);
+
+  // 2. Ahoge (呆毛 - 顶端动态自然摇曳)
+  ahoge_ = lv_obj_create(face_container_);
+  lv_obj_set_size(ahoge_, 14, 30);
+  lv_obj_align(ahoge_, LV_ALIGN_TOP_MID, 0, 2);
+  lv_obj_set_style_radius(ahoge_, 7, 0);
+  lv_obj_set_style_bg_color(ahoge_, lv_color_hex(0x475569), 0);
+  lv_obj_set_style_bg_opa(ahoge_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(ahoge_, 0, 0);
+  lv_obj_set_style_transform_pivot_x(ahoge_, 7, 0);
+  lv_obj_set_style_transform_pivot_y(ahoge_, 28, 0);
+  lv_obj_set_scrollbar_mode(ahoge_, LV_SCROLLBAR_MODE_OFF);
+
+  // 3. Eyebrows (灵动眉毛 - 可倾斜表达情绪)
+  eyebrow_left_ = lv_obj_create(face_container_);
+  lv_obj_set_size(eyebrow_left_, 32, 5);
+  lv_obj_align(eyebrow_left_, LV_ALIGN_TOP_MID, -46, 46);
+  lv_obj_set_style_radius(eyebrow_left_, 2, 0);
+  lv_obj_set_style_bg_color(eyebrow_left_, lv_color_hex(0x64748b), 0);
+  lv_obj_set_style_bg_opa(eyebrow_left_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(eyebrow_left_, 0, 0);
+  lv_obj_set_style_transform_pivot_x(eyebrow_left_, 16, 0);
+  lv_obj_set_style_transform_pivot_y(eyebrow_left_, 2, 0);
+  lv_obj_set_scrollbar_mode(eyebrow_left_, LV_SCROLLBAR_MODE_OFF);
+
+  eyebrow_right_ = lv_obj_create(face_container_);
+  lv_obj_set_size(eyebrow_right_, 32, 5);
+  lv_obj_align(eyebrow_right_, LV_ALIGN_TOP_MID, 46, 46);
+  lv_obj_set_style_radius(eyebrow_right_, 2, 0);
+  lv_obj_set_style_bg_color(eyebrow_right_, lv_color_hex(0x64748b), 0);
+  lv_obj_set_style_bg_opa(eyebrow_right_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(eyebrow_right_, 0, 0);
+  lv_obj_set_style_transform_pivot_x(eyebrow_right_, 16, 0);
+  lv_obj_set_style_transform_pivot_y(eyebrow_right_, 2, 0);
+  lv_obj_set_scrollbar_mode(eyebrow_right_, LV_SCROLLBAR_MODE_OFF);
+
+  // 4. Expressive Anime Eyes (二次元五层矢量大眼睛)
   eye_box_ = lv_obj_create(face_container_);
-  lv_obj_set_size(eye_box_, 200, 110);
-  lv_obj_align(eye_box_, LV_ALIGN_TOP_MID, 0, 26);
+  lv_obj_set_size(eye_box_, 210, 96);
+  lv_obj_align(eye_box_, LV_ALIGN_TOP_MID, 0, 56);
   lv_obj_set_style_bg_opa(eye_box_, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(eye_box_, 0, 0);
   lv_obj_set_style_pad_all(eye_box_, 0, 0);
   lv_obj_set_scrollbar_mode(eye_box_, LV_SCROLLBAR_MODE_OFF);
 
-  // Left Eye (Capsule)
+  // Left Eye Sclera (眼白)
   eye_left_ = lv_obj_create(eye_box_);
   lv_obj_set_size(eye_left_, current_eye_width_, current_eye_height_);
-  lv_obj_align(eye_left_, LV_ALIGN_CENTER, -44, 0);
-  lv_obj_set_style_radius(eye_left_, 24, 0);
-  lv_obj_set_style_bg_color(eye_left_, current_theme_.jarvis_cyan, 0);
+  lv_obj_align(eye_left_, LV_ALIGN_CENTER, -46, 0);
+  lv_obj_set_style_radius(eye_left_, 25, 0);
+  lv_obj_set_style_bg_color(eye_left_, lv_color_hex(0xffffff), 0);
   lv_obj_set_style_bg_opa(eye_left_, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(eye_left_, 2, 0);
-  lv_obj_set_style_border_color(eye_left_, lv_color_hex(0x7dd3fc), 0);
+  lv_obj_set_style_border_color(eye_left_, lv_color_hex(0x0f172a), 0);
+  lv_obj_set_style_clip_corner(eye_left_, true, 0);
   lv_obj_set_style_pad_all(eye_left_, 0, 0);
   lv_obj_set_scrollbar_mode(eye_left_, LV_SCROLLBAR_MODE_OFF);
 
-  // Specular Highlight Left
-  pupil_left_ = lv_obj_create(eye_left_);
-  lv_obj_set_size(pupil_left_, 14, 14);
-  lv_obj_align(pupil_left_, LV_ALIGN_TOP_RIGHT, -4, 6);
-  lv_obj_set_style_radius(pupil_left_, 7, 0);
-  lv_obj_set_style_bg_color(pupil_left_, lv_color_white(), 0);
-  lv_obj_set_style_bg_opa(pupil_left_, LV_OPA_80, 0);
+  // Left Iris (深度渐变虹膜)
+  iris_left_ = lv_obj_create(eye_left_);
+  lv_obj_set_size(iris_left_, 44, 62);
+  lv_obj_align(iris_left_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_style_radius(iris_left_, 22, 0);
+  lv_obj_set_style_bg_color(iris_left_, lv_color_hex(0x0f172a), 0);
+  lv_obj_set_style_bg_grad_color(iris_left_, lv_color_hex(0x06b6d4), 0);
+  lv_obj_set_style_bg_grad_dir(iris_left_, LV_GRAD_DIR_VER, 0);
+  lv_obj_set_style_bg_opa(iris_left_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(iris_left_, 0, 0);
+  lv_obj_set_style_pad_all(iris_left_, 0, 0);
+  lv_obj_set_scrollbar_mode(iris_left_, LV_SCROLLBAR_MODE_OFF);
+
+  // Left Pupil (深色瞳孔)
+  pupil_left_ = lv_obj_create(iris_left_);
+  lv_obj_set_size(pupil_left_, 18, 24);
+  lv_obj_align(pupil_left_, LV_ALIGN_CENTER, 0, -2);
+  lv_obj_set_style_radius(pupil_left_, 9, 0);
+  lv_obj_set_style_bg_color(pupil_left_, lv_color_hex(0x020617), 0);
+  lv_obj_set_style_bg_opa(pupil_left_, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(pupil_left_, 0, 0);
   lv_obj_set_scrollbar_mode(pupil_left_, LV_SCROLLBAR_MODE_OFF);
 
-  // Right Eye (Capsule)
+  // Left Sparkle 1 (主高光)
+  sparkle1_left_ = lv_obj_create(iris_left_);
+  lv_obj_set_size(sparkle1_left_, 12, 12);
+  lv_obj_align(sparkle1_left_, LV_ALIGN_TOP_LEFT, 5, 5);
+  lv_obj_set_style_radius(sparkle1_left_, 6, 0);
+  lv_obj_set_style_bg_color(sparkle1_left_, lv_color_white(), 0);
+  lv_obj_set_style_bg_opa(sparkle1_left_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(sparkle1_left_, 0, 0);
+  lv_obj_set_scrollbar_mode(sparkle1_left_, LV_SCROLLBAR_MODE_OFF);
+
+  // Left Sparkle 2 (次高光)
+  sparkle2_left_ = lv_obj_create(iris_left_);
+  lv_obj_set_size(sparkle2_left_, 6, 6);
+  lv_obj_align(sparkle2_left_, LV_ALIGN_BOTTOM_RIGHT, -7, -9);
+  lv_obj_set_style_radius(sparkle2_left_, 3, 0);
+  lv_obj_set_style_bg_color(sparkle2_left_, lv_color_white(), 0);
+  lv_obj_set_style_bg_opa(sparkle2_left_, LV_OPA_80, 0);
+  lv_obj_set_style_border_width(sparkle2_left_, 0, 0);
+  lv_obj_set_scrollbar_mode(sparkle2_left_, LV_SCROLLBAR_MODE_OFF);
+
+  // Left Iris Glow (底部虹膜月牙透光)
+  iris_glow_left_ = lv_obj_create(iris_left_);
+  lv_obj_set_size(iris_glow_left_, 26, 8);
+  lv_obj_align(iris_glow_left_, LV_ALIGN_BOTTOM_MID, 0, -2);
+  lv_obj_set_style_radius(iris_glow_left_, 4, 0);
+  lv_obj_set_style_bg_color(iris_glow_left_, lv_color_hex(0xa5f3fc), 0);
+  lv_obj_set_style_bg_opa(iris_glow_left_, LV_OPA_70, 0);
+  lv_obj_set_style_border_width(iris_glow_left_, 0, 0);
+  lv_obj_set_scrollbar_mode(iris_glow_left_, LV_SCROLLBAR_MODE_OFF);
+
+  // Left Upper Eyelash (上眼睫毛上挑外展)
+  eyelash_left_ = lv_obj_create(eye_box_);
+  lv_obj_set_size(eyelash_left_, 58, 6);
+  lv_obj_align(eyelash_left_, LV_ALIGN_CENTER, -46, -34);
+  lv_obj_set_style_radius(eyelash_left_, 3, 0);
+  lv_obj_set_style_bg_color(eyelash_left_, lv_color_hex(0x0f172a), 0);
+  lv_obj_set_style_bg_opa(eyelash_left_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(eyelash_left_, 0, 0);
+  lv_obj_set_scrollbar_mode(eyelash_left_, LV_SCROLLBAR_MODE_OFF);
+
+  // Right Eye Sclera (眼白)
   eye_right_ = lv_obj_create(eye_box_);
   lv_obj_set_size(eye_right_, current_eye_width_, current_eye_height_);
-  lv_obj_align(eye_right_, LV_ALIGN_CENTER, 44, 0);
-  lv_obj_set_style_radius(eye_right_, 24, 0);
-  lv_obj_set_style_bg_color(eye_right_, current_theme_.jarvis_cyan, 0);
+  lv_obj_align(eye_right_, LV_ALIGN_CENTER, 46, 0);
+  lv_obj_set_style_radius(eye_right_, 25, 0);
+  lv_obj_set_style_bg_color(eye_right_, lv_color_hex(0xffffff), 0);
   lv_obj_set_style_bg_opa(eye_right_, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(eye_right_, 2, 0);
-  lv_obj_set_style_border_color(eye_right_, lv_color_hex(0x7dd3fc), 0);
+  lv_obj_set_style_border_color(eye_right_, lv_color_hex(0x0f172a), 0);
+  lv_obj_set_style_clip_corner(eye_right_, true, 0);
   lv_obj_set_style_pad_all(eye_right_, 0, 0);
   lv_obj_set_scrollbar_mode(eye_right_, LV_SCROLLBAR_MODE_OFF);
 
-  // Specular Highlight Right
-  pupil_right_ = lv_obj_create(eye_right_);
-  lv_obj_set_size(pupil_right_, 14, 14);
-  lv_obj_align(pupil_right_, LV_ALIGN_TOP_RIGHT, -4, 6);
-  lv_obj_set_style_radius(pupil_right_, 7, 0);
-  lv_obj_set_style_bg_color(pupil_right_, lv_color_white(), 0);
-  lv_obj_set_style_bg_opa(pupil_right_, LV_OPA_80, 0);
+  // Right Iris (深度渐变虹膜)
+  iris_right_ = lv_obj_create(eye_right_);
+  lv_obj_set_size(iris_right_, 44, 62);
+  lv_obj_align(iris_right_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_style_radius(iris_right_, 22, 0);
+  lv_obj_set_style_bg_color(iris_right_, lv_color_hex(0x0f172a), 0);
+  lv_obj_set_style_bg_grad_color(iris_right_, lv_color_hex(0x06b6d4), 0);
+  lv_obj_set_style_bg_grad_dir(iris_right_, LV_GRAD_DIR_VER, 0);
+  lv_obj_set_style_bg_opa(iris_right_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(iris_right_, 0, 0);
+  lv_obj_set_style_pad_all(iris_right_, 0, 0);
+  lv_obj_set_scrollbar_mode(iris_right_, LV_SCROLLBAR_MODE_OFF);
+
+  // Right Pupil (深色瞳孔)
+  pupil_right_ = lv_obj_create(iris_right_);
+  lv_obj_set_size(pupil_right_, 18, 24);
+  lv_obj_align(pupil_right_, LV_ALIGN_CENTER, 0, -2);
+  lv_obj_set_style_radius(pupil_right_, 9, 0);
+  lv_obj_set_style_bg_color(pupil_right_, lv_color_hex(0x020617), 0);
+  lv_obj_set_style_bg_opa(pupil_right_, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(pupil_right_, 0, 0);
   lv_obj_set_scrollbar_mode(pupil_right_, LV_SCROLLBAR_MODE_OFF);
 
-  // Left Blush
-  blush_left_ = lv_obj_create(eye_box_);
-  lv_obj_set_size(blush_left_, 26, 10);
-  lv_obj_align(blush_left_, LV_ALIGN_CENTER, -44, 48);
-  lv_obj_set_style_radius(blush_left_, 5, 0);
-  lv_obj_set_style_bg_color(blush_left_, lv_color_hex(0xf43f5e), 0);
-  lv_obj_set_style_bg_opa(blush_left_, LV_OPA_70, 0);
+  // Right Sparkle 1 (主高光)
+  sparkle1_right_ = lv_obj_create(iris_right_);
+  lv_obj_set_size(sparkle1_right_, 12, 12);
+  lv_obj_align(sparkle1_right_, LV_ALIGN_TOP_LEFT, 5, 5);
+  lv_obj_set_style_radius(sparkle1_right_, 6, 0);
+  lv_obj_set_style_bg_color(sparkle1_right_, lv_color_white(), 0);
+  lv_obj_set_style_bg_opa(sparkle1_right_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(sparkle1_right_, 0, 0);
+  lv_obj_set_scrollbar_mode(sparkle1_right_, LV_SCROLLBAR_MODE_OFF);
+
+  // Right Sparkle 2 (次高光)
+  sparkle2_right_ = lv_obj_create(iris_right_);
+  lv_obj_set_size(sparkle2_right_, 6, 6);
+  lv_obj_align(sparkle2_right_, LV_ALIGN_BOTTOM_RIGHT, -7, -9);
+  lv_obj_set_style_radius(sparkle2_right_, 3, 0);
+  lv_obj_set_style_bg_color(sparkle2_right_, lv_color_white(), 0);
+  lv_obj_set_style_bg_opa(sparkle2_right_, LV_OPA_80, 0);
+  lv_obj_set_style_border_width(sparkle2_right_, 0, 0);
+  lv_obj_set_scrollbar_mode(sparkle2_right_, LV_SCROLLBAR_MODE_OFF);
+
+  // Right Iris Glow (底部虹膜月牙透光)
+  iris_glow_right_ = lv_obj_create(iris_right_);
+  lv_obj_set_size(iris_glow_right_, 26, 8);
+  lv_obj_align(iris_glow_right_, LV_ALIGN_BOTTOM_MID, 0, -2);
+  lv_obj_set_style_radius(iris_glow_right_, 4, 0);
+  lv_obj_set_style_bg_color(iris_glow_right_, lv_color_hex(0xa5f3fc), 0);
+  lv_obj_set_style_bg_opa(iris_glow_right_, LV_OPA_70, 0);
+  lv_obj_set_style_border_width(iris_glow_right_, 0, 0);
+  lv_obj_set_scrollbar_mode(iris_glow_right_, LV_SCROLLBAR_MODE_OFF);
+
+  // Right Upper Eyelash (上眼睫毛上挑外展)
+  eyelash_right_ = lv_obj_create(eye_box_);
+  lv_obj_set_size(eyelash_right_, 58, 6);
+  lv_obj_align(eyelash_right_, LV_ALIGN_CENTER, 46, -34);
+  lv_obj_set_style_radius(eyelash_right_, 3, 0);
+  lv_obj_set_style_bg_color(eyelash_right_, lv_color_hex(0x0f172a), 0);
+  lv_obj_set_style_bg_opa(eyelash_right_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(eyelash_right_, 0, 0);
+  lv_obj_set_scrollbar_mode(eyelash_right_, LV_SCROLLBAR_MODE_OFF);
+
+  // 5. Hair Bangs & Accessories (Overhead Front Layer 前刘海与发夹)
+  hair_bang_left_ = lv_obj_create(face_container_);
+  lv_obj_set_size(hair_bang_left_, 48, 24);
+  lv_obj_align(hair_bang_left_, LV_ALIGN_TOP_MID, -42, 12);
+  lv_obj_set_style_radius(hair_bang_left_, 12, 0);
+  lv_obj_set_style_bg_color(hair_bang_left_, lv_color_hex(0x283347), 0);
+  lv_obj_set_style_bg_opa(hair_bang_left_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(hair_bang_left_, 0, 0);
+  lv_obj_set_scrollbar_mode(hair_bang_left_, LV_SCROLLBAR_MODE_OFF);
+
+  hair_bang_right_ = lv_obj_create(face_container_);
+  lv_obj_set_size(hair_bang_right_, 48, 24);
+  lv_obj_align(hair_bang_right_, LV_ALIGN_TOP_MID, 42, 12);
+  lv_obj_set_style_radius(hair_bang_right_, 12, 0);
+  lv_obj_set_style_bg_color(hair_bang_right_, lv_color_hex(0x283347), 0);
+  lv_obj_set_style_bg_opa(hair_bang_right_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(hair_bang_right_, 0, 0);
+  lv_obj_set_scrollbar_mode(hair_bang_right_, LV_SCROLLBAR_MODE_OFF);
+
+  hair_bang_center_ = lv_obj_create(face_container_);
+  lv_obj_set_size(hair_bang_center_, 42, 28);
+  lv_obj_align(hair_bang_center_, LV_ALIGN_TOP_MID, 0, 14);
+  lv_obj_set_style_radius(hair_bang_center_, 14, 0);
+  lv_obj_set_style_bg_color(hair_bang_center_, lv_color_hex(0x334155), 0);
+  lv_obj_set_style_bg_opa(hair_bang_center_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(hair_bang_center_, 0, 0);
+  lv_obj_set_scrollbar_mode(hair_bang_center_, LV_SCROLLBAR_MODE_OFF);
+
+  // Hair Gloss Shine (高光发丝光环)
+  hair_shine_ = lv_obj_create(face_container_);
+  lv_obj_set_size(hair_shine_, 70, 4);
+  lv_obj_align(hair_shine_, LV_ALIGN_TOP_MID, 0, 18);
+  lv_obj_set_style_radius(hair_shine_, 2, 0);
+  lv_obj_set_style_bg_color(hair_shine_, lv_color_hex(0x818cf8), 0);
+  lv_obj_set_style_bg_opa(hair_shine_, LV_OPA_70, 0);
+  lv_obj_set_style_border_width(hair_shine_, 0, 0);
+  lv_obj_set_scrollbar_mode(hair_shine_, LV_SCROLLBAR_MODE_OFF);
+
+  // Hair Clip (红色发夹装饰)
+  hair_clip_ = lv_obj_create(face_container_);
+  lv_obj_set_size(hair_clip_, 16, 7);
+  lv_obj_align(hair_clip_, LV_ALIGN_TOP_MID, 54, 18);
+  lv_obj_set_style_radius(hair_clip_, 3, 0);
+  lv_obj_set_style_bg_color(hair_clip_, lv_color_hex(0xf43f5e), 0);
+  lv_obj_set_style_bg_opa(hair_clip_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(hair_clip_, 0, 0);
+  lv_obj_set_scrollbar_mode(hair_clip_, LV_SCROLLBAR_MODE_OFF);
+
+  // 6. Cheeks & Blush (软萌粉色腮红与斜线)
+  blush_left_ = lv_obj_create(face_container_);
+  lv_obj_set_size(blush_left_, 34, 14);
+  lv_obj_align(blush_left_, LV_ALIGN_TOP_MID, -48, 134);
+  lv_obj_set_style_radius(blush_left_, 7, 0);
+  lv_obj_set_style_bg_color(blush_left_, lv_color_hex(0xfb7185), 0);
+  lv_obj_set_style_bg_opa(blush_left_, LV_OPA_60, 0);
   lv_obj_set_style_border_width(blush_left_, 0, 0);
-  lv_obj_add_flag(blush_left_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_scrollbar_mode(blush_left_, LV_SCROLLBAR_MODE_OFF);
 
-  // Right Blush
-  blush_right_ = lv_obj_create(eye_box_);
-  lv_obj_set_size(blush_right_, 26, 10);
-  lv_obj_align(blush_right_, LV_ALIGN_CENTER, 44, 48);
-  lv_obj_set_style_radius(blush_right_, 5, 0);
-  lv_obj_set_style_bg_color(blush_right_, lv_color_hex(0xf43f5e), 0);
-  lv_obj_set_style_bg_opa(blush_right_, LV_OPA_70, 0);
+  blush_lines_left_ = lv_label_create(blush_left_);
+  lv_label_set_text(blush_lines_left_, "///");
+  lv_obj_align(blush_lines_left_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_style_text_color(blush_lines_left_, lv_color_hex(0xe11d48), 0);
+  lv_obj_set_style_text_opa(blush_lines_left_, LV_OPA_80, 0);
+
+  blush_right_ = lv_obj_create(face_container_);
+  lv_obj_set_size(blush_right_, 34, 14);
+  lv_obj_align(blush_right_, LV_ALIGN_TOP_MID, 48, 134);
+  lv_obj_set_style_radius(blush_right_, 7, 0);
+  lv_obj_set_style_bg_color(blush_right_, lv_color_hex(0xfb7185), 0);
+  lv_obj_set_style_bg_opa(blush_right_, LV_OPA_60, 0);
   lv_obj_set_style_border_width(blush_right_, 0, 0);
-  lv_obj_add_flag(blush_right_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_scrollbar_mode(blush_right_, LV_SCROLLBAR_MODE_OFF);
 
-  // 2. Mouth / Voice Waveform Area
+  blush_lines_right_ = lv_label_create(blush_right_);
+  lv_label_set_text(blush_lines_right_, "///");
+  lv_obj_align(blush_lines_right_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_style_text_color(blush_lines_right_, lv_color_hex(0xe11d48), 0);
+  lv_obj_set_style_text_opa(blush_lines_right_, LV_OPA_80, 0);
+
+  // 7. Mouth Area (甜美微笑弧度 & 实时张嘴对口型动画)
   mouth_box_ = lv_obj_create(face_container_);
-  lv_obj_set_size(mouth_box_, 100, 32);
-  lv_obj_align(mouth_box_, LV_ALIGN_TOP_MID, 0, 150);
+  lv_obj_set_size(mouth_box_, 60, 36);
+  lv_obj_align(mouth_box_, LV_ALIGN_TOP_MID, 0, 154);
   lv_obj_set_style_bg_opa(mouth_box_, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(mouth_box_, 0, 0);
   lv_obj_set_style_pad_all(mouth_box_, 0, 0);
   lv_obj_set_scrollbar_mode(mouth_box_, LV_SCROLLBAR_MODE_OFF);
 
-  const int bar_x_offsets[5] = {-24, -12, 0, 12, 24};
-  for (int i = 0; i < 5; ++i) {
-    wave_bars_[i] = lv_obj_create(mouth_box_);
-    lv_obj_set_size(wave_bars_[i], 6, 6);
-    lv_obj_align(wave_bars_[i], LV_ALIGN_CENTER, bar_x_offsets[i], 0);
-    lv_obj_set_style_radius(wave_bars_[i], 3, 0);
-    lv_obj_set_style_bg_color(wave_bars_[i], current_theme_.jarvis_cyan, 0);
-    lv_obj_set_style_bg_opa(wave_bars_[i], LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(wave_bars_[i], 0, 0);
-    lv_obj_set_scrollbar_mode(wave_bars_[i], LV_SCROLLBAR_MODE_OFF);
-  }
+  // Idle Smile Arc
+  mouth_smile_ = lv_obj_create(mouth_box_);
+  lv_obj_set_size(mouth_smile_, 18, 10);
+  lv_obj_align(mouth_smile_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_style_radius(mouth_smile_, 9, 0);
+  lv_obj_set_style_bg_opa(mouth_smile_, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(mouth_smile_, 2, 0);
+  lv_obj_set_style_border_color(mouth_smile_, lv_color_hex(0xf43f5e), 0);
+  lv_obj_set_style_border_side(mouth_smile_, LV_BORDER_SIDE_BOTTOM, 0);
+  lv_obj_set_scrollbar_mode(mouth_smile_, LV_SCROLLBAR_MODE_OFF);
 
-  // 3. Bottom Subtitle Banner
+  // Talking Open Anime Mouth
+  anime_mouth_ = lv_obj_create(mouth_box_);
+  lv_obj_set_size(anime_mouth_, 22, 18);
+  lv_obj_align(anime_mouth_, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_style_radius(anime_mouth_, 9, 0);
+  lv_obj_set_style_bg_color(anime_mouth_, lv_color_hex(0x4c0519), 0);
+  lv_obj_set_style_bg_opa(anime_mouth_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(anime_mouth_, 0, 0);
+  lv_obj_set_style_clip_corner(anime_mouth_, true, 0);
+  lv_obj_set_style_pad_all(anime_mouth_, 0, 0);
+  lv_obj_set_scrollbar_mode(anime_mouth_, LV_SCROLLBAR_MODE_OFF);
+  lv_obj_add_flag(anime_mouth_, LV_OBJ_FLAG_HIDDEN);
+
+  // Upper tooth inside open mouth
+  mouth_tooth_ = lv_obj_create(anime_mouth_);
+  lv_obj_set_size(mouth_tooth_, 12, 4);
+  lv_obj_align(mouth_tooth_, LV_ALIGN_TOP_MID, 0, 0);
+  lv_obj_set_style_radius(mouth_tooth_, 2, 0);
+  lv_obj_set_style_bg_color(mouth_tooth_, lv_color_white(), 0);
+  lv_obj_set_style_bg_opa(mouth_tooth_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(mouth_tooth_, 0, 0);
+  lv_obj_set_scrollbar_mode(mouth_tooth_, LV_SCROLLBAR_MODE_OFF);
+
+  // Pink tongue inside open mouth
+  mouth_tongue_ = lv_obj_create(anime_mouth_);
+  lv_obj_set_size(mouth_tongue_, 16, 8);
+  lv_obj_align(mouth_tongue_, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_obj_set_style_radius(mouth_tongue_, 4, 0);
+  lv_obj_set_style_bg_color(mouth_tongue_, lv_color_hex(0xfb7185), 0);
+  lv_obj_set_style_bg_opa(mouth_tongue_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(mouth_tongue_, 0, 0);
+  lv_obj_set_scrollbar_mode(mouth_tongue_, LV_SCROLLBAR_MODE_OFF);
+
+  // 8. Floating Emote Badge (悬浮情绪小气泡)
+  emote_badge_ = lv_label_create(face_container_);
+  lv_obj_set_style_text_font(emote_badge_, font_emoji_32_init(), 0);
+  lv_obj_align(emote_badge_, LV_ALIGN_TOP_RIGHT, -18, 38);
+  lv_obj_add_flag(emote_badge_, LV_OBJ_FLAG_HIDDEN);
+
+  // 9. Frosted Glass Subtitle Banner (半透明磨砂对话框)
   subtitle_box_ = lv_obj_create(face_container_);
   lv_obj_set_size(subtitle_box_, 224, 56);
-  lv_obj_align(subtitle_box_, LV_ALIGN_BOTTOM_MID, 0, -10);
-  lv_obj_set_style_radius(subtitle_box_, 10, 0);
-  lv_obj_set_style_bg_color(subtitle_box_, lv_color_hex(0x0c1b2c), 0);
-  lv_obj_set_style_bg_opa(subtitle_box_, LV_OPA_90, 0);
+  lv_obj_align(subtitle_box_, LV_ALIGN_BOTTOM_MID, 0, -8);
+  lv_obj_set_style_radius(subtitle_box_, 12, 0);
+  lv_obj_set_style_bg_color(subtitle_box_, lv_color_hex(0x0f172a), 0);
+  lv_obj_set_style_bg_opa(subtitle_box_, LV_OPA_80, 0);
   lv_obj_set_style_border_width(subtitle_box_, 1, 0);
-  lv_obj_set_style_border_color(subtitle_box_, lv_color_hex(0x0284c7), 0);
+  lv_obj_set_style_border_color(subtitle_box_, lv_color_hex(0x38bdf8), 0);
   lv_obj_set_style_pad_all(subtitle_box_, 6, 0);
   lv_obj_set_scrollbar_mode(subtitle_box_, LV_SCROLLBAR_MODE_OFF);
 
   subtitle_label_ = lv_label_create(subtitle_box_);
   lv_obj_set_width(subtitle_label_, 210);
   lv_obj_set_style_text_font(subtitle_label_, &font_puhui_16_4, 0);
-  lv_obj_set_style_text_color(subtitle_label_, current_theme_.assistant_text, 0);
+  lv_obj_set_style_text_color(subtitle_label_, lv_color_hex(0xf1f5f9), 0);
   lv_obj_set_style_text_align(subtitle_label_, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_long_mode(subtitle_label_, LV_LABEL_LONG_WRAP);
-  lv_label_set_text(subtitle_label_, "🤖 Enco 正在待命...");
+  lv_label_set_text(subtitle_label_, "🌸 Enco 正在待命...");
 
-  // Natural Blinking & Voice Animation Timers
-  blink_timer_ = lv_timer_create(OnBlinkTimer, 3500, this);
-  voice_anim_timer_ = lv_timer_create(OnVoiceAnimTimer, 120, this);
+  // Natural Blinking, Voice Lipsync & Ahoge Swaying Timers
+  blink_timer_ = lv_timer_create(OnBlinkTimer, 3200, this);
+  voice_anim_timer_ = lv_timer_create(OnVoiceAnimTimer, 90, this);
+  ahoge_timer_ = lv_timer_create(OnAhogeTimer, 50, this);
 
   /* Status bar */
   lv_obj_set_flex_flow(status_bar_, LV_FLEX_FLOW_ROW);
@@ -504,12 +767,12 @@ void Display::SetChatMessage(const Role role, const std::string& content) {
   // Store reference to the latest message label
   chat_message_label_ = msg_text;
 
-  // Update virtual robot face subtitle if active
+  // Update virtual anime avatar subtitle if active
   if (subtitle_label_ != nullptr) {
     if (role == Role::kUser) {
       lv_label_set_text(subtitle_label_, ("▲ 你: " + content).c_str());
     } else if (role == Role::kAssistant) {
-      lv_label_set_text(subtitle_label_, ("◈ Enco: " + content).c_str());
+      lv_label_set_text(subtitle_label_, ("🌸 Enco: " + content).c_str());
     } else {
       lv_label_set_text(subtitle_label_, content.c_str());
     }
@@ -540,7 +803,7 @@ void Display::ShowStatus(const char* status) {
         lv_obj_set_size(eye_right_, 54, 72);
       }
     } else if (s == "待命") {
-      lv_label_set_text(subtitle_label_, "🤖 Enco 正在待命...");
+      lv_label_set_text(subtitle_label_, "🌸 Enco 正在待命...");
       UpdateRobotFaceEmotion("neutral");
     } else if (s == "连接中...") {
       lv_label_set_text(subtitle_label_, "⚡ 正在连接小智云端...");
@@ -563,7 +826,7 @@ void Display::ShowStatus(const char* status) {
     } else if (s == "摇头晃脑...") {
       lv_label_set_text(subtitle_label_, "🤪 萌动摇头晃脑中~");
     } else if (s == "头已正视") {
-      lv_label_set_text(subtitle_label_, "🤖 头已摆正正视前方");
+      lv_label_set_text(subtitle_label_, "🌸 头已摆正正视前方");
     }
   }
 
@@ -616,94 +879,133 @@ void Display::ToggleUiMode() {
 
 void Display::UpdateRobotFaceEmotion(const std::string& emotion) {
   current_emotion_ = emotion;
-  if (!eye_left_ || !eye_right_) return;
+  if (!eye_left_ || !eye_right_ || !iris_left_ || !iris_right_) return;
 
-  // Reset default geometry
+  // Default geometry & styles for 2D Anime Avatar
   current_eye_width_ = 50;
   current_eye_height_ = 68;
-  current_eye_color_ = current_theme_.jarvis_cyan; // #00f0ff
+  lv_color_t iris_top = lv_color_hex(0x0f172a);
+  lv_color_t iris_bot = lv_color_hex(0x06b6d4);
+  int eyebrow_angle = 0; // In 0.1 degrees
+  int eyebrow_y = 46;
   bool show_blush = false;
-  bool show_pupil = true;
+  bool show_emote = false;
+  const char* emote_icon = "";
 
   if (emotion == "happy" || emotion == "laughing" || emotion == "funny") {
-    // Happy squint: wide crescent slits with glowing smile
-    current_eye_height_ = 20;
-    current_eye_width_ = 52;
-    current_eye_color_ = lv_color_hex(0x38bdf8);
+    // Happy sparkling eyes + rosy blush
+    current_eye_height_ = 60;
+    iris_top = lv_color_hex(0x0369a1);
+    iris_bot = lv_color_hex(0x38bdf8);
+    eyebrow_angle = 120; // +12 deg left, -12 deg right
     show_blush = true;
-    show_pupil = false;
+    show_emote = true;
+    emote_icon = "🙂";
   } else if (emotion == "loving" || emotion == "kissy") {
-    // Warm glowing rose eyes + blush
+    // Warm romantic magenta-rose eyes + deep blush
+    current_eye_height_ = 66;
+    iris_top = lv_color_hex(0x831843);
+    iris_bot = lv_color_hex(0xfb7185);
+    eyebrow_angle = 80;
+    show_blush = true;
+    show_emote = true;
+    emote_icon = (emotion == "kissy") ? "😘" : "😍";
+  } else if (emotion == "sad" || emotion == "crying") {
+    // Droopy sad eyes, blue-grey
+    current_eye_height_ = 54;
+    iris_top = lv_color_hex(0x1e293b);
+    iris_bot = lv_color_hex(0x0284c7);
+    eyebrow_angle = -140; // Droop outward
+    show_emote = true;
+    emote_icon = (emotion == "crying") ? "😭" : "😔";
+  } else if (emotion == "angry") {
+    // Fierce sharp glowing crimson eyes + angled eyebrows
+    current_eye_height_ = 50;
+    iris_top = lv_color_hex(0x450a0a);
+    iris_bot = lv_color_hex(0xef4444);
+    eyebrow_angle = 220; // Slant aggressively down towards center
+    eyebrow_y = 48;
+    show_emote = true;
+    emote_icon = "😠";
+  } else if (emotion == "surprised" || emotion == "shocked") {
+    // Wide open anime eyes (O O) + raised eyebrows
+    current_eye_height_ = 72;
+    current_eye_width_ = 54;
+    iris_top = lv_color_hex(0x082f49);
+    iris_bot = lv_color_hex(0x67e8f9);
+    eyebrow_y = 38;
+    eyebrow_angle = 0;
+    show_emote = true;
+    emote_icon = (emotion == "shocked") ? "😱" : "😯";
+  } else if (emotion == "thinking" || emotion == "confused") {
+    // Inquisitive look with golden amber glow
+    current_eye_height_ = 62;
+    iris_top = lv_color_hex(0x1c1917);
+    iris_bot = lv_color_hex(0xf59e0b);
+    eyebrow_angle = 150;
+    show_emote = true;
+    emote_icon = (emotion == "thinking") ? "🤔" : "🙄";
+  } else if (emotion == "cool" || emotion == "confident") {
+    // Narrow confident eyes
     current_eye_height_ = 48;
     current_eye_width_ = 52;
-    current_eye_color_ = lv_color_hex(0xf43f5e); // Rose Pink
-    show_blush = true;
-    show_pupil = true;
-  } else if (emotion == "sad" || emotion == "crying") {
-    // Droopy sad eyes
-    current_eye_height_ = 36;
-    current_eye_width_ = 48;
-    current_eye_color_ = lv_color_hex(0x0284c7); // Deep tear blue
-    show_blush = false;
-  } else if (emotion == "angry") {
-    // Fierce sharp glowing orange-red
-    current_eye_height_ = 32;
-    current_eye_width_ = 52;
-    current_eye_color_ = lv_color_hex(0xef4444); // Crimson red
-    show_blush = false;
-  } else if (emotion == "surprised" || emotion == "shocked") {
-    // Big dilated circular eyes (O O)
-    current_eye_height_ = 64;
-    current_eye_width_ = 64;
-    current_eye_color_ = lv_color_hex(0xa5f3fc); // Intense bright cyan
-    show_blush = false;
-  } else if (emotion == "thinking" || emotion == "confused") {
-    // Curious inquisitive expression
-    current_eye_height_ = 50;
-    current_eye_color_ = current_theme_.jarvis_gold; // Stark Gold
-    show_blush = false;
-  } else if (emotion == "cool" || emotion == "confident") {
-    // Narrow confident visor eyes
-    current_eye_height_ = 24;
-    current_eye_width_ = 56;
-    current_eye_color_ = current_theme_.jarvis_cyan;
-    show_blush = false;
-    show_pupil = false;
+    iris_top = lv_color_hex(0x0f172a);
+    iris_bot = lv_color_hex(0x06b6d4);
+    eyebrow_angle = 100;
+    show_emote = true;
+    emote_icon = (emotion == "cool") ? "😎" : "😏";
   } else if (emotion == "sleepy") {
-    // Closed peaceful lines
+    // Closed peaceful anime eye lines
     current_eye_height_ = 4;
-    current_eye_width_ = 46;
-    current_eye_color_ = current_theme_.jarvis_cyan_dim;
-    show_blush = false;
-    show_pupil = false;
+    current_eye_width_ = 48;
+    show_emote = true;
+    emote_icon = "😴";
   } else if (emotion == "winking") {
-    // Wink: Left eye open, right eye closed line
-    lv_obj_set_size(eye_left_, 50, 68);
+    // Wink: Left eye wide open with sparkle, right eye closed cute slit
+    lv_obj_set_size(eye_left_, 52, 68);
     lv_obj_set_size(eye_right_, 50, 4);
-    lv_obj_set_style_bg_color(eye_left_, current_theme_.jarvis_cyan, 0);
-    lv_obj_set_style_bg_color(eye_right_, current_theme_.jarvis_cyan, 0);
-    if (pupil_left_) lv_obj_clear_flag(pupil_left_, LV_OBJ_FLAG_HIDDEN);
-    if (pupil_right_) lv_obj_add_flag(pupil_right_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(iris_left_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(iris_right_, LV_OBJ_FLAG_HIDDEN);
     if (blush_left_) lv_obj_clear_flag(blush_left_, LV_OBJ_FLAG_HIDDEN);
     if (blush_right_) lv_obj_clear_flag(blush_right_, LV_OBJ_FLAG_HIDDEN);
+    if (eyebrow_left_) lv_obj_set_style_transform_rotation(eyebrow_left_, 100, 0);
+    if (eyebrow_right_) lv_obj_set_style_transform_rotation(eyebrow_right_, -60, 0);
+    if (emote_badge_) {
+      lv_label_set_text(emote_badge_, "😉");
+      lv_obj_clear_flag(emote_badge_, LV_OBJ_FLAG_HIDDEN);
+    }
     return;
   }
 
-  // Apply geometry
+  // Apply eye sclera size
   lv_obj_set_size(eye_left_, current_eye_width_, current_eye_height_);
   lv_obj_set_size(eye_right_, current_eye_width_, current_eye_height_);
-  lv_obj_set_style_bg_color(eye_left_, current_eye_color_, 0);
-  lv_obj_set_style_bg_color(eye_right_, current_eye_color_, 0);
 
-  if (pupil_left_) {
-    if (show_pupil) lv_obj_clear_flag(pupil_left_, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(pupil_left_, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (pupil_right_) {
-    if (show_pupil) lv_obj_clear_flag(pupil_right_, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(pupil_right_, LV_OBJ_FLAG_HIDDEN);
+  // Apply iris gradient
+  lv_obj_set_style_bg_color(iris_left_, iris_top, 0);
+  lv_obj_set_style_bg_grad_color(iris_left_, iris_bot, 0);
+  lv_obj_set_style_bg_color(iris_right_, iris_top, 0);
+  lv_obj_set_style_bg_grad_color(iris_right_, iris_bot, 0);
+
+  if (current_eye_height_ <= 10) {
+    lv_obj_add_flag(iris_left_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(iris_right_, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_clear_flag(iris_left_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(iris_right_, LV_OBJ_FLAG_HIDDEN);
   }
 
+  // Eyebrows rotation & position
+  if (eyebrow_left_) {
+    lv_obj_set_y(eyebrow_left_, eyebrow_y);
+    lv_obj_set_style_transform_rotation(eyebrow_left_, eyebrow_angle, 0);
+  }
+  if (eyebrow_right_) {
+    lv_obj_set_y(eyebrow_right_, eyebrow_y);
+    lv_obj_set_style_transform_rotation(eyebrow_right_, -eyebrow_angle, 0);
+  }
+
+  // Blush
   if (blush_left_) {
     if (show_blush) lv_obj_clear_flag(blush_left_, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(blush_left_, LV_OBJ_FLAG_HIDDEN);
@@ -712,24 +1014,34 @@ void Display::UpdateRobotFaceEmotion(const std::string& emotion) {
     if (show_blush) lv_obj_clear_flag(blush_right_, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(blush_right_, LV_OBJ_FLAG_HIDDEN);
   }
+
+  // Floating Emote Badge
+  if (emote_badge_) {
+    if (show_emote && emote_icon[0] != '\0') {
+      lv_label_set_text(emote_badge_, emote_icon);
+      lv_obj_clear_flag(emote_badge_, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(emote_badge_, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
 }
 
 void Display::LookDirection(const char* dir) {
-  if (!eye_left_ || !eye_right_ || !pupil_left_ || !pupil_right_) return;
+  if (!iris_left_ || !iris_right_) return;
   lvgl_port_lock(0);
-  int x_off = -4;
-  int y_off = 6;
+  int x_off = 0;
+  int y_off = 0;
   if (strcmp(dir, "up") == 0) {
-    y_off = 2;
+    y_off = -6;
   } else if (strcmp(dir, "down") == 0) {
-    y_off = 24;
+    y_off = 6;
   } else if (strcmp(dir, "left") == 0) {
-    x_off = -14;
+    x_off = -8;
   } else if (strcmp(dir, "right") == 0) {
-    x_off = 2;
+    x_off = 8;
   }
-  lv_obj_align(pupil_left_, LV_ALIGN_TOP_RIGHT, x_off, y_off);
-  lv_obj_align(pupil_right_, LV_ALIGN_TOP_RIGHT, x_off, y_off);
+  lv_obj_align(iris_left_, LV_ALIGN_CENTER, x_off, y_off);
+  lv_obj_align(iris_right_, LV_ALIGN_CENTER, x_off, y_off);
   lvgl_port_unlock();
 }
 
@@ -739,11 +1051,11 @@ void Display::OnBlinkTimer(lv_timer_t* timer) {
   if (self->current_emotion_ == "sleepy" || self->current_emotion_ == "winking") return;
   if (!self->eye_left_ || !self->eye_right_) return;
 
-  // Quick cute blink
+  // Quick cute anime blink
   lv_obj_set_height(self->eye_left_, 4);
   lv_obj_set_height(self->eye_right_, 4);
-  if (self->pupil_left_) lv_obj_add_flag(self->pupil_left_, LV_OBJ_FLAG_HIDDEN);
-  if (self->pupil_right_) lv_obj_add_flag(self->pupil_right_, LV_OBJ_FLAG_HIDDEN);
+  if (self->iris_left_) lv_obj_add_flag(self->iris_left_, LV_OBJ_FLAG_HIDDEN);
+  if (self->iris_right_) lv_obj_add_flag(self->iris_right_, LV_OBJ_FLAG_HIDDEN);
 
   lv_timer_t* restore_timer = lv_timer_create(
       [](lv_timer_t* t) {
@@ -751,11 +1063,11 @@ void Display::OnBlinkTimer(lv_timer_t* timer) {
         if (d && d->ui_mode_ == UiMode::kRobotFace && d->eye_left_ && d->eye_right_) {
           lv_obj_set_height(d->eye_left_, d->current_eye_height_);
           lv_obj_set_height(d->eye_right_, d->current_eye_height_);
-          if (d->pupil_left_) lv_obj_clear_flag(d->pupil_left_, LV_OBJ_FLAG_HIDDEN);
-          if (d->pupil_right_) lv_obj_clear_flag(d->pupil_right_, LV_OBJ_FLAG_HIDDEN);
+          if (d->iris_left_) lv_obj_clear_flag(d->iris_left_, LV_OBJ_FLAG_HIDDEN);
+          if (d->iris_right_) lv_obj_clear_flag(d->iris_right_, LV_OBJ_FLAG_HIDDEN);
         }
       },
-      120, self);
+      110, self);
   lv_timer_set_repeat_count(restore_timer, 1);
   lv_timer_set_auto_delete(restore_timer, true);
 }
@@ -768,24 +1080,33 @@ void Display::OnVoiceAnimTimer(lv_timer_t* timer) {
   anim_step = (anim_step + 1) % 6;
 
   if (self->is_speaking_) {
-    const int heights[6][5] = {
-        {6, 16, 24, 14, 8},
-        {12, 22, 10, 20, 14},
-        {18, 12, 26, 16, 6},
-        {8, 24, 14, 22, 12},
-        {14, 18, 20, 10, 18},
-        {20, 10, 16, 24, 8},
-    };
-    for (int i = 0; i < 5; ++i) {
-      if (self->wave_bars_[i]) {
-        lv_obj_set_height(self->wave_bars_[i], heights[anim_step][i]);
-      }
+    // Talking: show open anime mouth with lively opening/closing lipsync
+    if (self->mouth_smile_) lv_obj_add_flag(self->mouth_smile_, LV_OBJ_FLAG_HIDDEN);
+    if (self->anime_mouth_) {
+      lv_obj_clear_flag(self->anime_mouth_, LV_OBJ_FLAG_HIDDEN);
+      const int mouth_h[6] = {12, 20, 15, 22, 14, 18};
+      const int mouth_w[6] = {20, 24, 22, 26, 20, 22};
+      lv_obj_set_size(self->anime_mouth_, mouth_w[anim_step], mouth_h[anim_step]);
     }
   } else {
-    for (int i = 0; i < 5; ++i) {
-      if (self->wave_bars_[i]) {
-        lv_obj_set_height(self->wave_bars_[i], 6);
-      }
-    }
+    // Idle: show gentle smile arc
+    if (self->anime_mouth_) lv_obj_add_flag(self->anime_mouth_, LV_OBJ_FLAG_HIDDEN);
+    if (self->mouth_smile_) lv_obj_clear_flag(self->mouth_smile_, LV_OBJ_FLAG_HIDDEN);
   }
+}
+
+void Display::OnAhogeTimer(lv_timer_t* timer) {
+  auto* self = static_cast<Display*>(lv_timer_get_user_data(timer));
+  if (!self || self->ui_mode_ != UiMode::kRobotFace || !self->ahoge_) return;
+
+  static int tick = 0;
+  tick++;
+
+  // Smooth sinusoidal sway: angle between -14 deg and +14 deg (-140 to +140)
+  // When happy or speaking, sway faster and wider
+  int amplitude = (self->current_emotion_ == "happy" || self->is_speaking_) ? 220 : 130;
+  float phase = (tick % 36) * (3.14159265f * 2.0f / 36.0f);
+  int angle = static_cast<int>(sinf(phase) * amplitude);
+
+  lv_obj_set_style_transform_rotation(self->ahoge_, angle, 0);
 }
