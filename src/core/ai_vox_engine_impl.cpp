@@ -327,7 +327,12 @@ void EngineImpl::OnWebsocketEvent(esp_event_base_t base, int32_t event_id, void 
           // 6.4KB in under a second. Audio is disposable (a dropped frame is a click), so shed it
           // rather than starve the Wi-Fi driver. Text frames are deliberately NOT capped: losing a
           // tts/stop is what strands the engine in the first place.
-          constexpr size_t kMaxQueuedAudioFrames = 16;
+          //
+          // This is only a backstop and is deliberately looser than AudioOutputEngine's 48-frame
+          // buffer: OnAudioFrame just hands the frame on, so this queue should never actually be
+          // deep. Setting it tighter than the playback buffer would make *this* the limit and
+          // reintroduce the dropouts that buffer exists to prevent.
+          constexpr size_t kMaxQueuedAudioFrames = 64;
           if (task_queue_.size() > kMaxQueuedAudioFrames) {
             CLOGW("audio backlog too deep (%u), dropping frame", static_cast<unsigned>(task_queue_.size()));
             break;
