@@ -343,59 +343,113 @@ void ConfigureWifi() {
 }
 
 uint32_t g_last_motion_exec_time = 0;
+std::string g_last_user_query = "";
+
+void CheckAndExecuteMotionFallback(const std::string& query) {
+  if (millis() - g_last_motion_exec_time < 2500) {
+    return;  // Debounce: motion already executed within 2.5s
+  }
+  if (query.empty()) return;
+
+  auto contains = [&](const char* kw) {
+    return query.find(kw) != std::string::npos;
+  };
+
+  if (contains("抬头") || contains("仰头") || contains("往上看") || contains("向上看") || contains("看天花板") || contains("看上面")) {
+    printf("[Voice Motion Fallback] 抬头 (10 deg)\n");
+    g_last_motion_exec_time = millis();
+    if (g_display) {
+      g_display->UpdateRobotFaceEmotion("happy");
+      g_display->LookDirection("up");
+      g_display->ShowStatus("抬头中...");
+    }
+    ServoController::GetInstance().LookUp(10.0f);
+  } else if (contains("低头") || contains("俯视") || contains("往下看") || contains("向下看") || contains("看地面") || contains("看下面")) {
+    printf("[Voice Motion Fallback] 低头 (10 deg)\n");
+    g_last_motion_exec_time = millis();
+    if (g_display) {
+      g_display->UpdateRobotFaceEmotion("thinking");
+      g_display->LookDirection("down");
+      g_display->ShowStatus("低头中...");
+    }
+    ServoController::GetInstance().LookDown(10.0f);
+  } else if (contains("向左歪") || contains("往左歪") || contains("左歪头") || contains("左偏头") || contains("左倾")) {
+    printf("[Voice Motion Fallback] 向左歪头 (10 deg)\n");
+    g_last_motion_exec_time = millis();
+    if (g_display) {
+      g_display->UpdateRobotFaceEmotion("winking");
+      g_display->LookDirection("left");
+      g_display->ShowStatus("向左歪头...");
+    }
+    ServoController::GetInstance().TiltLeft(10.0f);
+  } else if (contains("向右歪") || contains("往右歪") || contains("右歪头") || contains("右偏头") || contains("右倾")) {
+    printf("[Voice Motion Fallback] 向右歪头 (10 deg)\n");
+    g_last_motion_exec_time = millis();
+    if (g_display) {
+      g_display->UpdateRobotFaceEmotion("winking");
+      g_display->LookDirection("right");
+      g_display->ShowStatus("向右歪头...");
+    }
+    ServoController::GetInstance().TiltRight(10.0f);
+  } else if (contains("向左转") || contains("往左转") || contains("左转头") || contains("看左边") || contains("往左看")) {
+    printf("[Voice Motion Fallback] 向左转头 (10 deg)\n");
+    g_last_motion_exec_time = millis();
+    if (g_display) {
+      g_display->UpdateRobotFaceEmotion("surprised");
+      g_display->LookDirection("left");
+      g_display->ShowStatus("向左转头...");
+    }
+    ServoController::GetInstance().TurnLeft(10.0f);
+  } else if (contains("向右转") || contains("往右转") || contains("右转头") || contains("看右边") || contains("往右看")) {
+    printf("[Voice Motion Fallback] 向右转头 (10 deg)\n");
+    g_last_motion_exec_time = millis();
+    if (g_display) {
+      g_display->UpdateRobotFaceEmotion("surprised");
+      g_display->LookDirection("right");
+      g_display->ShowStatus("向右转头...");
+    }
+    ServoController::GetInstance().TurnRight(10.0f);
+  } else if (contains("摇头晃脑") || contains("摇摇头") || contains("摇头") || contains("不要不要")) {
+    printf("[Voice Motion Fallback] 摇头晃脑\n");
+    g_last_motion_exec_time = millis();
+    if (g_display) {
+      g_display->UpdateRobotFaceEmotion("laughing");
+      g_display->ShowStatus("摇头晃脑...");
+    }
+    ServoController::GetInstance().TriggerHeadBobble();
+  } else if (contains("头摆正") || contains("摆正") || contains("正视") || contains("头复位") || contains("向前看")) {
+    printf("[Voice Motion Fallback] 头摆正\n");
+    g_last_motion_exec_time = millis();
+    if (g_display) {
+      g_display->UpdateRobotFaceEmotion("neutral");
+      g_display->LookDirection("center");
+      g_display->ShowStatus("头已正视");
+    }
+    ServoController::GetInstance().CenterAll();
+  }
+}
 
 void InitMcpTools() {
   auto& engine = ai_vox::Engine::GetInstance();
-  engine.AddMcpTool("self.audio_speaker.set_volume", "Set speaker volume (0-100).", {
+
+  engine.AddMcpTool("self.head.look_up", "Make robot look up (抬头/仰头/往上看/向上看/看天花板).", {});
+  engine.AddMcpTool("self.head.look_down", "Make robot look down (低头/俯视/往下看/向下看/看地面).", {});
+  engine.AddMcpTool("self.head.tilt_left", "Tilt robot head left (向左歪头/左偏头/左倾).", {});
+  engine.AddMcpTool("self.head.tilt_right", "Tilt robot head right (向右歪头/右偏头/右倾).", {});
+  engine.AddMcpTool("self.head.turn_left", "Turn robot head left (向左转头/往左看/左转).", {});
+  engine.AddMcpTool("self.head.turn_right", "Turn robot head right (向右转头/往右看/右转).", {});
+  engine.AddMcpTool("self.head.bobble", "Cute head bobble and shake (摇头/摇摇头/摇头晃脑/不要/卖萌).", {});
+  engine.AddMcpTool("self.head.center", "Reset head to look straight forward (头摆正/正视/头复位/向前看).", {});
+
+  engine.AddMcpTool("self.audio_speaker.set_volume", "Set speaker volume 0-100 (调整音量).", {
     {"volume", ai_vox::ParamSchema<int64_t>{.default_value = std::nullopt, .min = 0, .max = 100}},
   });
+  engine.AddMcpTool("self.audio_speaker.get_volume", "Get speaker volume (获取当前音量).", {});
 
-  engine.AddMcpTool("self.audio_speaker.get_volume", "Get speaker volume.", {});
-
-  engine.AddMcpTool("self.led.set", "Set LED state (true: on, false: off).", {
-    {"state", ai_vox::ParamSchema<bool>{.default_value = std::nullopt}},
-  });
-
-  engine.AddMcpTool("self.led.get", "Get LED state.", {});
-
-  engine.AddMcpTool("self.head.look_up", "Look up (抬头/仰头). Step in deg.", {
-    {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
-  });
-
-  engine.AddMcpTool("self.head.look_down", "Look down (低头/俯视). Step in deg.", {
-    {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
-  });
-
-  engine.AddMcpTool("self.head.tilt_left", "Tilt head left (向左歪头). Step in deg.", {
-    {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
-  });
-
-  engine.AddMcpTool("self.head.tilt_right", "Tilt head right (向右歪头). Step in deg.", {
-    {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 60}},
-  });
-
-  engine.AddMcpTool("self.head.turn_left", "Turn head left (向左转头). Step in deg.", {
-    {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 50}},
-  });
-
-  engine.AddMcpTool("self.head.turn_right", "Turn head right (向右转头). Step in deg.", {
-    {"step", ai_vox::ParamSchema<int64_t>{.default_value = 10, .min = 1, .max = 50}},
-  });
-
-  engine.AddMcpTool("self.head.bobble", "Cute head bobble/shake (摇头/摇头晃脑).", {});
-
-  engine.AddMcpTool("self.head.center", "Reset head to front (头摆正/正视/复位).", {});
-
-  engine.AddMcpTool("self.servo.set_angle", "Set servo angle (0 Pitch, 25 Roll, 26 Yaw).", {
-    {"pin", ai_vox::ParamSchema<int64_t>{.default_value = 0, .min = 0, .max = 26}},
-    {"angle", ai_vox::ParamSchema<int64_t>{.default_value = 70, .min = 20, .max = 120}},
-  });
-
-  engine.AddMcpTool("self.screen.set_mode", "Set screen mode (face or chat).", {
+  engine.AddMcpTool("self.screen.set_mode", "Set screen mode (切换屏幕: face 表情, chat 对话).", {
     {"mode", ai_vox::ParamSchema<std::string>{.default_value = "face"}},
   });
-
-  engine.AddMcpTool("self.screen.toggle_mode", "Toggle screen mode between face and chat.", {});
+  engine.AddMcpTool("self.screen.toggle_mode", "Toggle screen mode between face and chat (切换屏幕显示模式).", {});
 }
 }  // namespace
 
@@ -548,113 +602,161 @@ void loop() {
         case ai_vox::ChatRole::kAssistant: {
           printf("role: assistant, content: %s\n", chat_message_event->content.c_str());
           g_display->SetChatMessage(Display::Role::kAssistant, chat_message_event->content);
+          // If MCP tool was not called for this query, trigger speech fallback motion
+          if (!g_last_user_query.empty()) {
+            CheckAndExecuteMotionFallback(g_last_user_query);
+            g_last_user_query.clear();
+          } else {
+            CheckAndExecuteMotionFallback(chat_message_event->content);
+          }
           break;
         }
         case ai_vox::ChatRole::kUser: {
           printf("role: user, content: %s\n", chat_message_event->content.c_str());
           g_display->SetChatMessage(Display::Role::kUser, chat_message_event->content);
+          g_last_user_query = chat_message_event->content;
           break;
         }
       }
     } else if (auto mcp_tool_call_event = std::get_if<ai_vox::McpToolCallEvent>(&event)) {
       printf("on mcp tool call: %s\n", mcp_tool_call_event->ToString().c_str());
+      g_last_user_query.clear();  // MCP tool call received, clear query to avoid duplicate fallback
+      const std::string& name = mcp_tool_call_event->name;
 
-      if ("self.audio_speaker.set_volume" == mcp_tool_call_event->name) {
+      auto matches = [&](const char* target, const char* alt = nullptr) {
+        if (name == target) return true;
+        if (alt != nullptr && name == alt) return true;
+        size_t t_len = strlen(target);
+        if (name.length() >= t_len && name.compare(name.length() - t_len, t_len, target) == 0) return true;
+        if (alt != nullptr) {
+          size_t a_len = strlen(alt);
+          if (name.length() >= a_len && name.compare(name.length() - a_len, a_len, alt) == 0) return true;
+        }
+        return false;
+      };
+
+      if (matches("self.audio_speaker.set_volume", "set_volume")) {
         const auto volume_ptr = mcp_tool_call_event->param<int64_t>("volume");
         if (volume_ptr != nullptr) {
-          printf("on mcp tool call: self.audio_speaker.set_volume, volume: %" PRId64 "\n", *volume_ptr);
+          printf("on mcp tool call: set_volume, volume: %" PRId64 "\n", *volume_ptr);
           g_audio_output_device->set_volume(*volume_ptr);
           engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
         } else {
           engine.SendMcpCallError(mcp_tool_call_event->id, "Missing valid argument: volume");
         }
-      } else if ("self.audio_speaker.get_volume" == mcp_tool_call_event->name) {
+      } else if (matches("self.audio_speaker.get_volume", "get_volume")) {
         const auto volume = g_audio_output_device->volume();
-        printf("on mcp tool call: self.audio_speaker.get_volume, volume: %" PRIu16 "\n", volume);
+        printf("on mcp tool call: get_volume, volume: %" PRIu16 "\n", volume);
         engine.SendMcpCallResponse(mcp_tool_call_event->id, volume);
-      } else if ("self.led.set" == mcp_tool_call_event->name) {
-        const auto state_ptr = mcp_tool_call_event->param<bool>("state");
-        if (state_ptr != nullptr) {
-          printf("on mcp tool call: self.led.set, state: %d\n", *state_ptr);
-          digitalWrite(kLedPin, *state_ptr);
-          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
-        } else {
-          engine.SendMcpCallError(mcp_tool_call_event->id, "Missing valid argument: state");
+      } else if (matches("self.head.look_up", "look_up") || name.find("head_up") != std::string::npos) {
+        float step = 10.0f;
+        const auto step_ptr = mcp_tool_call_event->param<int64_t>("step");
+        if (step_ptr != nullptr) step = static_cast<float>(*step_ptr);
+        printf("on mcp tool call: look_up (%.1f deg)\n", step);
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        g_last_motion_exec_time = millis();
+        if (g_display) {
+          g_display->UpdateRobotFaceEmotion("happy");
+          g_display->LookDirection("up");
+          g_display->ShowStatus("抬头中...");
         }
-      } else if ("self.led.get" == mcp_tool_call_event->name) {
-        const auto state = digitalRead(kLedPin) == HIGH;
-        printf("on mcp tool call: self.led.get, state: %d\n", state);
-        engine.SendMcpCallResponse(mcp_tool_call_event->id, state);
-      } else if ("self.head.look_up" == mcp_tool_call_event->name) {
-        float step = 10.0f;
-        const auto step_ptr = mcp_tool_call_event->param<int64_t>("step");
-        if (step_ptr != nullptr) step = static_cast<float>(*step_ptr);
-        printf("on mcp tool call: self.head.look_up (%.1f deg)\n", step);
         ServoController::GetInstance().LookUp(step);
-        g_last_motion_exec_time = millis();
-        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
-      } else if ("self.head.look_down" == mcp_tool_call_event->name) {
+      } else if (matches("self.head.look_down", "look_down") || name.find("head_down") != std::string::npos) {
         float step = 10.0f;
         const auto step_ptr = mcp_tool_call_event->param<int64_t>("step");
         if (step_ptr != nullptr) step = static_cast<float>(*step_ptr);
-        printf("on mcp tool call: self.head.look_down (%.1f deg)\n", step);
+        printf("on mcp tool call: look_down (%.1f deg)\n", step);
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        g_last_motion_exec_time = millis();
+        if (g_display) {
+          g_display->UpdateRobotFaceEmotion("thinking");
+          g_display->LookDirection("down");
+          g_display->ShowStatus("低头中...");
+        }
         ServoController::GetInstance().LookDown(step);
-        g_last_motion_exec_time = millis();
-        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
-      } else if ("self.head.tilt_left" == mcp_tool_call_event->name) {
+      } else if (matches("self.head.tilt_left", "tilt_left")) {
         float step = 10.0f;
         const auto step_ptr = mcp_tool_call_event->param<int64_t>("step");
         if (step_ptr != nullptr) step = static_cast<float>(*step_ptr);
-        printf("on mcp tool call: self.head.tilt_left (%.1f deg)\n", step);
+        printf("on mcp tool call: tilt_left (%.1f deg)\n", step);
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        g_last_motion_exec_time = millis();
+        if (g_display) {
+          g_display->UpdateRobotFaceEmotion("winking");
+          g_display->LookDirection("left");
+          g_display->ShowStatus("向左歪头...");
+        }
         ServoController::GetInstance().TiltLeft(step);
-        g_last_motion_exec_time = millis();
-        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
-      } else if ("self.head.tilt_right" == mcp_tool_call_event->name) {
+      } else if (matches("self.head.tilt_right", "tilt_right")) {
         float step = 10.0f;
         const auto step_ptr = mcp_tool_call_event->param<int64_t>("step");
         if (step_ptr != nullptr) step = static_cast<float>(*step_ptr);
-        printf("on mcp tool call: self.head.tilt_right (%.1f deg)\n", step);
+        printf("on mcp tool call: tilt_right (%.1f deg)\n", step);
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        g_last_motion_exec_time = millis();
+        if (g_display) {
+          g_display->UpdateRobotFaceEmotion("winking");
+          g_display->LookDirection("right");
+          g_display->ShowStatus("向右歪头...");
+        }
         ServoController::GetInstance().TiltRight(step);
-        g_last_motion_exec_time = millis();
-        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
-      } else if ("self.head.turn_left" == mcp_tool_call_event->name) {
+      } else if (matches("self.head.turn_left", "turn_left")) {
         float step = 10.0f;
         const auto step_ptr = mcp_tool_call_event->param<int64_t>("step");
         if (step_ptr != nullptr) step = static_cast<float>(*step_ptr);
-        printf("on mcp tool call: self.head.turn_left (%.1f deg)\n", step);
+        printf("on mcp tool call: turn_left (%.1f deg)\n", step);
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        g_last_motion_exec_time = millis();
+        if (g_display) {
+          g_display->UpdateRobotFaceEmotion("surprised");
+          g_display->LookDirection("left");
+          g_display->ShowStatus("向左转头...");
+        }
         ServoController::GetInstance().TurnLeft(step);
-        g_last_motion_exec_time = millis();
-        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
-      } else if ("self.head.turn_right" == mcp_tool_call_event->name) {
+      } else if (matches("self.head.turn_right", "turn_right")) {
         float step = 10.0f;
         const auto step_ptr = mcp_tool_call_event->param<int64_t>("step");
         if (step_ptr != nullptr) step = static_cast<float>(*step_ptr);
-        printf("on mcp tool call: self.head.turn_right (%.1f deg)\n", step);
+        printf("on mcp tool call: turn_right (%.1f deg)\n", step);
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        g_last_motion_exec_time = millis();
+        if (g_display) {
+          g_display->UpdateRobotFaceEmotion("surprised");
+          g_display->LookDirection("right");
+          g_display->ShowStatus("向右转头...");
+        }
         ServoController::GetInstance().TurnRight(step);
-        g_last_motion_exec_time = millis();
-        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
-      } else if ("self.head.bobble" == mcp_tool_call_event->name || "self.servo.bobble" == mcp_tool_call_event->name) {
+      } else if (matches("self.head.bobble", "bobble") || matches("self.servo.bobble", "shake")) {
         printf("on mcp tool call: bobble\n");
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        g_last_motion_exec_time = millis();
+        if (g_display) {
+          g_display->UpdateRobotFaceEmotion("laughing");
+          g_display->ShowStatus("摇头晃脑...");
+        }
         ServoController::GetInstance().TriggerHeadBobble();
-        g_last_motion_exec_time = millis();
-        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
-      } else if ("self.head.center" == mcp_tool_call_event->name || "self.servo.center" == mcp_tool_call_event->name) {
+      } else if (matches("self.head.center", "center") || matches("self.servo.center", "reset")) {
         printf("on mcp tool call: center\n");
-        ServoController::GetInstance().CenterAll();
-        g_last_motion_exec_time = millis();
         engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
-      } else if ("self.servo.set_angle" == mcp_tool_call_event->name) {
+        g_last_motion_exec_time = millis();
+        if (g_display) {
+          g_display->UpdateRobotFaceEmotion("neutral");
+          g_display->LookDirection("center");
+          g_display->ShowStatus("头已正视");
+        }
+        ServoController::GetInstance().CenterAll();
+      } else if (matches("self.servo.set_angle", "set_angle")) {
         const auto pin_ptr = mcp_tool_call_event->param<int64_t>("pin");
         const auto angle_ptr = mcp_tool_call_event->param<int64_t>("angle");
         if (pin_ptr != nullptr && angle_ptr != nullptr) {
           printf("on mcp tool call: self.servo.set_angle, pin: %lld, angle: %lld\n", *pin_ptr, *angle_ptr);
-          ServoController::GetInstance().MoveAngleSmooth(static_cast<int>(*pin_ptr), static_cast<float>(*angle_ptr));
-          g_last_motion_exec_time = millis();
           engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+          g_last_motion_exec_time = millis();
+          ServoController::GetInstance().MoveAngleSmooth(static_cast<int>(*pin_ptr), static_cast<float>(*angle_ptr));
         } else {
           engine.SendMcpCallError(mcp_tool_call_event->id, "Missing pin or angle");
         }
-      } else if ("self.screen.set_mode" == mcp_tool_call_event->name) {
+      } else if (matches("self.screen.set_mode", "set_mode")) {
         const auto mode_ptr = mcp_tool_call_event->param<std::string>("mode");
         if (mode_ptr != nullptr && (*mode_ptr == "chat" || *mode_ptr == "text")) {
           g_display->SetUiMode(Display::UiMode::kChatText);
@@ -662,7 +764,7 @@ void loop() {
           g_display->SetUiMode(Display::UiMode::kRobotFace);
         }
         engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
-      } else if ("self.screen.toggle_mode" == mcp_tool_call_event->name) {
+      } else if (matches("self.screen.toggle_mode", "toggle_mode")) {
         g_display->ToggleUiMode();
         engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
       }

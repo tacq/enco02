@@ -757,8 +757,8 @@ void EngineImpl::DisconnectWebSocket() {
 }
 
 void EngineImpl::SendTextInternal(std::string text) {
-  if (esp_get_free_heap_size() < 10240) {
-    CLOGE("Free heap too low (%u bytes), dropping SendTextInternal text of %zu bytes", esp_get_free_heap_size(), text.length());
+  if (esp_get_free_heap_size() < 2048) {
+    CLOGE("Free heap critically low (%u bytes), dropping SendTextInternal text of %zu bytes", esp_get_free_heap_size(), text.length());
     return;
   }
   network_task_queue_.Enqueue([this, text = std::move(text)]() mutable {
@@ -782,7 +782,9 @@ void EngineImpl::SendMcpResponse(const int64_t id, std::unique_ptr<cJSON, cjson_
   cJSON_AddStringToObject(root_json_obj.get(), "session_id", session_id_.c_str());
   cJSON_AddStringToObject(root_json_obj.get(), "type", "mcp");
   cJSON_AddItemToObject(root_json_obj.get(), "payload", json_obj.release());
-  SendTextInternal(cjson_util::ToString(root_json_obj));
+  std::string text = cjson_util::ToString(root_json_obj);
+  root_json_obj.reset();  // Free cJSON heap memory immediately before sending/enqueueing!
+  SendTextInternal(std::move(text));
 }
 
 void EngineImpl::ChangeState(const State new_state) {

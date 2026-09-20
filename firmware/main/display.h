@@ -40,6 +40,8 @@ class Display {
   void SetUiMode(UiMode mode);
   UiMode GetUiMode() const { return ui_mode_; }
   void ToggleUiMode();
+  void UpdateRobotFaceEmotion(const std::string& emotion);
+  void LookDirection(const char* dir);
 
  private:
   struct ThemeColors {
@@ -100,7 +102,6 @@ class Display {
   int current_eye_width_ = 50;
   lv_color_t current_eye_color_;
 
-  void UpdateRobotFaceEmotion(const std::string& emotion);
   static void OnBlinkTimer(lv_timer_t* timer);
   static void OnVoiceAnimTimer(lv_timer_t* timer);
 

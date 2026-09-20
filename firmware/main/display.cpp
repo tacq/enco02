@@ -1,6 +1,7 @@
 #include <esp_log.h>
 
 #include <algorithm>
+#include <cstring>
 #include <map>
 #include <vector>
 
@@ -547,6 +548,22 @@ void Display::ShowStatus(const char* status) {
       lv_label_set_text(subtitle_label_, "🌐 网络已连接");
     } else if (s == "网络配置中" || s == "热点配网模式") {
       lv_label_set_text(subtitle_label_, "📶 请使用手机进行配网");
+    } else if (s == "抬头中...") {
+      lv_label_set_text(subtitle_label_, "👀 正在抬头看上面...");
+    } else if (s == "低头中...") {
+      lv_label_set_text(subtitle_label_, "👀 正在低头看地面...");
+    } else if (s == "向左歪头...") {
+      lv_label_set_text(subtitle_label_, "🙃 向左歪头倾听...");
+    } else if (s == "向右歪头...") {
+      lv_label_set_text(subtitle_label_, "🙃 向右歪头倾听...");
+    } else if (s == "向左转头...") {
+      lv_label_set_text(subtitle_label_, "👀 向左转头看看...");
+    } else if (s == "向右转头...") {
+      lv_label_set_text(subtitle_label_, "👀 向右转头看看...");
+    } else if (s == "摇头晃脑...") {
+      lv_label_set_text(subtitle_label_, "🤪 萌动摇头晃脑中~");
+    } else if (s == "头已正视") {
+      lv_label_set_text(subtitle_label_, "🤖 头已摆正正视前方");
     }
   }
 
@@ -695,6 +712,25 @@ void Display::UpdateRobotFaceEmotion(const std::string& emotion) {
     if (show_blush) lv_obj_clear_flag(blush_right_, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(blush_right_, LV_OBJ_FLAG_HIDDEN);
   }
+}
+
+void Display::LookDirection(const char* dir) {
+  if (!eye_left_ || !eye_right_ || !pupil_left_ || !pupil_right_) return;
+  lvgl_port_lock(0);
+  int x_off = -4;
+  int y_off = 6;
+  if (strcmp(dir, "up") == 0) {
+    y_off = 2;
+  } else if (strcmp(dir, "down") == 0) {
+    y_off = 24;
+  } else if (strcmp(dir, "left") == 0) {
+    x_off = -14;
+  } else if (strcmp(dir, "right") == 0) {
+    x_off = 2;
+  }
+  lv_obj_align(pupil_left_, LV_ALIGN_TOP_RIGHT, x_off, y_off);
+  lv_obj_align(pupil_right_, LV_ALIGN_TOP_RIGHT, x_off, y_off);
+  lvgl_port_unlock();
 }
 
 void Display::OnBlinkTimer(lv_timer_t* timer) {
