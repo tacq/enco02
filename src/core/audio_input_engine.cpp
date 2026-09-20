@@ -87,7 +87,9 @@ AudioInputEngine::~AudioInputEngine() {
     // Only ever opened when the encoder was available.
     audio_input_device_->CloseInput();
   }
-  // opus_encoder_ is owned by opus_codec_pool and deliberately outlives this object.
+  // The encoder state belongs to opus_codec_pool and is shared with the decoder; hand it back so
+  // the playback engine can re-init the same buffer.
+  opus_codec_pool::ReleaseEncoder(opus_encoder_);
   opus_encoder_ = nullptr;
   CLOG("OK");
 }

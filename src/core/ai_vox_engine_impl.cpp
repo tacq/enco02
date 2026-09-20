@@ -3,6 +3,7 @@
 #include <cJSON.h>
 #include <esp_app_desc.h>
 #include <esp_crt_bundle.h>
+#include <esp_heap_caps.h>
 #include <esp_mac.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
@@ -315,6 +316,22 @@ void EngineImpl::OnWebsocketEvent(esp_event_base_t base, int32_t event_id, void 
       break;
     }
     case WEBSOCKET_EVENT_ERROR: {
+      // A bare "WEBSOCKET_EVENT_ERROR" is useless: it covers DNS failures, TLS handshake failures
+      // (including out-of-memory ones), certificate rejections and HTTP upgrade refusals alike.
+      // Dump everything esp_websocket_client knows plus the heap state at the moment of failure.
+      if (data != nullptr) {
+        printf(
+            "WEBSOCKET_EVENT_ERROR type: %d, esp_err: 0x%x, tls_stack_err: -0x%04x, cert_verify_flags: 0x%x, http_status: %d, sock_errno: %d\n",
+            static_cast<int>(data->error_handle.error_type),
+            static_cast<unsigned>(data->error_handle.esp_tls_last_esp_err),
+            static_cast<unsigned>(-data->error_handle.esp_tls_stack_err),
+            static_cast<unsigned>(data->error_handle.esp_tls_cert_verify_flags),
+            data->error_handle.esp_ws_handshake_status_code,
+            data->error_handle.esp_transport_sock_errno);
+      }
+      printf("WEBSOCKET_EVENT_ERROR free heap: %u, largest block: %u\n",
+             static_cast<unsigned>(esp_get_free_heap_size()),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
       CLOGE("WEBSOCKET_EVENT_ERROR");
       break;
     }
@@ -529,7 +546,7 @@ void EngineImpl::OnMcpJsonObj(cJSON *root_json_obj) {
     // auto const reply_text = cjson_util::ToString(reply_obj);
     SendMcpResponse(id.value(), std::move(response_json_obj));
   } else if (*method == "tools/list") {
-    const std::string& tools_json = mcp_tool_manager_.GetToolsJsonString();
+    const std::string tools_json = mcp_tool_manager_.GetToolsJsonString();
     std::string response;
     response.reserve(session_id_.length() + tools_json.length() + 80);
     response += "{\"session_id\":\"";
@@ -760,6 +777,11 @@ bool EngineImpl::ConnectWebSocket() {
   }
 
   CLOGI("esp_websocket_client_start");
+  // The TLS handshake that follows is the single largest memory consumer in the firmware
+  // (~40KB peak, including a 16KB record buffer), so record what it has to work with.
+  printf("websocket connecting, free heap: %u, largest block: %u\n",
+         static_cast<unsigned>(esp_get_free_heap_size()),
+         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
   const auto ret = esp_websocket_client_start(web_socket_client_);
   CLOGI("websocket client start: %d", ret);
   return ret == ESP_OK;

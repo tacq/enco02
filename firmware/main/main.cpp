@@ -3,6 +3,7 @@
 #include <cctype>
 #include <driver/spi_common.h>
 #include <esp_heap_caps.h>
+#include <esp_log.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
@@ -483,10 +484,15 @@ void setup() {
   Serial.begin(115200);
   printf("setup\n");
 
-  // Reserve the Opus encoder/decoder states first, before LVGL, WiFi and mbedTLS have had a chance
-  // to carve up the internal heap. Each state needs a ~20KB *contiguous* block, which simply does
-  // not exist any more by the time the first "listen" starts on this no-PSRAM ESP32 - that failed
-  // allocation was the cause of the reboot loop.
+  // Arduino's initArduino() calls esp_log_level_set("*", CORE_DEBUG_LEVEL), which defaults to
+  // ESP_LOG_NONE and silences the IDF stack completely. Turn errors back on: without this,
+  // esp-tls / esp_websocket_client failures surface only as an opaque WEBSOCKET_EVENT_ERROR.
+  esp_log_level_set("*", ESP_LOG_ERROR);
+
+  // Reserve the Opus codec state first, before LVGL, WiFi and mbedTLS have had a chance to carve up
+  // the internal heap. It needs a ~24KB *contiguous* block, which simply does not exist any more by
+  // the time the first "listen" starts on this no-PSRAM ESP32 - that failed allocation was the
+  // cause of the original reboot loop.
   opus_codec_pool::Preallocate();
 
   // Immediately initialize MG92B servos to 90 degrees

@@ -3,6 +3,9 @@
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <stdio.h>
+#include <stdlib.h>
+
+#include <algorithm>
 
 #include "libopus/opus.h"
 
@@ -15,21 +18,15 @@
 namespace opus_codec_pool {
 namespace {
 
-// These must match the rates the engine actually uses (see audio_input_engine.cpp /
-// audio_output_engine.cpp). They are only used for the boot-time preallocation; Acquire*() will
-// still rebuild a codec if it is ever asked for a different configuration.
+// The rates the engine actually uses (see audio_input_engine.cpp / audio_output_engine.cpp).
 constexpr uint32_t kEncoderSampleRate = 16000;
 constexpr uint32_t kDecoderSampleRate = 24000;
-constexpr uint32_t kChannels = 1;
+constexpr int kChannels = 1;
 
-OpusEncoder* g_encoder = nullptr;
-uint32_t g_encoder_sample_rate = 0;
-uint32_t g_encoder_channels = 0;
-int g_encoder_application = 0;
-
-OpusDecoder* g_decoder = nullptr;
-uint32_t g_decoder_sample_rate = 0;
-uint32_t g_decoder_channels = 0;
+// The single buffer that backs whichever codec is currently active.
+void* g_shared_state = nullptr;
+size_t g_shared_size = 0;
+bool g_shared_in_use = false;
 
 void LogHeap(const char* stage) {
   printf("[opus_pool] %s free heap: %u, largest block: %u\n",
@@ -38,19 +35,7 @@ void LogHeap(const char* stage) {
          static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
 }
 
-OpusEncoder* CreateEncoder(const uint32_t sample_rate, const uint32_t channels, const int application) {
-  int error = 0;
-  OpusEncoder* encoder = opus_encoder_create(sample_rate, channels, application, &error);
-  if (encoder == nullptr) {
-    printf("[opus_pool] opus_encoder_create(%u, %u) failed: %d, needed %d bytes\n",
-           static_cast<unsigned>(sample_rate),
-           static_cast<unsigned>(channels),
-           error,
-           opus_encoder_get_size(static_cast<int>(channels)));
-    LogHeap("encoder alloc failed,");
-    return nullptr;
-  }
-
+void ApplyEncoderSettings(OpusEncoder* encoder) {
   opus_encoder_ctl(encoder, OPUS_SET_DTX(0));
   if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0) {
     // No PSRAM: keep the encoder in its cheapest mode. Complexity 0 skips the expensive analysis
@@ -60,83 +45,109 @@ OpusEncoder* CreateEncoder(const uint32_t sample_rate, const uint32_t channels, 
   } else {
     opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(5));
   }
-  return encoder;
 }
 
 }  // namespace
 
 void Preallocate() {
-  if (g_encoder == nullptr) {
-    LogHeap("before encoder alloc,");
-    g_encoder = CreateEncoder(kEncoderSampleRate, kChannels, OPUS_APPLICATION_VOIP);
-    if (g_encoder != nullptr) {
-      g_encoder_sample_rate = kEncoderSampleRate;
-      g_encoder_channels = kChannels;
-      g_encoder_application = OPUS_APPLICATION_VOIP;
-      printf("[opus_pool] encoder reserved: %d bytes\n", opus_encoder_get_size(static_cast<int>(kChannels)));
-    }
+  if (g_shared_state != nullptr) {
+    return;
   }
 
-  if (g_decoder == nullptr) {
-    int error = 0;
-    g_decoder = opus_decoder_create(kDecoderSampleRate, kChannels, &error);
-    if (g_decoder != nullptr) {
-      g_decoder_sample_rate = kDecoderSampleRate;
-      g_decoder_channels = kChannels;
-      printf("[opus_pool] decoder reserved: %d bytes\n", opus_decoder_get_size(static_cast<int>(kChannels)));
-    } else {
-      printf("[opus_pool] opus_decoder_create failed: %d, needed %d bytes\n", error, opus_decoder_get_size(static_cast<int>(kChannels)));
-    }
+  const int encoder_size = opus_encoder_get_size(kChannels);
+  const int decoder_size = opus_decoder_get_size(kChannels);
+  if (encoder_size <= 0 || decoder_size <= 0) {
+    printf("[opus_pool] bad codec sizes: encoder %d, decoder %d\n", encoder_size, decoder_size);
+    return;
   }
 
-  LogHeap("after codec reservation,");
+  g_shared_size = static_cast<size_t>(std::max(encoder_size, decoder_size));
+
+  LogHeap("before reservation,");
+  g_shared_state = heap_caps_malloc(g_shared_size, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+  if (g_shared_state == nullptr) {
+    printf("[opus_pool] FAILED to reserve %u bytes\n", static_cast<unsigned>(g_shared_size));
+    g_shared_size = 0;
+    return;
+  }
+
+  printf("[opus_pool] shared codec state reserved: %u bytes (encoder %d, decoder %d)\n",
+         static_cast<unsigned>(g_shared_size),
+         encoder_size,
+         decoder_size);
+  LogHeap("after reservation,");
 }
 
 OpusEncoder* AcquireEncoder(const uint32_t sample_rate, const uint32_t channels, const int application) {
-  if (g_encoder != nullptr && (g_encoder_sample_rate != sample_rate || g_encoder_channels != channels || g_encoder_application != application)) {
-    CLOGW("encoder reconfiguration requested, rebuilding");
-    opus_encoder_destroy(g_encoder);
-    g_encoder = nullptr;
-  }
-
-  if (g_encoder == nullptr) {
-    g_encoder = CreateEncoder(sample_rate, channels, application);
-    if (g_encoder == nullptr) {
+  if (g_shared_state != nullptr && !g_shared_in_use && g_shared_size >= static_cast<size_t>(opus_encoder_get_size(static_cast<int>(channels)))) {
+    auto* encoder = reinterpret_cast<OpusEncoder*>(g_shared_state);
+    const int error = opus_encoder_init(encoder, sample_rate, channels, application);
+    if (error != OPUS_OK) {
+      printf("[opus_pool] opus_encoder_init failed: %d\n", error);
       return nullptr;
     }
-    g_encoder_sample_rate = sample_rate;
-    g_encoder_channels = channels;
-    g_encoder_application = application;
-  } else {
-    // Same configuration as before: just wipe the history so this listen session starts clean.
-    opus_encoder_ctl(g_encoder, OPUS_RESET_STATE);
+    ApplyEncoderSettings(encoder);
+    g_shared_in_use = true;
+    return encoder;
   }
 
-  return g_encoder;
+  // Shared buffer unavailable (should not happen - capture and playback never overlap). Fall back
+  // to a private allocation so the caller can at least try.
+  CLOGW("shared codec state unavailable, falling back to opus_encoder_create");
+  int error = 0;
+  OpusEncoder* encoder = opus_encoder_create(sample_rate, channels, application, &error);
+  if (encoder == nullptr) {
+    printf("[opus_pool] opus_encoder_create failed: %d\n", error);
+    LogHeap("encoder fallback failed,");
+    return nullptr;
+  }
+  ApplyEncoderSettings(encoder);
+  return encoder;
+}
+
+void ReleaseEncoder(OpusEncoder* encoder) {
+  if (encoder == nullptr) {
+    return;
+  }
+  if (reinterpret_cast<void*>(encoder) == g_shared_state) {
+    g_shared_in_use = false;
+    return;
+  }
+  opus_encoder_destroy(encoder);
 }
 
 OpusDecoder* AcquireDecoder(const uint32_t sample_rate, const uint32_t channels) {
-  if (g_decoder != nullptr && (g_decoder_sample_rate != sample_rate || g_decoder_channels != channels)) {
-    CLOGW("decoder reconfiguration requested, rebuilding");
-    opus_decoder_destroy(g_decoder);
-    g_decoder = nullptr;
-  }
-
-  if (g_decoder == nullptr) {
-    int error = 0;
-    g_decoder = opus_decoder_create(sample_rate, channels, &error);
-    if (g_decoder == nullptr) {
-      printf("[opus_pool] opus_decoder_create failed: %d\n", error);
-      LogHeap("decoder alloc failed,");
+  if (g_shared_state != nullptr && !g_shared_in_use && g_shared_size >= static_cast<size_t>(opus_decoder_get_size(static_cast<int>(channels)))) {
+    auto* decoder = reinterpret_cast<OpusDecoder*>(g_shared_state);
+    const int error = opus_decoder_init(decoder, sample_rate, channels);
+    if (error != OPUS_OK) {
+      printf("[opus_pool] opus_decoder_init failed: %d\n", error);
       return nullptr;
     }
-    g_decoder_sample_rate = sample_rate;
-    g_decoder_channels = channels;
-  } else {
-    opus_decoder_ctl(g_decoder, OPUS_RESET_STATE);
+    g_shared_in_use = true;
+    return decoder;
   }
 
-  return g_decoder;
+  CLOGW("shared codec state unavailable, falling back to opus_decoder_create");
+  int error = 0;
+  OpusDecoder* decoder = opus_decoder_create(sample_rate, channels, &error);
+  if (decoder == nullptr) {
+    printf("[opus_pool] opus_decoder_create failed: %d\n", error);
+    LogHeap("decoder fallback failed,");
+    return nullptr;
+  }
+  return decoder;
+}
+
+void ReleaseDecoder(OpusDecoder* decoder) {
+  if (decoder == nullptr) {
+    return;
+  }
+  if (reinterpret_cast<void*>(decoder) == g_shared_state) {
+    g_shared_in_use = false;
+    return;
+  }
+  opus_decoder_destroy(decoder);
 }
 
 }  // namespace opus_codec_pool

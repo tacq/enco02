@@ -57,7 +57,9 @@ AudioOutputEngine::~AudioOutputEngine() {
   if (opus_decoder_ != nullptr) {
     audio_output_device_->CloseOutput();
   }
-  // opus_decoder_ is owned by opus_codec_pool and deliberately outlives this object.
+  // The decoder state belongs to opus_codec_pool and is shared with the encoder; hand it back so
+  // the capture engine can re-init the same buffer.
+  opus_codec_pool::ReleaseDecoder(opus_decoder_);
   opus_decoder_ = nullptr;
   CLOGI("OK");
 }

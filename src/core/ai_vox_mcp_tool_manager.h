@@ -71,44 +71,51 @@ struct Tool {
   }
 };
 
+// Tool definitions are only ever needed to answer a single "tools/list" request: dispatch of
+// "tools/call" goes straight to the observer by name. Keeping the Tool objects (a long UTF-8
+// description plus a map of parameter schemas, times ~12 tools) alive for the lifetime of the
+// device cost around 25KB of internal RAM on a board that has to fit a 40KB TLS handshake.
+//
+// So each tool is serialised exactly once, appended to a pre-reserved string, and then destroyed.
+// This also removes the old O(n^2) behaviour where the entire array was re-serialised on every
+// AddTool() call, which fragmented the heap 12 times over during boot.
 class ToolManager {
  public:
-  ToolManager() = default;
+  ToolManager() {
+    // Sized for the current tool set; avoids a dozen reallocations while the list is being built.
+    tools_body_.reserve(2560);
+  }
 
   void AddTool(std::string name, Tool tool) {
-    tools_.insert_or_assign(std::move(name), std::move(tool));
-    UpdateCachedJson();
-  }
-
-  const std::string& GetToolsJsonString() const {
-    return cached_tools_json_;
-  }
-
-  auto ToJson() const {
-    auto root_json_obj = cjson_util::MakeUnique();
-    cJSON *tools_array_obj = cJSON_CreateArray();
-
-    for (const auto &[name, tool] : tools_) {
-      auto tool_json = tool.ToJson();
-      if (tool_json) {
-        cJSON *tool_json_obj = tool_json.release();
-        cJSON_AddStringToObject(tool_json_obj, "name", name.c_str());
-        cJSON_AddItemToArray(tools_array_obj, tool_json_obj);
-      }
+    auto tool_json = tool.ToJson();
+    if (!tool_json) {
+      return;
     }
+    cJSON_AddStringToObject(tool_json.get(), "name", name.c_str());
+    const auto serialized = cjson_util::ToString(tool_json);
+    if (serialized.empty()) {
+      return;
+    }
+    if (!tools_body_.empty()) {
+      tools_body_ += ',';
+    }
+    tools_body_ += serialized;
+    // `tool` (description + param_schemas) is released here, at the end of the scope.
+  }
 
-    cJSON_AddItemToObject(root_json_obj.get(), "tools", tools_array_obj);
-    return root_json_obj;
+  // Returns the full "tools/list" result payload. Built on demand: it is needed once per session,
+  // and holding a second copy permanently would defeat the point of the above.
+  std::string GetToolsJsonString() const {
+    std::string json;
+    json.reserve(tools_body_.size() + 16);
+    json += "{\"tools\":[";
+    json += tools_body_;
+    json += "]}";
+    return json;
   }
 
  private:
-  void UpdateCachedJson() {
-    auto json_obj = ToJson();
-    cached_tools_json_ = cjson_util::ToString(json_obj);
-  }
-
-  std::map<std::string, Tool> tools_;
-  std::string cached_tools_json_{"{\"tools\":[]}"};
+  std::string tools_body_;
 };
 }  // namespace mcp
 }  // namespace ai_vox
