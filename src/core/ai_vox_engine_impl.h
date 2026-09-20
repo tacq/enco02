@@ -7,6 +7,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <list>
@@ -90,6 +91,13 @@ class EngineImpl : public Engine {
   void SendMcpResponse(const int64_t id, std::unique_ptr<cJSON, cjson_util::CjsonDeleter> json_obj);
   void ChangeState(const State new_state);
 
+  // The only normal way out of kSpeaking is the server's {"type":"tts","state":"stop"} frame. If
+  // that single text frame is lost - and the firmware itself drops frames when an allocation fails
+  // - the device sits in "说话中" forever and needs a power cycle. This watchdog re-arms on every
+  // piece of inbound TTS audio and forces a recovery once the stream has been silent too long.
+  void ArmSpeakingWatchdog();
+  void OnSpeakingWatchdog();
+
   mutable std::recursive_mutex mutex_;
   State state_ = State::kIdle;
   ChatState chat_state_ = ChatState::kIdle;
@@ -112,6 +120,8 @@ class EngineImpl : public Engine {
   ActiveTaskQueue network_task_queue_;
   mcp::ToolManager mcp_tool_manager_;
   const uint32_t audio_frame_duration_ = 60;
+  // steady_clock tick of the last inbound TTS audio frame; see ArmSpeakingWatchdog().
+  std::chrono::steady_clock::time_point last_tts_activity_;
 };
 }  // namespace ai_vox
 

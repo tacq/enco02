@@ -71,6 +71,9 @@ Display::Display(esp_lcd_panel_io_handle_t panel_io,
   lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
   port_cfg.task_priority = 2;
   port_cfg.timer_period_ms = 20;
+  // Left at the vendor default of 7168. Trimming this to 6144 was measured on-device to leave only
+  // 836 bytes of margin once the chat UI was busy (peak usage 5,308), which is not worth 1KB.
+  port_cfg.task_stack = 7168;
   lvgl_port_init(&port_cfg);
 
   const lvgl_port_display_cfg_t display_cfg = {

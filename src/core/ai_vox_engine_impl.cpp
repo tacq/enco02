@@ -33,6 +33,15 @@ enum WebSocketFrameType : uint8_t {
   kWebsocketPongFrame = 0x0A,    // Pong 帧
 };
 
+// A reply is considered stalled if neither an audio frame nor a sentence_start arrives for this
+// long. Normal TTS streams a 60ms frame continuously, and the gap between sentences is well under a
+// second, so this is far longer than any legitimate pause.
+constexpr auto kSpeakingIdleTimeout = std::chrono::seconds(10);
+
+// Task-queue id for the watchdog tick, so re-arming can Erase() any pending tick instead of
+// stacking up a second one. The value is arbitrary; it only has to be unique within this queue.
+constexpr uint64_t kSpeakingWatchdogId = 0x5EAC4D06;
+
 std::string GetMacAddress() {
   uint8_t mac[6] = {0};
   esp_read_mac(mac, ESP_MAC_WIFI_STA);
@@ -94,9 +103,12 @@ EngineImpl::EngineImpl()
           {"Authorization", "Bearer test-token"},
       },
       // Stack depths are expressed in BYTES (ESP-IDF FreeRTOS port semantics).
-      // AiVoxNetwork performs the HTTPS/TLS handshake, which needs generous headroom.
-      task_queue_("AiVoxMain", 8 * 1024, tskIDLE_PRIORITY + 1),
-      network_task_queue_("AiVoxNetwork", 10 * 1024, tskIDLE_PRIORITY + 1, false) {
+      // Sized from uxTaskGetStackHighWaterMark() readings taken on the device after a full session
+      // including the HTTPS/TLS handshake: AiVoxMain peaked at 2,576 bytes and AiVoxNetwork at
+      // 3,340. Both keep ~2.5KB of headroom; the 8KB of DRAM this frees goes back to the heap,
+      // which is the resource the Wi-Fi receive path actually runs out of.
+      task_queue_("AiVoxMain", 5 * 1024, tskIDLE_PRIORITY + 1),
+      network_task_queue_("AiVoxNetwork", 6 * 1024, tskIDLE_PRIORITY + 1, false) {
 }
 
 EngineImpl::~EngineImpl() {
@@ -309,6 +321,17 @@ void EngineImpl::OnWebsocketEvent(esp_event_base_t base, int32_t event_id, void 
           break;
         }
         case kWebsocketBinaryFrame: {
+          // The main task queue is unbounded. If playback stalls for any reason - a wedged output
+          // engine, or the state machine stuck in kSpeaking - inbound TTS audio keeps arriving and
+          // every queued frame pins a heap buffer, which was measured taking free heap from 26KB to
+          // 6.4KB in under a second. Audio is disposable (a dropped frame is a click), so shed it
+          // rather than starve the Wi-Fi driver. Text frames are deliberately NOT capped: losing a
+          // tts/stop is what strands the engine in the first place.
+          constexpr size_t kMaxQueuedAudioFrames = 16;
+          if (task_queue_.size() > kMaxQueuedAudioFrames) {
+            CLOGW("audio backlog too deep (%u), dropping frame", static_cast<unsigned>(task_queue_.size()));
+            break;
+          }
           FlexArray<uint8_t> frame(data->data_len);
           if (frame.data() == nullptr) {
             CLOGE("dropping audio frame of %d bytes, free heap: %u", data->data_len, static_cast<unsigned>(esp_get_free_heap_size()));
@@ -356,6 +379,9 @@ void EngineImpl::OnWebsocketEvent(esp_event_base_t base, int32_t event_id, void 
 }
 
 void EngineImpl::OnAudioFrame(FlexArray<uint8_t> &&data) {
+  // Inbound TTS audio counts as liveness: as long as the server keeps sending, the reply is simply
+  // long, not stuck. See ArmSpeakingWatchdog().
+  last_tts_activity_ = std::chrono::steady_clock::now();
   if (audio_output_engine_) {
     audio_output_engine_->Write(std::move(data));
   }
@@ -432,11 +458,17 @@ void EngineImpl::OnJsonData(FlexArray<uint8_t> &&data) {
       audio_output_engine_.reset();
       audio_output_engine_ = std::make_shared<AudioOutputEngine>(audio_output_device_, audio_frame_duration_);
       ChangeState(State::kSpeaking);
+      ArmSpeakingWatchdog();
     } else if (tts_state == "stop") {
       if (audio_output_engine_) {
         audio_output_engine_->NotifyDataEnd([this]() { task_queue_.Enqueue([this]() { OnAudioOutputDataConsumed(); }); });
+      } else {
+        // No playback engine to drain (it degraded to "no decoder"), so nothing will ever call back.
+        // Advance the state machine directly instead of waiting for the watchdog.
+        task_queue_.Enqueue([this]() { OnAudioOutputDataConsumed(); });
       }
     } else if (tts_state == "sentence_start") {
+      last_tts_activity_ = std::chrono::steady_clock::now();
       auto text = cjson_util::GetString(root_json_obj.get(), "text");
       if (text) {
         CLOGI("<< %s", text->c_str());
@@ -612,6 +644,34 @@ void EngineImpl::OnAudioOutputDataConsumed() {
     CLOGD("invalid state: %u", state_);
     return;
   }
+  StartListening();
+}
+
+// Re-armed once per second for as long as we are speaking. Using a repeating poll rather than a
+// single deadline keeps this cheap: inbound audio only has to stamp `last_tts_activity_`, it never
+// has to touch the timer queue (which would mean an Erase + EnqueueAt on every 60ms frame).
+void EngineImpl::ArmSpeakingWatchdog() {
+  last_tts_activity_ = std::chrono::steady_clock::now();
+  // EnqueueAt() appends, so drop any tick left over from a previous reply first.
+  task_queue_.Erase(kSpeakingWatchdogId);
+  task_queue_.EnqueueAt(kSpeakingWatchdogId, std::chrono::steady_clock::now() + std::chrono::seconds(1), [this]() { OnSpeakingWatchdog(); });
+}
+
+void EngineImpl::OnSpeakingWatchdog() {
+  if (state_ != State::kSpeaking) {
+    return;  // Ended normally; stop polling.
+  }
+
+  const auto idle_for = std::chrono::steady_clock::now() - last_tts_activity_;
+  if (idle_for < kSpeakingIdleTimeout) {
+    task_queue_.EnqueueAt(kSpeakingWatchdogId, std::chrono::steady_clock::now() + std::chrono::seconds(1), [this]() { OnSpeakingWatchdog(); });
+    return;
+  }
+
+  // Nothing from the server for kSpeakingIdleTimeout. Either the tts/stop frame was lost or the
+  // session died quietly; without this the UI stays on "说话中" until the user power-cycles.
+  CLOGE("no TTS activity for %llds, recovering from stuck speaking state",
+        static_cast<long long>(std::chrono::duration_cast<std::chrono::seconds>(idle_for).count()));
   StartListening();
 }
 

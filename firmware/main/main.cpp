@@ -350,6 +350,16 @@ void PrintMemInfo() {
 
 void ConfigureWifi() {
   printf("configure wifi\n");
+
+  // Arduino's default is static_rx_buf_num=4 / dynamic_rx_buf_num=32, i.e. the Wi-Fi driver
+  // malloc()s a ~2.3KB esf_buf for almost every received frame. Late in a session the heap is
+  // fragmented down to ~2KB blocks and those allocations start failing inside
+  // wDev_IndicateFrame -> esf_buf_alloc_dynamic -> wifi_malloc, which silently drops packets and
+  // stalls the TLS stream. Opting into the static pool (8 buffers, reserved during
+  // esp_wifi_init() while the heap is still whole) keeps the receive path off the runtime heap.
+  // Must be called before anything brings Wi-Fi up.
+  WiFi.useStaticBuffers(true);
+
   auto wifi_configurator = std::make_unique<WifiConfigurator>(WiFi, kSmartConfigType);
 
   g_display->ShowStatus("网络配置中");

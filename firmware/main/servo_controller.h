@@ -37,9 +37,9 @@ class ServoController {
 
   static constexpr float kDefaultStepDeg = 10.0f;         // Default single step (10 degrees)
 
-  // Bytes, not words: the ESP-IDF Xtensa port defines StackType_t as uint8_t. The gesture task only
-  // does float math, LEDC register writes and one ESP_LOGI, so this is generous.
-  static constexpr uint32_t kAnimationTaskStackSize = 2560;
+  // Bytes, not words: the ESP-IDF Xtensa port defines StackType_t as uint8_t. Measured peak usage
+  // on the device is 556 bytes (float math, LEDC writes, one ESP_LOGI), so 1.5KB is ample.
+  static constexpr uint32_t kAnimationTaskStackSize = 1536;
 
   static ServoController& GetInstance();
 
