@@ -513,7 +513,7 @@ void EngineImpl::OnMcpJsonObj(cJSON *root_json_obj) {
 
     auto server_info_obj = cJSON_CreateObject();
     cJSON_AddStringToObject(server_info_obj, "name", "ai-vox");
-    cJSON_AddStringToObject(server_info_obj, "version", app_desc->version);
+    cJSON_AddStringToObject(server_info_obj, "version", app_desc ? app_desc->version : "1.0.0");
     cJSON_AddItemToObject(result_obj, "serverInfo", server_info_obj);
     cJSON_AddItemToObject(response_json_obj.get(), "result", result_obj);
 
