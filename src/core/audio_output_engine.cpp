@@ -14,6 +14,11 @@ constexpr uint32_t kDefaultSampleRate = 24000;
 constexpr uint32_t kDefaultChannels = 1;
 constexpr uint32_t kDefaultDurationMs = 20;  // Duration in milliseconds
 constexpr uint32_t kDefaultFrameSize = kDefaultSampleRate / 1000 * kDefaultChannels * kDefaultDurationMs;
+
+// Statically reserved so that recreating the decoder task on every TTS response can never fail on a
+// fragmented heap. Size is in bytes (StackType_t is uint8_t on ESP-IDF).
+constexpr uint32_t kAudioOutputStackSize = 12 * 1024;
+alignas(16) StackType_t g_audio_output_stack[kAudioOutputStackSize];
 }  // namespace
 
 AudioOutputEngine::AudioOutputEngine(std::shared_ptr<ai_vox::AudioOutputDevice> audio_output_device, const uint32_t frame_duration)
@@ -29,9 +34,7 @@ AudioOutputEngine::AudioOutputEngine(std::shared_ptr<ai_vox::AudioOutputDevice> 
     resampler_ = std::make_unique<SilkResampler>(kDefaultSampleRate, audio_output_device_->output_sample_rate());
   }
 
-  // Stack depth is expressed in BYTES (ESP-IDF FreeRTOS port semantics).
-  uint32_t stack_size = 12 * 1024;
-  task_queue_ = new ActiveTaskQueue("AudioOutput", stack_size, tskIDLE_PRIORITY + 1);
+  task_queue_ = new ActiveTaskQueue("AudioOutput", kAudioOutputStackSize, tskIDLE_PRIORITY + 1, false, g_audio_output_stack);
   CLOGI("OK");
 }
 

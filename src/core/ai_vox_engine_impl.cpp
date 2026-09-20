@@ -397,6 +397,7 @@ void EngineImpl::OnJsonData(FlexArray<uint8_t> &&data) {
 #ifdef ARDUINO_ESP32S3_DEV
       wake_net_->Start();
 #endif
+      audio_output_engine_.reset();
       audio_output_engine_ = std::make_shared<AudioOutputEngine>(audio_output_device_, audio_frame_duration_);
       ChangeState(State::kSpeaking);
     } else if (tts_state == "stop") {
@@ -692,6 +693,9 @@ void EngineImpl::StartListening() {
 #ifdef ARDUINO_ESP32S3_DEV
   wake_net_->Stop();
 #endif
+  // Destroy any previous capture engine *before* constructing the new one: assigning to the
+  // shared_ptr would otherwise keep both alive briefly, and they share one static task stack.
+  audio_input_engine_.reset();
   audio_input_engine_ = std::make_shared<AudioInputEngine>(
       audio_input_device_,
       [this](FlexArray<uint8_t> &&data) mutable {

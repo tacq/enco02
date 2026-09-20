@@ -22,20 +22,34 @@
 
 class ActiveTaskQueue {
  public:
-  // NOTE: In ESP-IDF's FreeRTOS port, `xTaskCreateStatic()`'s `ulStackDepth` argument is expressed in
-  // BYTES (unlike vanilla FreeRTOS, which uses words). The stack buffer must therefore be exactly
-  // `stack_depth` bytes. Allocating `stack_depth * sizeof(StackType_t)` wasted 75% of every task stack.
-  ActiveTaskQueue(const std::string& name, const uint32_t stack_depth, UBaseType_t priority, const bool internal_memory = false)
+  // NOTE: On the ESP-IDF Xtensa port `StackType_t` is `uint8_t`, so `xTaskCreateStatic()`'s
+  // `ulStackDepth` and the stack buffer size are both expressed in BYTES (unlike vanilla FreeRTOS,
+  // which counts words).
+  //
+  // `external_stack` lets the caller supply a statically allocated buffer. Tasks that are created
+  // and destroyed repeatedly at runtime (the audio engines) must use this: requesting a 20KB+
+  // contiguous block from a fragmented heap eventually fails, and xTaskCreateStatic() then aborts
+  // inside xPortcheckValidStackMem().
+  ActiveTaskQueue(const std::string& name,
+                  const uint32_t stack_depth,
+                  UBaseType_t priority,
+                  const bool internal_memory = false,
+                  StackType_t* external_stack = nullptr)
       :
 #if TASK_QUEUE_DEBUG
         name_(name),
 #endif
-        stack_buffer_(static_cast<StackType_t*>(internal_memory
-                                                    ? heap_caps_malloc(stack_depth, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL)
-                                                    : heap_caps_malloc(stack_depth, MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT))),
-        task_handle_(xTaskCreateStatic(&Loop, name.c_str(), stack_depth, this, priority, stack_buffer_, &task_buffer_)) {
-    assert(stack_buffer_ != nullptr && task_handle_ != nullptr);
+        owns_stack_(external_stack == nullptr),
+        stack_buffer_(external_stack != nullptr ? external_stack : AllocateStack(stack_depth, internal_memory)),
+        task_handle_(stack_buffer_ == nullptr
+                         ? nullptr
+                         : xTaskCreateStatic(&Loop, name.c_str(), stack_depth, this, priority, stack_buffer_, &task_buffer_)) {
     if (stack_buffer_ == nullptr || task_handle_ == nullptr) {
+      printf("FATAL: task '%s' stack allocation failed (%u bytes). free heap: %u, largest block: %u\n",
+             name.c_str(),
+             static_cast<unsigned>(stack_depth),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
       abort();
     }
   }
@@ -52,7 +66,9 @@ class ActiveTaskQueue {
     printf("task %s minimum stack %u\n", name_.c_str(), uxTaskGetStackHighWaterMark(task_handle_));
 #endif
     vTaskDelete(task_handle_);
-    heap_caps_free(stack_buffer_);
+    if (owns_stack_) {
+      heap_caps_free(stack_buffer_);
+    }
   }
 
   template <class F, class... Args>
@@ -115,6 +131,18 @@ class ActiveTaskQueue {
   ActiveTaskQueue(const ActiveTaskQueue&) = delete;
   ActiveTaskQueue& operator=(const ActiveTaskQueue&) = delete;
 
+  // Task stacks must live in byte-accessible internal RAM. Try the requested pool first, then fall
+  // back to an explicit internal-RAM request before giving up.
+  static StackType_t* AllocateStack(const uint32_t stack_depth, const bool internal_memory) {
+    auto* buffer = static_cast<StackType_t*>(internal_memory
+                                                 ? heap_caps_malloc(stack_depth, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL)
+                                                 : heap_caps_malloc(stack_depth, MALLOC_CAP_8BIT | MALLOC_CAP_DEFAULT));
+    if (buffer == nullptr) {
+      buffer = static_cast<StackType_t*>(heap_caps_malloc(stack_depth, MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL));
+    }
+    return buffer;
+  }
+
   struct TaskInterface {
     virtual void Invoke() = 0;
     virtual ~TaskInterface() = default;
@@ -176,6 +204,7 @@ class ActiveTaskQueue {
   std::condition_variable condition_;
   // std::priority_queue<Task, std::vector<Task>, std::greater<>> tasks_;
   std::deque<Task> tasks_;
+  const bool owns_stack_ = true;
   StackType_t* stack_buffer_ = nullptr;
   StaticTask_t task_buffer_;
   TaskHandle_t task_handle_ = nullptr;

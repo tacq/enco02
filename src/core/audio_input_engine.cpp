@@ -19,6 +19,13 @@ constexpr uint32_t kFrameDuration = 20;                          // ms
 constexpr uint32_t kDefaultSampleRate = 16000;                   // Hz
 constexpr uint32_t kDefaultChannels = 1;                         // Mono
 constexpr size_t kMaxFrameSize = 16000 / 1000 * kFrameDuration;  // 16000 Hz * 20 ms
+
+// The Opus encoder task is created and destroyed on every listen/speak transition. Asking the heap
+// for a ~24KB contiguous block each time fails once the heap fragments (WiFi + TLS + LVGL leave
+// very little contiguous internal RAM), and xTaskCreateStatic() then aborts the whole system.
+// Reserving the stack statically makes task creation infallible and removes the churn entirely.
+constexpr uint32_t kAudioInputStackSize = 24 * 1024;  // bytes (StackType_t is uint8_t on ESP-IDF)
+alignas(16) StackType_t g_audio_input_stack[kAudioInputStackSize];
 }  // namespace
 
 AudioInputEngine::AudioInputEngine(std::shared_ptr<ai_vox::AudioInputDevice> audio_input_device,
@@ -35,17 +42,14 @@ AudioInputEngine::AudioInputEngine(std::shared_ptr<ai_vox::AudioInputDevice> aud
     return;
   }
 
-  // Stack depth is expressed in BYTES (ESP-IDF FreeRTOS port semantics).
-  // Measured peak usage of opus_encode() at complexity 0 is ~18KB, so 24KB leaves a safe margin.
-  uint32_t stack_size = 32 * 1024;
   opus_encoder_ctl(opus_encoder_, OPUS_SET_DTX(0));
   if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0) {
     opus_encoder_ctl(opus_encoder_, OPUS_SET_COMPLEXITY(0));
     opus_encoder_ctl(opus_encoder_, OPUS_SET_BITRATE(8000));
-    stack_size = 24 * 1024;
   } else {
     opus_encoder_ctl(opus_encoder_, OPUS_SET_COMPLEXITY(5));
   }
+  const uint32_t stack_size = kAudioInputStackSize;
   CLOGI();
 
   audio_input_device_->OpenInput(kDefaultSampleRate);
@@ -60,7 +64,7 @@ AudioInputEngine::AudioInputEngine(std::shared_ptr<ai_vox::AudioInputDevice> aud
   pcm_buffer_.resize(samples_per_frame);
   opus_buffer_.resize(kMaxOpusPacketSize);
 
-  task_queue_ = new ActiveTaskQueue("AudioInput", stack_size, tskIDLE_PRIORITY + 1);
+  task_queue_ = new ActiveTaskQueue("AudioInput", stack_size, tskIDLE_PRIORITY + 1, false, g_audio_input_stack);
   task_queue_->Enqueue([this, samples_per_frame]() { PullData(samples_per_frame); });
   printf("AudioInput started, stack: %u bytes, free heap: %u, largest block: %u\n",
          static_cast<unsigned>(stack_size),
