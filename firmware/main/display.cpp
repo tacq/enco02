@@ -627,9 +627,18 @@ void Display::BuildRobotFace() {
   ahoge_timer_ = lv_timer_create(OnAhogeTimer, 120, this);
 }
 
-#define MAX_MESSAGES (5)
+// Each retained message is an LVGL container plus a wrapped UTF-8 label. With the TLS session and
+// the audio pipeline live there is very little heap left, so keep the visible history short.
+#define MAX_MESSAGES (3)
 void Display::SetChatMessage(const Role role, const std::string& content) {
   if (content.empty()) {
+    return;
+  }
+
+  // Never let the transcript be the thing that pushes the device over the edge: the conversation
+  // itself (audio + WebSocket) matters more than the on-screen history.
+  if (esp_get_free_heap_size() < 14000) {
+    printf("[display] skipping chat message, free heap: %u\n", static_cast<unsigned>(esp_get_free_heap_size()));
     return;
   }
 
@@ -637,14 +646,18 @@ void Display::SetChatMessage(const Role role, const std::string& content) {
 
   // 检查消息数量是否超过限制
   uint32_t child_count = lv_obj_get_child_cnt(content_);
-  if (child_count >= MAX_MESSAGES) {
+  while (child_count >= MAX_MESSAGES) {
     // 删除最早的消息（第一个子对象）
     lv_obj_t* first_child = lv_obj_get_child(content_, 0);
-    lv_obj_t* last_child = lv_obj_get_child(content_, child_count - 1);
-    if (first_child != nullptr) {
-      lv_obj_del(first_child);
+    if (first_child == nullptr) {
+      break;
     }
+    lv_obj_del(first_child);
+    child_count = lv_obj_get_child_cnt(content_);
+  }
+  if (child_count > 0) {
     // Scroll to the last message immediately
+    lv_obj_t* last_child = lv_obj_get_child(content_, child_count - 1);
     if (last_child != nullptr) {
       lv_obj_scroll_to_view_recursive(last_child, LV_ANIM_OFF);
     }
@@ -842,22 +855,33 @@ void Display::ShowStatus(const char* status) {
 }
 
 void Display::SetEmotion(const std::string& emotion) {
-  std::map<std::string, const char*> emotion_map = {
-      {"neutral", "😶"}, {"happy", "🙂"},       {"laughing", "😆"},  {"funny", "😂"},     {"sad", "😔"},      {"angry", "😠"},   {"crying", "😭"},
-      {"loving", "😍"},  {"embarrassed", "😳"}, {"surprised", "😯"}, {"shocked", "😱"},   {"thinking", "🤔"}, {"winking", "😉"}, {"cool", "😎"},
-      {"relaxed", "😌"}, {"delicious", "🤤"},   {"kissy", "😘"},     {"confident", "😏"}, {"sleepy", "😴"},   {"silly", "😜"},   {"confused", "🙄"},
+  // This used to build a 21-entry std::map<std::string, const char*> on every call - roughly 1.5KB
+  // of allocate-and-free churn each time the assistant changes expression. A static table costs
+  // nothing at runtime and keeps the (very small) remaining heap unfragmented.
+  struct EmotionIcon {
+    const char* name;
+    const char* icon;
+  };
+  static constexpr EmotionIcon kEmotions[] = {
+      {"neutral", "😶"},  {"happy", "🙂"},     {"laughing", "😆"},   {"funny", "😂"},     {"sad", "😔"},
+      {"angry", "😠"},    {"crying", "😭"},    {"loving", "😍"},     {"embarrassed", "😳"}, {"surprised", "😯"},
+      {"shocked", "😱"},  {"thinking", "🤔"},  {"winking", "😉"},    {"cool", "😎"},      {"relaxed", "😌"},
+      {"delicious", "🤤"}, {"kissy", "😘"},    {"confident", "😏"},  {"sleepy", "😴"},    {"silly", "😜"},
+      {"confused", "🙄"},
   };
 
-  auto it = emotion_map.find(emotion);
+  const char* icon = "😶";
+  for (const auto& entry : kEmotions) {
+    if (emotion == entry.name) {
+      icon = entry.icon;
+      break;
+    }
+  }
 
   lvgl_port_lock(0);
   if (emotion_label_ != nullptr) {
     lv_obj_set_style_text_font(emotion_label_, font_emoji_32_init(), 0);
-    if (it != emotion_map.end()) {
-      lv_label_set_text(emotion_label_, it->second);
-    } else {
-      lv_label_set_text(emotion_label_, "😶");
-    }
+    lv_label_set_text(emotion_label_, icon);
   }
 
   UpdateRobotFaceEmotion(emotion);

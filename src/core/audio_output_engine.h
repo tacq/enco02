@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <memory>
+#include <vector>
 
 #include "audio_device/audio_output_device.h"
 #include "components/task_queue/active_task_queue.h"
@@ -24,7 +25,7 @@ class AudioOutputEngine {
   static void Loop(void* self);
   void Loop();
   void ProcessData(FlexArray<uint8_t>&& data);
-  void WritePcm(FlexArray<int16_t>&& pcm);
+  void WritePcm(const int16_t* pcm, size_t samples);
 
   std::shared_ptr<ai_vox::AudioOutputDevice> audio_output_device_;
   struct OpusDecoder* opus_decoder_ = nullptr;
@@ -32,5 +33,7 @@ class AudioOutputEngine {
   ActiveTaskQueue* task_queue_ = nullptr;
   // Borrowed from audio_task_stack; shared with AudioInputEngine, returned in the destructor.
   StackType_t* task_stack_ = nullptr;
+  // Persistent decode scratch buffer; see ProcessData().
+  std::vector<int16_t> pcm_buffer_;
   const uint32_t samples_ = 0;
 };

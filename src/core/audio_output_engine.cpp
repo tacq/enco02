@@ -91,27 +91,39 @@ void AudioOutputEngine::NotifyDataEnd(std::function<void()>&& callback) {
 }
 
 void AudioOutputEngine::ProcessData(FlexArray<uint8_t>&& data) {
-  if (!data.data() || data.size() == 0) {
+  if (!data.data() || data.size() == 0 || opus_decoder_ == nullptr) {
     return;
   }
 
-  auto pcm = FlexArray<int16_t>(samples_);
-  if (!pcm.data() || pcm.size() == 0) {
+  // Persistent buffer: this runs ~17-50 times a second for the length of every reply, so a
+  // per-frame allocation is pure heap churn - and on a heap this tight it eventually fails.
+  if (pcm_buffer_.size() != samples_) {
+    pcm_buffer_.resize(samples_);
+  }
+  if (pcm_buffer_.empty()) {
     CLOGE("dropping frame, no memory for decode buffer");
     return;
   }
 
-  const auto ret = opus_decode(opus_decoder_, data.data(), data.size(), pcm.data(), pcm.size(), 0);
-  if (ret >= 0) {
-    WritePcm(std::move(pcm));
+  const auto ret = opus_decode(opus_decoder_, data.data(), data.size(), pcm_buffer_.data(), samples_, 0);
+  if (ret > 0) {
+    WritePcm(pcm_buffer_.data(), static_cast<size_t>(ret));
   }
 }
 
-void AudioOutputEngine::WritePcm(FlexArray<int16_t>&& pcm) {
+void AudioOutputEngine::WritePcm(const int16_t* pcm, const size_t samples) {
+  if (pcm == nullptr || samples == 0) {
+    return;
+  }
   if (resampler_) {
-    auto resampled_pcm = resampler_->Resample(std::move(pcm));
+    FlexArray<int16_t> input(samples);
+    if (!input.data()) {
+      return;
+    }
+    std::copy(pcm, pcm + samples, input.data());
+    auto resampled_pcm = resampler_->Resample(std::move(input));
     audio_output_device_->Write(resampled_pcm.data(), resampled_pcm.size());
   } else {
-    audio_output_device_->Write(pcm.data(), pcm.size());
+    audio_output_device_->Write(pcm, samples);
   }
 }

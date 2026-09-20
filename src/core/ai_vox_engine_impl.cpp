@@ -292,6 +292,11 @@ void EngineImpl::OnWebsocketEvent(esp_event_base_t base, int32_t event_id, void 
       switch (data->op_code) {
         case kWebsocketTextFrame: {
           FlexArray<uint8_t> frame(data->data_len);
+          if (frame.data() == nullptr) {
+            // Out of memory: drop this frame rather than memcpy into a null pointer.
+            CLOGE("dropping text frame of %d bytes, free heap: %u", data->data_len, static_cast<unsigned>(esp_get_free_heap_size()));
+            break;
+          }
           memcpy(frame.data(), data->data_ptr, data->data_len);
           task_queue_.Enqueue([this, frame = std::move(frame)]() mutable {
             if (observer_) {
@@ -305,6 +310,10 @@ void EngineImpl::OnWebsocketEvent(esp_event_base_t base, int32_t event_id, void 
         }
         case kWebsocketBinaryFrame: {
           FlexArray<uint8_t> frame(data->data_len);
+          if (frame.data() == nullptr) {
+            CLOGE("dropping audio frame of %d bytes, free heap: %u", data->data_len, static_cast<unsigned>(esp_get_free_heap_size()));
+            break;
+          }
           memcpy(frame.data(), data->data_ptr, data->data_len);
           task_queue_.Enqueue([this, frame = std::move(frame)]() mutable { OnAudioFrame(std::move(frame)); });
           break;

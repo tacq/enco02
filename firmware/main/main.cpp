@@ -105,11 +105,29 @@ void LogHeap(const char* stage) {
          static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
 }
 
-// The debug console (WebServer + mDNS) is started only after the device has reached the cloud, so
-// that it cannot steal the RAM the TLS handshake needs.
+// This firmware is built with -fno-exceptions, so a failed `operator new` goes straight to
+// std::terminate() -> abort() -> reboot with no indication of what was being allocated. Hooking the
+// allocator means any future out-of-memory condition names itself in the log instead.
+void OnHeapAllocFailed(size_t size, uint32_t caps, const char* function_name) {
+  printf("[heap] ALLOC FAILED: %u bytes, caps 0x%x, in %s | free: %u, largest: %u, min ever: %u\n",
+         static_cast<unsigned>(size),
+         static_cast<unsigned>(caps),
+         function_name ? function_name : "?",
+         static_cast<unsigned>(esp_get_free_heap_size()),
+         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+         static_cast<unsigned>(esp_get_minimum_free_heap_size()));
+}
+
+// The debug console (WebServer + mDNS) costs ~8.5KB of heap and an extra task. With the TLS session
+// and the audio pipeline live there is only ~20KB left on this no-PSRAM board, so it is no longer
+// started automatically - long-press the boot button to bring it up when you actually need it.
 void EnsureDebugServerStarted() {
   static bool started = false;
   if (started) {
+    return;
+  }
+  if (esp_get_free_heap_size() < 25000) {
+    printf("[debug server] not enough heap (free: %u), refusing to start\n", static_cast<unsigned>(esp_get_free_heap_size()));
     return;
   }
   started = true;
@@ -489,6 +507,9 @@ void setup() {
   // esp-tls / esp_websocket_client failures surface only as an opaque WEBSOCKET_EVENT_ERROR.
   esp_log_level_set("*", ESP_LOG_ERROR);
 
+  // Name the culprit if the heap ever runs out instead of just aborting.
+  heap_caps_register_failed_alloc_callback(OnHeapAllocFailed);
+
   // Reserve the Opus codec state first, before LVGL, WiFi and mbedTLS have had a chance to carve up
   // the internal heap. It needs a ~24KB *contiguous* block, which simply does not exist any more by
   // the time the first "listen" starts on this no-PSRAM ESP32 - that failed allocation was the
@@ -567,6 +588,16 @@ void setup() {
       },
       nullptr));
 
+  ESP_ERROR_CHECK(iot_button_register_cb(
+      g_button_boot_handle,
+      BUTTON_LONG_PRESS_START,
+      nullptr,
+      [](void* button_handle, void* usr_data) {
+        printf("boot button long pressed: starting debug console\n");
+        EnsureDebugServerStarted();
+      },
+      nullptr));
+
   g_display->ShowStatus("AI引擎已启动");
 }
 
@@ -631,9 +662,6 @@ void loop() {
           printf("Listening...\n");
           g_display->ShowStatus("聆听中");
           LogHeap("listening");
-          // The cloud session is up, so the handshake peak is behind us: it is now safe to bring up
-          // the debug console (http://enco02.local) without starving the TLS connection.
-          EnsureDebugServerStarted();
           break;
         }
         case ai_vox::ChatState::kSpeaking: {

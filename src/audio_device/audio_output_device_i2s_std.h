@@ -5,8 +5,10 @@
 
 #include <driver/i2s_std.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 
 #include "audio_output_device.h"
 
@@ -83,22 +85,46 @@ class AudioOutputDeviceI2sStd : public AudioOutputDevice {
     sample_rate_ = 0;
   }
   size_t Write(const int16_t* pcm, size_t samples) override {
-    std::vector<int32_t> buffer(samples);
-
-    for (size_t i = 0; i < samples; i++) {
-      int64_t temp = int64_t(pcm[i]) * volume_factor_;
-      if (temp > INT32_MAX) {
-        buffer[i] = INT32_MAX;
-      } else if (temp < INT32_MIN) {
-        buffer[i] = INT32_MIN;
-      } else {
-        buffer[i] = static_cast<int32_t>(temp);
-      }
+    if (pcm == nullptr || samples == 0 || i2s_tx_handle_ == nullptr) {
+      return 0;
     }
 
-    size_t bytes_written = 0;
-    ESP_ERROR_CHECK(i2s_channel_write(i2s_tx_handle_, buffer.data(), buffer.size() * sizeof(int32_t), &bytes_written, 1000));
-    return buffer.size();
+    // This runs ~17-50 times a second for the whole duration of every reply. The previous
+    // implementation allocated a std::vector<int32_t> of `samples` entries per call (5.7KB for a
+    // 60ms 24kHz frame); once the heap ran low, operator new threw and -fno-exceptions turned that
+    // into std::terminate() -> abort() -> reboot, right in the middle of the robot talking.
+    //
+    // Converting in fixed-size chunks on the stack removes the allocation entirely, so playback is
+    // now immune to heap pressure.
+    constexpr size_t kChunkSamples = 256;  // 1KB of stack
+    int32_t chunk[kChunkSamples];
+
+    const int32_t volume_factor = volume_factor_;
+    size_t written_samples = 0;
+    while (written_samples < samples) {
+      const size_t count = std::min(kChunkSamples, samples - written_samples);
+      for (size_t i = 0; i < count; i++) {
+        const int64_t temp = static_cast<int64_t>(pcm[written_samples + i]) * volume_factor;
+        if (temp > INT32_MAX) {
+          chunk[i] = INT32_MAX;
+        } else if (temp < INT32_MIN) {
+          chunk[i] = INT32_MIN;
+        } else {
+          chunk[i] = static_cast<int32_t>(temp);
+        }
+      }
+
+      size_t bytes_written = 0;
+      const auto err = i2s_channel_write(i2s_tx_handle_, chunk, count * sizeof(int32_t), &bytes_written, 1000);
+      if (err != ESP_OK) {
+        // Don't ESP_ERROR_CHECK here: a timeout while the speaker is busy must not reboot the
+        // device.
+        break;
+      }
+      written_samples += count;
+    }
+
+    return written_samples;
   }
   uint32_t output_sample_rate() override {
     return sample_rate_;

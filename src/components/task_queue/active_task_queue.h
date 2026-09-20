@@ -62,9 +62,11 @@ class ActiveTaskQueue {
     });
     xSemaphoreTake(termination_sem, portMAX_DELAY);
     vSemaphoreDelete(termination_sem);
-#if TASK_QUEUE_DEBUG
-    printf("task %s minimum stack %u\n", name_.c_str(), uxTaskGetStackHighWaterMark(task_handle_));
-#endif
+    // Task stacks are the biggest fixed RAM cost left on this no-PSRAM board, so always report the
+    // high-water mark: "unused" is how much could safely be reclaimed from this task's stack.
+    printf("task '%s' stack unused: %u bytes\n",
+           pcTaskGetName(task_handle_),
+           static_cast<unsigned>(uxTaskGetStackHighWaterMark(task_handle_)));
     vTaskDelete(task_handle_);
     if (owns_stack_) {
       heap_caps_free(stack_buffer_);
