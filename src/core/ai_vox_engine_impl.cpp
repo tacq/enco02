@@ -12,6 +12,7 @@
 #include "audio_output_engine.h"
 #include "components/cjson_util/cjson_util.h"
 #include "fetch_config.h"
+#include "opus_codec_pool.h"
 #include "wake_net/wake_net.h"
 
 #ifndef CLOGGER_SEVERITY
@@ -144,6 +145,11 @@ void EngineImpl::Start(std::shared_ptr<AudioInputDevice> audio_input_device, std
   if (state_ != State::kIdle) {
     return;
   }
+
+  // No-op if the application already did this in setup(). Doing it here still beats allocating the
+  // codec states lazily, because everything below (OTA over HTTPS, then the WebSocket TLS session)
+  // permanently claims tens of kilobytes of internal RAM.
+  opus_codec_pool::Preallocate();
 
   audio_input_device_ = std::move(audio_input_device);
   audio_output_device_ = std::move(audio_output_device);

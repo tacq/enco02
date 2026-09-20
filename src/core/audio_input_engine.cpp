@@ -1,10 +1,12 @@
 #include "audio_input_engine.h"
 
+#include <esp_heap_caps.h>
 #include <esp_system.h>
 
 #include <algorithm>
 
 #include "libopus/opus.h"
+#include "opus_codec_pool.h"
 #include "silk_resampler.h"
 
 #ifndef CLOGGER_SEVERITY
@@ -14,7 +16,10 @@
 #include "clogger/clogger.h"
 
 namespace {
-constexpr size_t kMaxOpusPacketSize = 1500;
+// A 20ms mono frame at the bitrates this firmware uses (8kbps without PSRAM) is ~20 bytes; even at
+// the Opus maximum for this frame size it stays far below 512. Reserving 1500 bytes per engine was
+// wasted internal RAM on a board that has none to spare.
+constexpr size_t kMaxOpusPacketSize = 512;
 constexpr uint32_t kFrameDuration = 20;                          // ms
 constexpr uint32_t kDefaultSampleRate = 16000;                   // Hz
 constexpr uint32_t kDefaultChannels = 1;                         // Mono
@@ -33,22 +38,20 @@ AudioInputEngine::AudioInputEngine(std::shared_ptr<ai_vox::AudioInputDevice> aud
                                    const uint32_t frame_duration)
     : handler_(std::move(handler)), audio_input_device_(std::move(audio_input_device)) {
   CLOGI();
-  int error = 0;
-  opus_encoder_ = opus_encoder_create(kDefaultSampleRate, kDefaultChannels, OPUS_APPLICATION_VOIP, &error);
-  assert(opus_encoder_ != nullptr);
+  // The encoder state (~20KB) is owned by the codec pool and reserved during boot. Allocating it
+  // here would fail once WiFi + TLS + LVGL have fragmented the internal heap, and a failed
+  // allocation used to abort() the firmware into a reboot loop.
+  opus_encoder_ = opus_codec_pool::AcquireEncoder(kDefaultSampleRate, kDefaultChannels, OPUS_APPLICATION_VOIP);
   if (opus_encoder_ == nullptr) {
-    CLOG("opus_encoder_create failed: %d", error);
-    abort();
+    // Degrade gracefully: the device stays alive (display, servos, playback) and simply cannot
+    // capture audio, which is far better than a boot loop.
+    CLOGE("no opus encoder available, microphone capture disabled");
+    printf("AudioInput: encoder unavailable, free heap: %u, largest block: %u\n",
+           static_cast<unsigned>(esp_get_free_heap_size()),
+           static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
     return;
   }
 
-  opus_encoder_ctl(opus_encoder_, OPUS_SET_DTX(0));
-  if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0) {
-    opus_encoder_ctl(opus_encoder_, OPUS_SET_COMPLEXITY(0));
-    opus_encoder_ctl(opus_encoder_, OPUS_SET_BITRATE(8000));
-  } else {
-    opus_encoder_ctl(opus_encoder_, OPUS_SET_COMPLEXITY(5));
-  }
   const uint32_t stack_size = kAudioInputStackSize;
   CLOGI();
 
@@ -75,9 +78,13 @@ AudioInputEngine::AudioInputEngine(std::shared_ptr<ai_vox::AudioInputDevice> aud
 AudioInputEngine::~AudioInputEngine() {
   CLOGI();
   delete task_queue_;
-  // delete reinterpret_cast<silk_resampler_state_struct *>(silk_resampler_);
-  audio_input_device_->CloseInput();
-  opus_encoder_destroy(opus_encoder_);
+  task_queue_ = nullptr;
+  if (opus_encoder_ != nullptr) {
+    // Only ever opened when the encoder was available.
+    audio_input_device_->CloseInput();
+  }
+  // opus_encoder_ is owned by opus_codec_pool and deliberately outlives this object.
+  opus_encoder_ = nullptr;
   CLOG("OK");
 }
 

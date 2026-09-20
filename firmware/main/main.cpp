@@ -15,6 +15,7 @@
 #include "components/espressif/button/iot_button.h"
 #include "components/espressif/esp_audio_codec/esp_audio_simple_dec.h"
 #include "components/espressif/esp_audio_codec/esp_mp3_dec.h"
+#include "core/opus_codec_pool.h"
 #include <Preferences.h>
 #include "components/wifi_configurator/wifi_configurator.h"
 #include "web_wifi_configurator.h"
@@ -456,6 +457,12 @@ void InitMcpTools() {
 void setup() {
   Serial.begin(115200);
   printf("setup\n");
+
+  // Reserve the Opus encoder/decoder states first, before LVGL, WiFi and mbedTLS have had a chance
+  // to carve up the internal heap. Each state needs a ~20KB *contiguous* block, which simply does
+  // not exist any more by the time the first "listen" starts on this no-PSRAM ESP32 - that failed
+  // allocation was the cause of the reboot loop.
+  opus_codec_pool::Preallocate();
 
   // Immediately initialize MG92B servos to 90 degrees
   ServoController::GetInstance().Init();

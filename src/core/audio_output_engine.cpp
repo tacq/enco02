@@ -2,6 +2,7 @@
 
 #include "flex_array/flex_array.h"
 #include "libopus/opus.h"
+#include "opus_codec_pool.h"
 #include "silk_resampler.h"
 
 #ifndef CLOGGER_SEVERITY
@@ -24,9 +25,15 @@ alignas(16) StackType_t g_audio_output_stack[kAudioOutputStackSize];
 AudioOutputEngine::AudioOutputEngine(std::shared_ptr<ai_vox::AudioOutputDevice> audio_output_device, const uint32_t frame_duration)
     : audio_output_device_(std::move(audio_output_device)), samples_(kDefaultSampleRate / 1000 * kDefaultChannels * frame_duration) {
   CLOGI();
-  int error = -1;
-  opus_decoder_ = opus_decoder_create(kDefaultSampleRate, kDefaultChannels, &error);
-  assert(opus_decoder_ != nullptr);
+  // The decoder state (~18KB) is reserved once during boot by the codec pool. Recreating it here on
+  // every speak transition would eventually fail on the fragmented internal heap and the assert
+  // below used to reboot the device.
+  opus_decoder_ = opus_codec_pool::AcquireDecoder(kDefaultSampleRate, kDefaultChannels);
+  if (opus_decoder_ == nullptr) {
+    CLOGE("no opus decoder available, audio playback disabled");
+    return;
+  }
+
   audio_output_device_->OpenOutput(kDefaultSampleRate);
 
   if (audio_output_device_->output_sample_rate() != kDefaultSampleRate) {
@@ -41,12 +48,20 @@ AudioOutputEngine::AudioOutputEngine(std::shared_ptr<ai_vox::AudioOutputDevice> 
 AudioOutputEngine::~AudioOutputEngine() {
   CLOGI();
   delete task_queue_;
-  audio_output_device_->CloseOutput();
-  opus_decoder_destroy(opus_decoder_);
+  task_queue_ = nullptr;
+  if (opus_decoder_ != nullptr) {
+    audio_output_device_->CloseOutput();
+  }
+  // opus_decoder_ is owned by opus_codec_pool and deliberately outlives this object.
+  opus_decoder_ = nullptr;
   CLOGI("OK");
 }
 
 void AudioOutputEngine::Write(FlexArray<uint8_t>&& data) {
+  if (task_queue_ == nullptr) {
+    // Engine is running degraded (no decoder). Drop the frame rather than crash.
+    return;
+  }
   // Without PSRAM the heap is tiny. If the decoder cannot keep up with the incoming TTS stream the
   // queue would grow without bound, each entry holding a heap buffer, until malloc() fails.
   if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0 && task_queue_->size() > 12) {
@@ -57,6 +72,14 @@ void AudioOutputEngine::Write(FlexArray<uint8_t>&& data) {
 }
 
 void AudioOutputEngine::NotifyDataEnd(std::function<void()>&& callback) {
+  if (task_queue_ == nullptr) {
+    // No worker to serialise against: run the completion callback straight away so the engine state
+    // machine still advances out of the speaking state.
+    if (callback) {
+      callback();
+    }
+    return;
+  }
   task_queue_->Enqueue(std::move(callback));
 }
 
