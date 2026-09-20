@@ -42,9 +42,8 @@ class Display {
   void ToggleUiMode();
   void UpdateRobotFaceEmotion(const std::string& emotion);
   void LookDirection(const char* dir);
-  // Creates the ~45 LVGL objects that make up the 2D avatar. Called lazily the first time face mode
-  // is selected, because on this no-PSRAM ESP32 those objects cost more heap than the TLS handshake
-  // can spare at boot.
+  // Creates the handful of LVGL objects that make up the bitmap character. Safe to call more than
+  // once; the pixels themselves live in flash, so this costs well under 2KB of heap.
   void BuildRobotFace();
 
  private:
@@ -70,11 +69,10 @@ class Display {
   lv_obj_t* container_ = nullptr;
   lv_obj_t* status_bar_ = nullptr;
 
-  // Boot into the plain text conversation view. Building the 2D avatar costs >20KB of heap, which
-  // on this no-PSRAM ESP32 is exactly what the mbedTLS handshake needs to reach the xiaozhi server.
-  // Face mode is still available on demand (boot button / MCP tool / web console) and is built the
-  // first time it is selected.
-  UiMode ui_mode_ = UiMode::kChatText;
+  // Boot straight into the character view. The bitmap avatar is four LVGL objects reading pixels
+  // straight out of flash, so unlike the old vector face it costs almost no heap and no longer has
+  // to be traded off against the TLS handshake.
+  UiMode ui_mode_ = UiMode::kRobotFace;
   bool face_built_ = false;
 
   // Chat Text Mode elements (preserved!)
@@ -88,64 +86,31 @@ class Display {
   lv_obj_t* status_label_ = nullptr;
   lv_obj_t* mute_label_ = nullptr;
 
-  // Virtual Robot Face Mode elements
+  // Character face mode: a full-screen portrait plus two small sprites that are swapped over the
+  // eyes and mouth to animate it. Everything else about the picture stays put.
   lv_obj_t* face_container_ = nullptr;
-  lv_obj_t* eye_box_ = nullptr;
-  lv_obj_t* eye_left_ = nullptr;
-  lv_obj_t* eye_right_ = nullptr;
-  lv_obj_t* iris_left_ = nullptr;
-  lv_obj_t* iris_right_ = nullptr;
-  lv_obj_t* pupil_left_ = nullptr;
-  lv_obj_t* pupil_right_ = nullptr;
-  lv_obj_t* sparkle1_left_ = nullptr;
-  lv_obj_t* sparkle1_right_ = nullptr;
-  lv_obj_t* sparkle2_left_ = nullptr;
-  lv_obj_t* sparkle2_right_ = nullptr;
-  lv_obj_t* iris_glow_left_ = nullptr;
-  lv_obj_t* iris_glow_right_ = nullptr;
-  lv_obj_t* eyelash_left_ = nullptr;
-  lv_obj_t* eyelash_right_ = nullptr;
-  lv_obj_t* eyebrow_left_ = nullptr;
-  lv_obj_t* eyebrow_right_ = nullptr;
-
-  lv_obj_t* ahoge_ = nullptr;
-  lv_obj_t* hair_bang_center_ = nullptr;
-  lv_obj_t* hair_bang_left_ = nullptr;
-  lv_obj_t* hair_bang_right_ = nullptr;
-  lv_obj_t* hair_shine_ = nullptr;
-  lv_obj_t* hair_clip_ = nullptr;
-  lv_obj_t* side_hair_left_ = nullptr;
-  lv_obj_t* side_hair_right_ = nullptr;
-
-  lv_obj_t* blush_left_ = nullptr;
-  lv_obj_t* blush_right_ = nullptr;
-  lv_obj_t* blush_lines_left_ = nullptr;
-  lv_obj_t* blush_lines_right_ = nullptr;
-
-  lv_obj_t* mouth_box_ = nullptr;
-  lv_obj_t* mouth_smile_ = nullptr;
-  lv_obj_t* anime_mouth_ = nullptr;
-  lv_obj_t* mouth_tooth_ = nullptr;
-  lv_obj_t* mouth_tongue_ = nullptr;
-
-  lv_obj_t* emote_badge_ = nullptr;
-
+  lv_obj_t* face_image_ = nullptr;
+  lv_obj_t* eyes_overlay_ = nullptr;
+  lv_obj_t* mouth_overlay_ = nullptr;
   lv_obj_t* subtitle_box_ = nullptr;
   lv_obj_t* subtitle_label_ = nullptr;
 
-  lv_timer_t* blink_timer_ = nullptr;
-  lv_timer_t* voice_anim_timer_ = nullptr;
-  lv_timer_t* ahoge_timer_ = nullptr;
+  lv_timer_t* face_timer_ = nullptr;
 
   std::string current_emotion_ = "neutral";
   bool is_speaking_ = false;
-  int current_eye_height_ = 68;
-  int current_eye_width_ = 50;
-  lv_color_t current_eye_color_;
 
-  static void OnBlinkTimer(lv_timer_t* timer);
-  static void OnVoiceAnimTimer(lv_timer_t* timer);
-  static void OnAhogeTimer(lv_timer_t* timer);
+  // Animation state, all driven from the single face timer.
+  uint32_t face_tick_ = 0;        // increments once per timer period
+  uint32_t next_blink_tick_ = 0;  // when the next blink starts
+  uint8_t blink_frame_ = 0;       // 0 = eyes open, otherwise a step in the blink sequence
+  int8_t head_offset_x_ = 0;      // current idle sway / look-direction offset
+  int8_t head_offset_y_ = 0;
+
+  static void OnFaceTimer(lv_timer_t* timer);
+  void ApplyBlinkFrame();
+  void ApplyMouthFrame();
+  void ApplyHeadOffset(int dx, int dy);
 
   ThemeColors current_theme_;
 };

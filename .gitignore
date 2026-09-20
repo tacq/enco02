@@ -3,3 +3,6 @@
 .idea/
 *.pyc
 __pycache__/
+
+# Intermediate artefacts from tools/face_assets/build_face_assets.py
+tools/face_assets/build/
