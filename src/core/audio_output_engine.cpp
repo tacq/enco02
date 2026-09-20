@@ -29,7 +29,7 @@ AudioOutputEngine::AudioOutputEngine(std::shared_ptr<ai_vox::AudioOutputDevice> 
     resampler_ = std::make_unique<SilkResampler>(kDefaultSampleRate, audio_output_device_->output_sample_rate());
   }
 
-  uint32_t stack_size = 9 << 10;
+  uint32_t stack_size = (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0) ? (5 * 1024) : (9 << 10);
   task_queue_ = new ActiveTaskQueue("AudioOutput", stack_size, tskIDLE_PRIORITY + 1);
   CLOGI("OK");
 }

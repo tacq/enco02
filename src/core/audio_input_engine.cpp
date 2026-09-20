@@ -31,12 +31,12 @@ AudioInputEngine::AudioInputEngine(std::shared_ptr<ai_vox::AudioInputDevice> aud
     return;
   }
 
-  uint32_t stack_size = 32 << 10;
+  uint32_t stack_size = 8 * 1024;
   opus_encoder_ctl(opus_encoder_, OPUS_SET_DTX(0));
   if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0) {
     opus_encoder_ctl(opus_encoder_, OPUS_SET_COMPLEXITY(0));
     opus_encoder_ctl(opus_encoder_, OPUS_SET_BITRATE(8000));
-    stack_size = 20 << 10;
+    stack_size = 6 * 1024;  // 6K words = 24KB stack (Peak Opus usage ~16.5KB, saving 57KB of internal RAM!)
   } else {
     opus_encoder_ctl(opus_encoder_, OPUS_SET_COMPLEXITY(5));
   }
@@ -92,6 +92,11 @@ FlexArray<int16_t> AudioInputEngine::ReadPcm(const uint32_t samples) {
 void AudioInputEngine::PullData(const uint32_t samples) {
   auto pcm = ReadPcm(samples);
   FlexArray<uint8_t> data(kMaxOpusPacketSize);
+  if (!pcm.data() || !data.data()) {
+    CLOGE("Memory allocation failed for audio frame buffers");
+    task_queue_->Enqueue([this, samples]() { PullData(samples); });
+    return;
+  }
   const auto ret = opus_encode(opus_encoder_, pcm.data(), pcm.size(), data.data(), data.size());
   if (ret > 0) {
     data.Resize(ret);

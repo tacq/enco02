@@ -27,8 +27,11 @@ class FlexArray {
   }
 
   void Resize(const size_t size) noexcept {
-    buffer_ = reinterpret_cast<T*>(std::realloc(buffer_, size * sizeof(T)));
-    size_ = size;
+    auto* new_buf = reinterpret_cast<T*>(std::realloc(buffer_, size * sizeof(T)));
+    if (new_buf != nullptr || size == 0) {
+      buffer_ = new_buf;
+      size_ = size;
+    }
   }
 
   size_t size() const noexcept {
