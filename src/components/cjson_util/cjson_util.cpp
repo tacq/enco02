@@ -1,4 +1,5 @@
 #include "cjson_util.h"
+#include <esp_system.h>
 
 namespace cjson_util {
 std::unique_ptr<cJSON, CjsonDeleter> MakeUnique() {
@@ -15,6 +16,9 @@ std::unique_ptr<cJSON, CjsonDeleter> ArrayMakeUnique() {
 
 std::string ToString(const cJSON* const obj, const bool format) {
   if (obj == nullptr) {
+    return "";
+  }
+  if (esp_get_free_heap_size() < 3000) {
     return "";
   }
   char* raw_str = format ? cJSON_Print(obj) : cJSON_PrintUnformatted(obj);

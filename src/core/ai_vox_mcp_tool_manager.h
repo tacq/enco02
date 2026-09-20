@@ -77,9 +77,14 @@ class ToolManager {
 
   void AddTool(std::string name, Tool tool) {
     tools_.insert_or_assign(std::move(name), std::move(tool));
+    UpdateCachedJson();
   }
 
-  auto ToJson() {
+  const std::string& GetToolsJsonString() const {
+    return cached_tools_json_;
+  }
+
+  auto ToJson() const {
     auto root_json_obj = cjson_util::MakeUnique();
     cJSON *tools_array_obj = cJSON_CreateArray();
 
@@ -97,7 +102,13 @@ class ToolManager {
   }
 
  private:
+  void UpdateCachedJson() {
+    auto json_obj = ToJson();
+    cached_tools_json_ = cjson_util::ToString(json_obj);
+  }
+
   std::map<std::string, Tool> tools_;
+  std::string cached_tools_json_{"{\"tools\":[]}"};
 };
 }  // namespace mcp
 }  // namespace ai_vox

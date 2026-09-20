@@ -91,8 +91,8 @@ EngineImpl::EngineImpl()
       websocket_headers_{
           {"Authorization", "Bearer test-token"},
       },
-      task_queue_("AiVoxMain", 1024 * 6, tskIDLE_PRIORITY + 1),
-      network_task_queue_("AiVoxNetwork", 1024 * 6, tskIDLE_PRIORITY + 1, false) {
+      task_queue_("AiVoxMain", 1024 * 4, tskIDLE_PRIORITY + 1),
+      network_task_queue_("AiVoxNetwork", 1024 * 3, tskIDLE_PRIORITY + 1, false) {
 }
 
 EngineImpl::~EngineImpl() {
@@ -520,11 +520,17 @@ void EngineImpl::OnMcpJsonObj(cJSON *root_json_obj) {
     // auto const reply_text = cjson_util::ToString(reply_obj);
     SendMcpResponse(id.value(), std::move(response_json_obj));
   } else if (*method == "tools/list") {
-    auto response_json_obj = cjson_util::MakeUnique();
-    cJSON_AddStringToObject(response_json_obj.get(), "jsonrpc", "2.0");
-    cJSON_AddNumberToObject(response_json_obj.get(), "id", id.value());
-    cJSON_AddItemToObject(response_json_obj.get(), "result", mcp_tool_manager_.ToJson().release());
-    SendMcpResponse(id.value(), std::move(response_json_obj));
+    const std::string& tools_json = mcp_tool_manager_.GetToolsJsonString();
+    std::string response;
+    response.reserve(session_id_.length() + tools_json.length() + 80);
+    response += "{\"session_id\":\"";
+    response += session_id_;
+    response += "\",\"type\":\"mcp\",\"payload\":{\"jsonrpc\":\"2.0\",\"id\":";
+    response += std::to_string(id.value());
+    response += ",\"result\":";
+    response += tools_json;
+    response += "}}";
+    SendTextInternal(std::move(response));
   } else if (*method == "tools/call") {
     auto params_json_obj = cJSON_GetObjectItem(root_json_obj, "params");
     auto name = cjson_util::GetString(params_json_obj, "name");
