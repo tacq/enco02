@@ -38,7 +38,13 @@ SilkResampler::~SilkResampler() {
 }
 
 FlexArray<int16_t> SilkResampler::Resample(FlexArray<int16_t> &&input_pcm) const {
+  if (!input_pcm.data() || input_pcm.size() == 0) {
+    return FlexArray<int16_t>(0);
+  }
   FlexArray<int16_t> output_pcm(input_pcm.size() * output_sample_rate_ / input_sample_rate_);
+  if (!output_pcm.data() || output_pcm.size() == 0) {
+    return FlexArray<int16_t>(0);
+  }
   const auto ret =
       silk_resampler(reinterpret_cast<silk_resampler_state_struct *>(silk_resampler_), output_pcm.data(), input_pcm.data(), input_pcm.size());
   if (ret != 0) {

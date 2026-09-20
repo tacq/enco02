@@ -4,6 +4,7 @@
 #define _AUDIO_INPUT_DEVICE_I2S_STD_H_
 
 #include <driver/i2s_std.h>
+#include <vector>
 
 #include "audio_input_device.h"
 
@@ -65,14 +66,16 @@ class AudioInputDeviceI2sStd : public AudioInputDevice {
   }
 
   size_t Read(int16_t* buffer, uint32_t samples) override {
-    auto raw_32bit_samples = new int32_t[samples];
-    i2s_channel_read(i2s_rx_handle_, raw_32bit_samples, samples * sizeof(raw_32bit_samples[0]), nullptr, 1000);
+    if (!buffer || samples == 0) return 0;
+    if (raw_32bit_samples_.size() < samples) {
+      raw_32bit_samples_.resize(samples);
+    }
+    i2s_channel_read(i2s_rx_handle_, raw_32bit_samples_.data(), samples * sizeof(int32_t), nullptr, 1000);
 
-    for (int i = 0; i < samples; i++) {
-      int32_t value = raw_32bit_samples[i] >> 12;
+    for (uint32_t i = 0; i < samples; i++) {
+      int32_t value = raw_32bit_samples_[i] >> 12;
       buffer[i] = (value > INT16_MAX) ? INT16_MAX : (value < -INT16_MAX) ? -INT16_MAX : (int16_t)value;
     }
-    delete[] raw_32bit_samples;
     return samples;
   }
 
@@ -85,6 +88,7 @@ class AudioInputDeviceI2sStd : public AudioInputDevice {
   const gpio_num_t pin_din_ = GPIO_NUM_NC;
   i2s_chan_handle_t i2s_rx_handle_ = nullptr;
   uint32_t sample_rate_ = 0;
+  std::vector<int32_t> raw_32bit_samples_;
 };
 }  // namespace ai_vox
 #endif

@@ -65,13 +65,15 @@ AudioInputEngine::~AudioInputEngine() {
 
 FlexArray<int16_t> AudioInputEngine::ReadPcm(const uint32_t samples) {
   FlexArray<int16_t> pcm(samples);
+  if (!pcm.data() || pcm.size() == 0) {
+    return FlexArray<int16_t>(0);
+  }
   audio_input_device_->Read(pcm.data(), pcm.size());
   if (resampler_) {
     return resampler_->Resample(std::move(pcm));
   } else {
     return pcm;
   }
-  // return resampler_ ? resampler_->Resample(std::move(pcm)) : pcm;
 }
 
 // FlexArray<int16_t> AudioInputEngine::Resample(FlexArray<int16_t> &&input_pcm) {
@@ -91,9 +93,14 @@ FlexArray<int16_t> AudioInputEngine::ReadPcm(const uint32_t samples) {
 
 void AudioInputEngine::PullData(const uint32_t samples) {
   auto pcm = ReadPcm(samples);
+  if (!pcm.data() || pcm.size() == 0) {
+    CLOGE("Memory allocation failed for audio pcm buffer");
+    task_queue_->Enqueue([this, samples]() { PullData(samples); });
+    return;
+  }
   FlexArray<uint8_t> data(kMaxOpusPacketSize);
-  if (!pcm.data() || !data.data()) {
-    CLOGE("Memory allocation failed for audio frame buffers");
+  if (!data.data() || data.size() == 0) {
+    CLOGE("Memory allocation failed for audio opus data buffer");
     task_queue_->Enqueue([this, samples]() { PullData(samples); });
     return;
   }
@@ -103,7 +110,6 @@ void AudioInputEngine::PullData(const uint32_t samples) {
     handler_(std::move(data));
   } else {
     CLOGE("opus_encode failed with: %d", ret);
-    abort();
   }
 
   task_queue_->Enqueue([this, samples]() { PullData(samples); });

@@ -12,7 +12,13 @@ class FlexArray {
   static_assert(std::is_trivial_v<T>, "FlexArray supports only trivial types");
 
  public:
-  explicit FlexArray(const size_t size) noexcept : size_(size), buffer_(reinterpret_cast<T*>(std::malloc(size * sizeof(T)))) {
+  explicit FlexArray(const size_t size) noexcept : size_(0), buffer_(nullptr) {
+    if (size > 0) {
+      buffer_ = reinterpret_cast<T*>(std::malloc(size * sizeof(T)));
+      if (buffer_ != nullptr) {
+        size_ = size;
+      }
+    }
   }
 
   FlexArray(FlexArray&& other) noexcept : size_(other.size_), buffer_(other.buffer_) {
