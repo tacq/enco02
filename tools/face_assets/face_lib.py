@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Shared helpers for the ENCO-02 face asset pipeline.
 
-Quantisation is slow (~30s of pure Python), so the result is cached to a small binary blob and
-reused by every downstream tool.  No third-party deps: PIL is unavailable and this machine's
-binary authorization policy blocks installing new tooling, so macOS `sips` does the decode/resize
-and the BMP is parsed by hand.
+Quantisation is cached to a small binary blob and reused by every downstream tool.  No third-party
+deps: PIL is unavailable and this machine's binary authorization policy blocks installing new
+tooling, so macOS `sips` does the decode/resize and the BMP is parsed by hand.
 """
 import json
 import os
@@ -161,6 +160,86 @@ def write_png_indexed(path, indices, palette, w, h, scale=1, grid=0, origin=(0, 
 
 def crop(indices, w, h, x0, y0, cw, ch):
     return [indices[(y0 + y) * w + (x0 + x)] for y in range(ch) for x in range(cw)]
+
+
+# ---------------------------------------------------------------- change detection
+
+def change_mask(base, var, w, h, win, neighbours=9):
+    """Pixels inside `win` where `var` differs from `base`, minus requantisation speckle."""
+    wx, wy, ww, wh = win
+    d = [[1 if base[y * w + x] != var[y * w + x] else 0 for x in range(wx, wx + ww)]
+         for y in range(wy, wy + wh)]
+    out = bytearray(w * h)
+    for y in range(1, wh - 1):
+        for x in range(1, ww - 1):
+            if d[y][x] and sum(d[y + dy][x + dx] for dy in (-1, 0, 1)
+                               for dx in (-1, 0, 1)) >= neighbours:
+                out[(wy + y) * w + (wx + x)] = 1
+    return out
+
+
+def blobs(mask, w, h):
+    """8-connected components of `mask`, largest first, as (area, [pixel indices])."""
+    seen = bytearray(w * h)
+    found = []
+    for i in range(w * h):
+        if not mask[i] or seen[i]:
+            continue
+        stack, cells = [i], []
+        seen[i] = 1
+        while stack:
+            j = stack.pop()
+            cells.append(j)
+            x, y = j % w, j // w
+            for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1),
+                           (x - 1, y - 1), (x + 1, y - 1), (x - 1, y + 1), (x + 1, y + 1)):
+                if 0 <= nx < w and 0 <= ny < h:
+                    k = ny * w + nx
+                    if mask[k] and not seen[k]:
+                        seen[k] = 1
+                        stack.append(k)
+        found.append((len(cells), cells))
+    found.sort(key=lambda c: -c[0])
+    return found
+
+
+def keep_main_blobs(mask, w, h, frac=4):
+    """Drop components smaller than 1/`frac` of the largest one."""
+    found = blobs(mask, w, h)
+    if not found:
+        return mask, []
+    cutoff = found[0][0] / frac
+    out = bytearray(w * h)
+    kept = []
+    for area, cells in found:
+        if area < cutoff:
+            continue
+        kept.append(area)
+        for i in cells:
+            out[i] = 1
+    return out, kept
+
+
+def dilate(mask, w, h, n):
+    for _ in range(n):
+        grown = bytearray(mask)
+        for i in range(w * h):
+            if not mask[i]:
+                continue
+            x, y = i % w, i // w
+            for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                if 0 <= nx < w and 0 <= ny < h:
+                    grown[ny * w + nx] = 1
+        mask = grown
+    return mask
+
+
+def bbox(mask, w, h):
+    xs = [i % w for i in range(w * h) if mask[i]]
+    ys = [i // w for i in range(w * h) if mask[i]]
+    if not xs:
+        return None
+    return min(xs), min(ys), max(xs), max(ys)
 
 
 # ---------------------------------------------------------------- lvgl output

@@ -12,15 +12,27 @@ extern "C" {
 
 // Overlay sprites are positioned at these offsets inside the base image.
 #define ENCO_FACE_EYES_X 64
-#define ENCO_FACE_EYES_Y 102
+#define ENCO_FACE_EYES_Y 114
 #define ENCO_FACE_MOUTH_X 96
-#define ENCO_FACE_MOUTH_Y 162
+#define ENCO_FACE_MOUTH_Y 163
+#define ENCO_FACE_BANGS_X 70
+#define ENCO_FACE_BANGS_Y 66
+#define ENCO_FACE_LOCKS_L_X 10
+#define ENCO_FACE_LOCKS_L_Y 104
+#define ENCO_FACE_LOCKS_R_X 156
+#define ENCO_FACE_LOCKS_R_Y 104
 
 extern const lv_image_dsc_t enco_face_base;
 extern const lv_image_dsc_t enco_face_eyes_half;
 extern const lv_image_dsc_t enco_face_eyes_shut;
 extern const lv_image_dsc_t enco_face_mouth_small;
 extern const lv_image_dsc_t enco_face_mouth_wide;
+extern const lv_image_dsc_t enco_face_bangs_left;
+extern const lv_image_dsc_t enco_face_bangs_right;
+extern const lv_image_dsc_t enco_face_locks_l_left;
+extern const lv_image_dsc_t enco_face_locks_l_right;
+extern const lv_image_dsc_t enco_face_locks_r_left;
+extern const lv_image_dsc_t enco_face_locks_r_right;
 
 #ifdef __cplusplus
 }

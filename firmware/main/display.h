@@ -35,6 +35,10 @@ class Display {
   void Start();
   void SetChatMessage(const Role role, const std::string& content);
   void ShowStatus(const char* status);
+  // Transient "音量 70%" readout plus a speaker icon in the status bar. Deliberately not routed
+  // through ShowStatus(): that derives is_speaking_ from the string it is given, and the volume
+  // almost always changes while the assistant is mid-sentence.
+  void ShowVolume(uint16_t volume);
   void SetEmotion(const std::string& emotion);
 
   void SetUiMode(UiMode mode);
@@ -84,12 +88,16 @@ class Display {
   lv_obj_t* network_label_ = nullptr;
   lv_obj_t* notification_label_ = nullptr;
   lv_obj_t* status_label_ = nullptr;
-  lv_obj_t* mute_label_ = nullptr;
+  // Speaker icon reflecting the current output volume. (Was an unused mute indicator.)
+  lv_obj_t* volume_label_ = nullptr;
 
-  // Character face mode: a full-screen portrait plus two small sprites that are swapped over the
-  // eyes and mouth to animate it. Everything else about the picture stays put.
+  // Character face mode: a full-screen portrait plus small sprites that are swapped over the
+  // hair, eyes and mouth to animate it. Everything else about the picture stays put.
   lv_obj_t* face_container_ = nullptr;
   lv_obj_t* face_image_ = nullptr;
+  lv_obj_t* bangs_overlay_ = nullptr;
+  lv_obj_t* locks_l_overlay_ = nullptr;
+  lv_obj_t* locks_r_overlay_ = nullptr;
   lv_obj_t* eyes_overlay_ = nullptr;
   lv_obj_t* mouth_overlay_ = nullptr;
   lv_obj_t* subtitle_box_ = nullptr;
@@ -104,12 +112,16 @@ class Display {
   uint32_t face_tick_ = 0;        // increments once per timer period
   uint32_t next_blink_tick_ = 0;  // when the next blink starts
   uint8_t blink_frame_ = 0;       // 0 = eyes open, otherwise a step in the blink sequence
+  uint32_t next_hair_tick_ = 0;   // when the next random hair breeze starts
+  uint8_t hair_step_ = 0;         // 0 = hair at rest, otherwise 1-based step in the breeze sequence
+  uint8_t hair_pattern_ = 0;      // which breeze pattern is playing
   int8_t head_offset_x_ = 0;      // current idle sway / look-direction offset
   int8_t head_offset_y_ = 0;
 
   static void OnFaceTimer(lv_timer_t* timer);
   void ApplyBlinkFrame();
   void ApplyMouthFrame();
+  void ApplyHairFrame();
   void ApplyHeadOffset(int dx, int dy);
 
   ThemeColors current_theme_;

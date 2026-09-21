@@ -82,7 +82,9 @@
 #define CONFIG_LV_USE_FLEX 1
 #define CONFIG_LV_USE_GRID 1
 #define CONFIG_LV_FS_DEFAULT_DRIVE_LETTER 0
-#define CONFIG_LV_USE_IMGFONT 1
+// Only the colour emoji font used this, and the status bar now draws monochrome Font Awesome
+// glyphs instead so it matches the rest of the HUD.
+#define CONFIG_LV_USE_IMGFONT 0
 #define CONFIG_LV_USE_OBSERVER 1
 
 #endif

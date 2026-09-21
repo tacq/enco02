@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <driver/spi_common.h>
 #include <esp_debug_helpers.h>
 #include <esp_heap_caps.h>
@@ -27,6 +28,7 @@
 #include "servo_controller.h"
 #include "servo_web_server.h"
 #include "display.h"
+#include "volume_command.h"
 #include "network_config_mode_mp3.h"
 #include "network_connected_mp3.h"
 #include "notification_0_mp3.h"
@@ -446,6 +448,95 @@ void ConfigureWifi() {
   LogHeap("wifi connected");
 }
 
+// ---------------------------------------------------------------- speaker volume
+
+// How far one relative command ("大声一点") moves the volume. The output stage applies a squared
+// curve, so 10 points of the 0-100 scale is roughly one clearly audible step.
+constexpr int kVolumeStep = 10;
+// Floor for *relative* changes only. Letting "小声一点" walk all the way to zero would leave her
+// mute with no audible way to discover it; an explicit set_volume(0) can still silence her.
+constexpr int kMinRelativeVolume = 10;
+constexpr char kVolumePrefsNamespace[] = "enco";
+constexpr char kVolumePrefsKey[] = "volume";
+
+// Set when the live volume no longer matches what is stored in NVS. The commit itself is deferred
+// to loop() and only runs while she is not speaking: an NVS write stalls the flash cache for tens
+// of milliseconds, which is audible as a click if it lands in the middle of a reply.
+bool g_volume_dirty = false;
+uint32_t g_last_volume_exec_time = 0;
+// Tracked purely so the deferred NVS write can hold off while she is talking.
+ai_vox::ChatState g_chat_state = ai_vox::ChatState::kIdle;
+
+uint16_t SetVolume(const int requested) {
+  // Clamp in signed arithmetic. set_volume() takes a uint16_t, so doing `volume - step` in the
+  // device's own type would wrap 5-10 round to 65531, and "quieter" would come out as full blast.
+  const int clamped = std::clamp(requested, 0, static_cast<int>(ai_vox::AudioOutputDevice::kMaxVolume));
+  const auto volume = static_cast<uint16_t>(clamped);
+  if (volume != g_audio_output_device->volume()) {
+    g_audio_output_device->set_volume(volume);
+    g_volume_dirty = true;
+  }
+  if (g_display) {
+    g_display->ShowVolume(volume);
+  }
+  return volume;
+}
+
+uint16_t AdjustVolume(const int delta) {
+  const int current = static_cast<int>(g_audio_output_device->volume());
+  return SetVolume(std::max(current + delta, kMinRelativeVolume));
+}
+
+void LoadSavedVolume() {
+  Preferences prefs;
+  if (!prefs.begin(kVolumePrefsNamespace, true)) {
+    return;  // Namespace does not exist yet: first boot, keep the device's built-in default.
+  }
+  const uint16_t saved = prefs.getUShort(kVolumePrefsKey, g_audio_output_device->volume());
+  prefs.end();
+  g_audio_output_device->set_volume(std::min<uint16_t>(saved, ai_vox::AudioOutputDevice::kMaxVolume));
+  // Not via SetVolume(): the value just came *out* of NVS, so there is nothing to write back.
+  if (g_display) {
+    g_display->ShowVolume(g_audio_output_device->volume());
+  }
+  printf("[volume] restored to %u\n", static_cast<unsigned>(g_audio_output_device->volume()));
+}
+
+void FlushVolumeToNvs() {
+  Preferences prefs;
+  if (!prefs.begin(kVolumePrefsNamespace, false)) {
+    return;
+  }
+  prefs.putUShort(kVolumePrefsKey, g_audio_output_device->volume());
+  prefs.end();
+  g_volume_dirty = false;
+  printf("[volume] saved %u\n", static_cast<unsigned>(g_audio_output_device->volume()));
+}
+
+// The cloud model decides for itself whether to emit an MCP tool call, and for a bare "大声点" it
+// frequently just answers conversationally instead. Matching the user's own transcript is what
+// makes these commands actually reliable.
+//
+// Only the user's words are ever matched here, never the assistant's reply: "好的，音量调大了"
+// would otherwise bump the volume a second time. The caller already guarantees this by clearing
+// g_last_user_query as soon as a real tool call arrives.
+bool CheckAndExecuteVolumeFallback(const std::string& query) {
+  if (millis() - g_last_volume_exec_time < 2500) {
+    return false;  // Debounce, same as the motion fallback.
+  }
+
+  const auto command = ClassifyVolumeCommand(query);
+  if (command == VolumeCommand::kNone) {
+    return false;
+  }
+
+  const int delta = command == VolumeCommand::kUp ? kVolumeStep : -kVolumeStep;
+  g_last_volume_exec_time = millis();
+  const auto volume = AdjustVolume(delta);
+  printf("[Voice Volume Fallback] %s -> %u\n", delta > 0 ? "音量增加" : "音量减小", static_cast<unsigned>(volume));
+  return true;
+}
+
 uint32_t g_last_motion_exec_time = 0;
 std::string g_last_user_query = "";
 
@@ -549,6 +640,12 @@ void InitMcpTools() {
     {"volume", ai_vox::ParamSchema<int64_t>{.default_value = std::nullopt, .min = 0, .max = 100}},
   });
   engine.AddMcpTool("self.audio_speaker.get_volume", "Get speaker volume (获取当前音量).", {});
+  // Relative siblings of set_volume. The model reaches for these far more readily than it works
+  // out an absolute number from get_volume, and they are what a bare "大声一点" should map to.
+  engine.AddMcpTool("self.audio_speaker.volume_up",
+                    "Increase speaker volume one step (音量增加/调大音量/大声一点/声音大点).", {});
+  engine.AddMcpTool("self.audio_speaker.volume_down",
+                    "Decrease speaker volume one step (音量减小/调低音量/小声一点/声音小点).", {});
 
   engine.AddMcpTool("self.screen.set_mode", "Set screen mode (切换屏幕: face 表情, chat 对话).", {
     {"mode", ai_vox::ParamSchema<std::string>{.default_value = "face"}},
@@ -600,6 +697,8 @@ void setup() {
   InitDisplay();
   LogHeap("after display+lvgl");
   g_display->ShowStatus("初始化");
+  // Before the engine starts, so the first thing she says is already at the user's chosen level.
+  LoadSavedVolume();
   ConfigureWifi();
   InitMcpTools();
   LogHeap("after mcp tools");
@@ -706,6 +805,13 @@ void loop() {
 
   auto& engine = ai_vox::Engine::GetInstance();
 
+  // Commit a changed volume once the dust has settled. Waiting for a quiet moment keeps the
+  // flash-cache stall an NVS write causes out of the audio path, and the delay also coalesces a
+  // burst of "再大声一点...再大声一点" into a single write.
+  if (g_volume_dirty && g_chat_state != ai_vox::ChatState::kSpeaking && millis() - g_last_volume_exec_time >= 3000) {
+    FlushVolumeToNvs();
+  }
+
   const auto events = g_observer->PopEvents();
 
   for (auto& event : events) {
@@ -716,6 +822,9 @@ void loop() {
       g_display->ShowStatus("激活设备");
       g_display->SetChatMessage(Display::Role::kSystem, activation_event->message);
     } else if (auto state_changed_event = std::get_if<ai_vox::StateChangedEvent>(&event)) {
+      // Recorded before the switch, which does not have a case for every state: the deferred NVS
+      // write below needs to know whether audio is currently playing.
+      g_chat_state = state_changed_event->new_state;
       switch (state_changed_event->new_state) {
         case ai_vox::ChatState::kIdle: {
           printf("Idle\n");
@@ -777,7 +886,11 @@ void loop() {
           g_display->SetChatMessage(Display::Role::kAssistant, chat_message_event->content);
           // If MCP tool was not called for this query, trigger speech fallback motion
           if (!g_last_user_query.empty()) {
-            CheckAndExecuteMotionFallback(g_last_user_query);
+            // Volume first, and only on what the user actually said. A phrase that turned out to
+            // be a volume command is not also a head command, so don't let both fire.
+            if (!CheckAndExecuteVolumeFallback(g_last_user_query)) {
+              CheckAndExecuteMotionFallback(g_last_user_query);
+            }
             g_last_user_query.clear();
           } else {
             CheckAndExecuteMotionFallback(chat_message_event->content);
@@ -812,11 +925,28 @@ void loop() {
         const auto volume_ptr = mcp_tool_call_event->param<int64_t>("volume");
         if (volume_ptr != nullptr) {
           printf("on mcp tool call: set_volume, volume: %" PRId64 "\n", *volume_ptr);
-          g_audio_output_device->set_volume(*volume_ptr);
+          // Via SetVolume() rather than the device directly, so the screen and NVS keep up.
+          SetVolume(static_cast<int>(*volume_ptr));
+          g_last_volume_exec_time = millis();
           engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
         } else {
           engine.SendMcpCallError(mcp_tool_call_event->id, "Missing valid argument: volume");
         }
+      } else if (matches("self.audio_speaker.volume_up", "volume_up") ||
+                 matches("self.audio_speaker.volume_down", "volume_down")) {
+        const bool up = name.find("volume_up") != std::string::npos;
+        // The step is undeclared but honoured if the model sends one, matching the head tools.
+        // Its sign is ignored: models routinely send step=-10 to volume_down, and applying that
+        // literally would turn "quieter" into "louder".
+        int step = kVolumeStep;
+        const auto step_ptr = mcp_tool_call_event->param<int64_t>("step");
+        if (step_ptr != nullptr && *step_ptr != 0) {
+          step = std::abs(static_cast<int>(*step_ptr));
+        }
+        const auto volume = AdjustVolume(up ? step : -step);
+        printf("on mcp tool call: %s (%d) -> %u\n", up ? "volume_up" : "volume_down", step, static_cast<unsigned>(volume));
+        g_last_volume_exec_time = millis();
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, static_cast<int64_t>(volume));
       } else if (matches("self.audio_speaker.get_volume", "get_volume")) {
         const auto volume = g_audio_output_device->volume();
         printf("on mcp tool call: get_volume, volume: %" PRIu16 "\n", volume);

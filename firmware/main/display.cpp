@@ -11,7 +11,6 @@
 #include "esp_lvgl_port.h"
 #include "face_assets.h"
 #include "font_awesome_symbols.h"
-#include "font_emoji.h"
 #include "lv_i4_decoder.h"
 #include "display.h"
 
@@ -238,10 +237,10 @@ void Display::Start() {
   lv_obj_set_style_text_color(status_label_, current_theme_.jarvis_gold, 0);
   lv_label_set_text(status_label_, "ENCO ONLINE");
 
-  mute_label_ = lv_label_create(status_bar_);
-  lv_label_set_text(mute_label_, "");
-  lv_obj_set_style_text_font(mute_label_, &font_awesome_16_4, 0);
-  lv_obj_set_style_text_color(mute_label_, current_theme_.jarvis_cyan, 0);
+  volume_label_ = lv_label_create(status_bar_);
+  lv_label_set_text(volume_label_, "");
+  lv_obj_set_style_text_font(volume_label_, &font_awesome_16_4, 0);
+  lv_obj_set_style_text_color(volume_label_, current_theme_.jarvis_cyan, 0);
 
   network_label_ = lv_label_create(status_bar_);
   lv_label_set_text(network_label_, "");
@@ -287,8 +286,24 @@ void Display::BuildRobotFace() {
   lv_image_set_src(face_image_, &enco_face_base);
   lv_obj_set_pos(face_image_, 0, 0);
 
-  // Both overlays are opaque crops of the same portrait sharing its palette, so they composite
-  // over the base with no seam. Hidden means "use whatever the base already shows there".
+  // All overlays are opaque crops sharing the base portrait's 16-colour palette, so they composite
+  // over the base with no seam. Hidden means "use whatever the base already shows there". Hair is
+  // created before the eyes and mouth so blinking and speaking always sit above it in z-order.
+  bangs_overlay_ = lv_image_create(face_container_);
+  lv_image_set_src(bangs_overlay_, &enco_face_bangs_left);
+  lv_obj_set_pos(bangs_overlay_, ENCO_FACE_BANGS_X, ENCO_FACE_BANGS_Y);
+  lv_obj_add_flag(bangs_overlay_, LV_OBJ_FLAG_HIDDEN);
+
+  locks_l_overlay_ = lv_image_create(face_container_);
+  lv_image_set_src(locks_l_overlay_, &enco_face_locks_l_left);
+  lv_obj_set_pos(locks_l_overlay_, ENCO_FACE_LOCKS_L_X, ENCO_FACE_LOCKS_L_Y);
+  lv_obj_add_flag(locks_l_overlay_, LV_OBJ_FLAG_HIDDEN);
+
+  locks_r_overlay_ = lv_image_create(face_container_);
+  lv_image_set_src(locks_r_overlay_, &enco_face_locks_r_left);
+  lv_obj_set_pos(locks_r_overlay_, ENCO_FACE_LOCKS_R_X, ENCO_FACE_LOCKS_R_Y);
+  lv_obj_add_flag(locks_r_overlay_, LV_OBJ_FLAG_HIDDEN);
+
   eyes_overlay_ = lv_image_create(face_container_);
   lv_image_set_src(eyes_overlay_, &enco_face_eyes_shut);
   lv_obj_set_pos(eyes_overlay_, ENCO_FACE_EYES_X, ENCO_FACE_EYES_Y);
@@ -319,6 +334,7 @@ void Display::BuildRobotFace() {
   lv_label_set_text(subtitle_label_, "Enco 正在待命...");
 
   next_blink_tick_ = kBlinkMinTicks;
+  next_hair_tick_ = 14;
   face_timer_ = lv_timer_create(OnFaceTimer, kFaceTickMs, this);
 }
 
@@ -486,9 +502,9 @@ void Display::SetChatMessage(const Role role, const std::string& content) {
   // Update virtual anime avatar subtitle if active
   if (subtitle_label_ != nullptr) {
     if (role == Role::kUser) {
-      lv_label_set_text(subtitle_label_, ("▲ 你: " + content).c_str());
+      lv_label_set_text(subtitle_label_, ("你: " + content).c_str());
     } else if (role == Role::kAssistant) {
-      lv_label_set_text(subtitle_label_, ("🌸 Enco: " + content).c_str());
+      lv_label_set_text(subtitle_label_, ("Enco: " + content).c_str());
     } else {
       lv_label_set_text(subtitle_label_, content.c_str());
     }
@@ -514,34 +530,74 @@ void Display::ShowStatus(const char* status) {
 
   if (subtitle_label_ != nullptr) {
     if (s == "聆听中") {
-      lv_label_set_text(subtitle_label_, "👂 正在聆听你的指令...");
+      lv_label_set_text(subtitle_label_, "正在聆听你的指令...");
       UpdateRobotFaceEmotion("neutral");
     } else if (s == "待命") {
-      lv_label_set_text(subtitle_label_, "🌸 Enco 正在待命...");
+      lv_label_set_text(subtitle_label_, "Enco 正在待命...");
       UpdateRobotFaceEmotion("neutral");
     } else if (s == "连接中...") {
-      lv_label_set_text(subtitle_label_, "⚡ 正在连接小智云端...");
+      lv_label_set_text(subtitle_label_, "正在连接小智云端...");
     } else if (s == "网络已连接") {
-      lv_label_set_text(subtitle_label_, "🌐 网络已连接");
+      lv_label_set_text(subtitle_label_, "网络已连接");
     } else if (s == "网络配置中" || s == "热点配网模式") {
-      lv_label_set_text(subtitle_label_, "📶 请使用手机进行配网");
+      lv_label_set_text(subtitle_label_, "请使用手机进行配网");
     } else if (s == "抬头中...") {
-      lv_label_set_text(subtitle_label_, "👀 正在抬头看上面...");
+      lv_label_set_text(subtitle_label_, "正在抬头看上面...");
     } else if (s == "低头中...") {
-      lv_label_set_text(subtitle_label_, "👀 正在低头看地面...");
+      lv_label_set_text(subtitle_label_, "正在低头看地面...");
     } else if (s == "向左歪头...") {
-      lv_label_set_text(subtitle_label_, "🙃 向左歪头倾听...");
+      lv_label_set_text(subtitle_label_, "向左歪头倾听...");
     } else if (s == "向右歪头...") {
-      lv_label_set_text(subtitle_label_, "🙃 向右歪头倾听...");
+      lv_label_set_text(subtitle_label_, "向右歪头倾听...");
     } else if (s == "向左转头...") {
-      lv_label_set_text(subtitle_label_, "👀 向左转头看看...");
+      lv_label_set_text(subtitle_label_, "向左转头看看...");
     } else if (s == "向右转头...") {
-      lv_label_set_text(subtitle_label_, "👀 向右转头看看...");
+      lv_label_set_text(subtitle_label_, "向右转头看看...");
     } else if (s == "摇头晃脑...") {
-      lv_label_set_text(subtitle_label_, "🤪 萌动摇头晃脑中~");
+      lv_label_set_text(subtitle_label_, "萌动摇头晃脑中~");
     } else if (s == "头已正视") {
-      lv_label_set_text(subtitle_label_, "🌸 头已摆正正视前方");
+      lv_label_set_text(subtitle_label_, "头已摆正正视前方");
     }
+  }
+
+  lvgl_port_unlock();
+}
+
+// Feedback for a volume change.
+//
+// This deliberately does not go through ShowStatus(). ShowStatus() infers is_speaking_ from the
+// string it is handed, and the volume is nearly always changed while the assistant is talking
+// ("好的，已经调大了") - borrowing it here would latch the mouth shut for the rest of the reply.
+//
+// The percentage is shown in the notification label, which is a toast by construction: the next
+// ShowStatus() call hides it again, and one always follows within a second or two as the chat
+// state moves on. The speaker icon next to it is persistent, so the current level stays readable.
+void Display::ShowVolume(const uint16_t volume) {
+  char text[24];
+  snprintf(text, sizeof(text), "音量 %u%%", static_cast<unsigned>(volume));
+
+  lvgl_port_lock(0);
+
+  if (volume_label_ != nullptr) {
+    const char* icon = FONT_AWESOME_VOLUME_HIGH;
+    if (volume == 0) {
+      icon = FONT_AWESOME_VOLUME_MUTE;
+    } else if (volume < 34) {
+      icon = FONT_AWESOME_VOLUME_LOW;
+    } else if (volume < 67) {
+      icon = FONT_AWESOME_VOLUME_MEDIUM;
+    }
+    lv_label_set_text(volume_label_, icon);
+  }
+
+  if (notification_label_ != nullptr && status_label_ != nullptr) {
+    lv_label_set_text(notification_label_, text);
+    lv_obj_clear_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  if (subtitle_label_ != nullptr) {
+    lv_label_set_text(subtitle_label_, text);
   }
 
   lvgl_port_unlock();
@@ -551,19 +607,28 @@ void Display::SetEmotion(const std::string& emotion) {
   // This used to build a 21-entry std::map<std::string, const char*> on every call - roughly 1.5KB
   // of allocate-and-free churn each time the assistant changes expression. A static table costs
   // nothing at runtime and keeps the (very small) remaining heap unfragmented.
+  // Monochrome Font Awesome glyphs, not colour emoji: the status bar is a cyan HUD and a full
+  // colour yellow smiley in the corner of it looked like it belonged to a different program. These
+  // tint with the rest of the bar and are already in the font_awesome_30_4 subset.
   struct EmotionIcon {
     const char* name;
     const char* icon;
   };
   static constexpr EmotionIcon kEmotions[] = {
-      {"neutral", "😶"},  {"happy", "🙂"},     {"laughing", "😆"},   {"funny", "😂"},     {"sad", "😔"},
-      {"angry", "😠"},    {"crying", "😭"},    {"loving", "😍"},     {"embarrassed", "😳"}, {"surprised", "😯"},
-      {"shocked", "😱"},  {"thinking", "🤔"},  {"winking", "😉"},    {"cool", "😎"},      {"relaxed", "😌"},
-      {"delicious", "🤤"}, {"kissy", "😘"},    {"confident", "😏"},  {"sleepy", "😴"},    {"silly", "😜"},
-      {"confused", "🙄"},
+      {"neutral", FONT_AWESOME_EMOJI_NEUTRAL},         {"happy", FONT_AWESOME_EMOJI_HAPPY},
+      {"laughing", FONT_AWESOME_EMOJI_LAUGHING},       {"funny", FONT_AWESOME_EMOJI_FUNNY},
+      {"sad", FONT_AWESOME_EMOJI_SAD},                 {"angry", FONT_AWESOME_EMOJI_ANGRY},
+      {"crying", FONT_AWESOME_EMOJI_CRYING},           {"loving", FONT_AWESOME_EMOJI_LOVING},
+      {"embarrassed", FONT_AWESOME_EMOJI_EMBARRASSED}, {"surprised", FONT_AWESOME_EMOJI_SURPRISED},
+      {"shocked", FONT_AWESOME_EMOJI_SHOCKED},         {"thinking", FONT_AWESOME_EMOJI_THINKING},
+      {"winking", FONT_AWESOME_EMOJI_WINKING},         {"cool", FONT_AWESOME_EMOJI_COOL},
+      {"relaxed", FONT_AWESOME_EMOJI_RELAXED},         {"delicious", FONT_AWESOME_EMOJI_DELICIOUS},
+      {"kissy", FONT_AWESOME_EMOJI_KISSY},             {"confident", FONT_AWESOME_EMOJI_CONFIDENT},
+      {"sleepy", FONT_AWESOME_EMOJI_SLEEPY},           {"silly", FONT_AWESOME_EMOJI_SILLY},
+      {"confused", FONT_AWESOME_EMOJI_CONFUSED},
   };
 
-  const char* icon = "😶";
+  const char* icon = FONT_AWESOME_EMOJI_NEUTRAL;
   for (const auto& entry : kEmotions) {
     if (emotion == entry.name) {
       icon = entry.icon;
@@ -573,7 +638,6 @@ void Display::SetEmotion(const std::string& emotion) {
 
   lvgl_port_lock(0);
   if (emotion_label_ != nullptr) {
-    lv_obj_set_style_text_font(emotion_label_, font_emoji_32_init(), 0);
     lv_label_set_text(emotion_label_, icon);
   }
 
@@ -649,7 +713,7 @@ void Display::LookDirection(const char* dir) {
   lvgl_port_unlock();
 }
 
-// Moves the portrait and both sprites together so they stay registered with each other.
+// Moves the portrait and all overlay sprites together so they stay registered with each other.
 void Display::ApplyHeadOffset(int dx, int dy) {
   if (face_image_ == nullptr) {
     return;
@@ -660,6 +724,15 @@ void Display::ApplyHeadOffset(int dx, int dy) {
   head_offset_x_ = static_cast<int8_t>(dx);
   head_offset_y_ = static_cast<int8_t>(dy);
   lv_obj_set_pos(face_image_, dx, dy);
+  if (bangs_overlay_) {
+    lv_obj_set_pos(bangs_overlay_, ENCO_FACE_BANGS_X + dx, ENCO_FACE_BANGS_Y + dy);
+  }
+  if (locks_l_overlay_) {
+    lv_obj_set_pos(locks_l_overlay_, ENCO_FACE_LOCKS_L_X + dx, ENCO_FACE_LOCKS_L_Y + dy);
+  }
+  if (locks_r_overlay_) {
+    lv_obj_set_pos(locks_r_overlay_, ENCO_FACE_LOCKS_R_X + dx, ENCO_FACE_LOCKS_R_Y + dy);
+  }
   if (eyes_overlay_) {
     lv_obj_set_pos(eyes_overlay_, ENCO_FACE_EYES_X + dx, ENCO_FACE_EYES_Y + dy);
   }
@@ -701,6 +774,60 @@ void Display::ApplyMouthFrame() {
   lv_obj_clear_flag(mouth_overlay_, LV_OBJ_FLAG_HIDDEN);
 }
 
+void Display::ApplyHairFrame() {
+  if (bangs_overlay_ == nullptr || locks_l_overlay_ == nullptr || locks_r_overlay_ == nullptr) {
+    return;
+  }
+
+  auto set_part = [](lv_obj_t* obj, int8_t dir, const lv_image_dsc_t* left_dsc,
+                     const lv_image_dsc_t* right_dsc) {
+    if (dir == 0) {
+      lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_image_set_src(obj, dir < 0 ? left_dsc : right_dsc);
+      lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
+  };
+
+  if (hair_step_ == 0) {
+    set_part(bangs_overlay_, 0, &enco_face_bangs_left, &enco_face_bangs_right);
+    set_part(locks_l_overlay_, 0, &enco_face_locks_l_left, &enco_face_locks_l_right);
+    set_part(locks_r_overlay_, 0, &enco_face_locks_r_left, &enco_face_locks_r_right);
+    return;
+  }
+
+  // Each step in a breeze sets (bangs_dir, side_locks_dir) in {-1, 0, +1}. Letting the lighter
+  // bangs lead or flutter on their own keeps the motion organic rather than rigid.
+  struct HairPose {
+    int8_t bangs;
+    int8_t locks;
+  };
+  static constexpr HairPose kPatterns[4][6] = {
+      // 0: Leftward breeze with gentle rebound; bangs lead the heavier side locks by a beat.
+      {{-1, 0}, {-1, -1}, {-1, -1}, {1, -1}, {0, 1}, {0, 0}},
+      // 1: Rightward breeze with gentle rebound.
+      {{1, 0}, {1, 1}, {1, 1}, {-1, 1}, {0, -1}, {0, 0}},
+      // 2: Light rustle of the front bangs only.
+      {{-1, 0}, {-1, 0}, {1, 0}, {1, 0}, {0, 0}, {0, 0}},
+      // 3: Playful two-way sway across both bangs and side locks.
+      {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}, {-1, 0}, {0, 0}},
+  };
+
+  const uint8_t idx = (hair_step_ - 1) / 2;
+  if (idx >= 6) {
+    hair_step_ = 0;
+    set_part(bangs_overlay_, 0, &enco_face_bangs_left, &enco_face_bangs_right);
+    set_part(locks_l_overlay_, 0, &enco_face_locks_l_left, &enco_face_locks_l_right);
+    set_part(locks_r_overlay_, 0, &enco_face_locks_r_left, &enco_face_locks_r_right);
+    return;
+  }
+
+  const HairPose pose = kPatterns[hair_pattern_ & 3][idx];
+  set_part(bangs_overlay_, pose.bangs, &enco_face_bangs_left, &enco_face_bangs_right);
+  set_part(locks_l_overlay_, pose.locks, &enco_face_locks_l_left, &enco_face_locks_l_right);
+  set_part(locks_r_overlay_, pose.locks, &enco_face_locks_r_left, &enco_face_locks_r_right);
+}
+
 void Display::OnFaceTimer(lv_timer_t* timer) {
   auto* self = static_cast<Display*>(lv_timer_get_user_data(timer));
   if (self == nullptr || self->ui_mode_ != UiMode::kRobotFace || self->face_image_ == nullptr) {
@@ -730,13 +857,28 @@ void Display::OnFaceTimer(lv_timer_t* timer) {
     }
   }
 
+  // --- Random hair breeze ------------------------------------------------------------------
+  if (self->hair_step_ != 0) {
+    self->hair_step_++;
+    if (self->hair_step_ > 12) {
+      self->hair_step_ = 0;
+      self->next_hair_tick_ = self->face_tick_ + 16 + (esp_random() % 32);
+    }
+    self->ApplyHairFrame();
+  } else if (self->face_tick_ >= self->next_hair_tick_) {
+    self->hair_pattern_ = static_cast<uint8_t>(esp_random() & 3);
+    self->hair_step_ = 1;
+    self->ApplyHairFrame();
+  }
+
   // --- Mouth -------------------------------------------------------------------------------
   self->ApplyMouthFrame();
 
   // --- Idle sway ---------------------------------------------------------------------------
   // Shifting the portrait invalidates the entire screen, so this only happens while she is quiet
   // (the mouth is providing the movement otherwise) and only every few seconds.
-  if (!self->is_speaking_ && self->blink_frame_ == 0 && (self->face_tick_ % kSwayPeriodTicks) == 0) {
+  if (!self->is_speaking_ && self->blink_frame_ == 0 && self->hair_step_ == 0 &&
+      (self->face_tick_ % kSwayPeriodTicks) == 0) {
     static const int8_t kSway[] = {0, 1, 2, 1, 0, -1, -2, -1};
     const uint32_t step = (self->face_tick_ / kSwayPeriodTicks) % (sizeof(kSway) / sizeof(kSway[0]));
     self->ApplyHeadOffset(kSway[step], 0);
