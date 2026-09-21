@@ -12,6 +12,7 @@
 #include "face_assets.h"
 #include "font_awesome_symbols.h"
 #include "lv_i4_decoder.h"
+#include "core/audio_playback_signal.h"
 #include "display.h"
 
 LV_FONT_DECLARE(font_puhui_16_4);
@@ -27,9 +28,14 @@ static constexpr uint8_t kBlinkFrameShut = 2;
 static constexpr uint8_t kBlinkFrameLast = 5;
 static constexpr uint32_t kBlinkMinTicks = 30;   // 2.4s
 static constexpr uint32_t kBlinkMaxTicks = 75;   // 6.0s
-// Repositioning the portrait dirties the whole screen, so the idle sway steps only this often.
-static constexpr uint32_t kSwayPeriodTicks = 30;  // 2.4s
-
+// How long after the last PCM buffer the mouth keeps moving. Audio frames arrive every 20-60ms, so
+// this has to absorb an ordinary frame gap without letting the mouth flap on after a reply ends.
+static constexpr uint32_t kMouthHoldMs = 200;
+// A breeze advances one pose per tick. With the half-strength hair frames that is a ~1px step every
+// 80ms, which is what makes the motion read as a sway rather than a flip-book.
+static constexpr uint8_t kHairPoseCount = 14;
+static constexpr uint32_t kHairMinGapTicks = 20;   // 1.6s
+static constexpr uint32_t kHairGapSpreadTicks = 40;  // up to a further 3.2s
 
 // Sci-Fi HUD Jarvis Theme Color Definitions
 #define SCI_FI_BG_COLOR lv_color_hex(0x060c14)             // Deep space holographic dark
@@ -290,17 +296,17 @@ void Display::BuildRobotFace() {
   // over the base with no seam. Hidden means "use whatever the base already shows there". Hair is
   // created before the eyes and mouth so blinking and speaking always sit above it in z-order.
   bangs_overlay_ = lv_image_create(face_container_);
-  lv_image_set_src(bangs_overlay_, &enco_face_bangs_left);
+  lv_image_set_src(bangs_overlay_, &enco_face_bangs_lhalf);
   lv_obj_set_pos(bangs_overlay_, ENCO_FACE_BANGS_X, ENCO_FACE_BANGS_Y);
   lv_obj_add_flag(bangs_overlay_, LV_OBJ_FLAG_HIDDEN);
 
   locks_l_overlay_ = lv_image_create(face_container_);
-  lv_image_set_src(locks_l_overlay_, &enco_face_locks_l_left);
+  lv_image_set_src(locks_l_overlay_, &enco_face_locks_l_lhalf);
   lv_obj_set_pos(locks_l_overlay_, ENCO_FACE_LOCKS_L_X, ENCO_FACE_LOCKS_L_Y);
   lv_obj_add_flag(locks_l_overlay_, LV_OBJ_FLAG_HIDDEN);
 
   locks_r_overlay_ = lv_image_create(face_container_);
-  lv_image_set_src(locks_r_overlay_, &enco_face_locks_r_left);
+  lv_image_set_src(locks_r_overlay_, &enco_face_locks_r_lhalf);
   lv_obj_set_pos(locks_r_overlay_, ENCO_FACE_LOCKS_R_X, ENCO_FACE_LOCKS_R_Y);
   lv_obj_add_flag(locks_r_overlay_, LV_OBJ_FLAG_HIDDEN);
 
@@ -519,14 +525,14 @@ void Display::ShowStatus(const char* status) {
   lv_obj_clear_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
 
-  std::string s(status);
-  const bool was_speaking = is_speaking_;
+  const std::string s(status);
+
+  // Kept only for the status text and for callers that ask whether the assistant is mid-reply.
+  // The mouth is deliberately NOT driven from here: this string flips to 说话中 on the server's
+  // tts/start frame, a network round trip and a decode queue before the first sample reaches the
+  // amplifier, and it gets overwritten mid-reply by servo commands like 抬头中... - which used to
+  // start the lips early and then freeze them. OnFaceTimer() follows the speaker instead.
   is_speaking_ = (s == "说话中");
-  if (is_speaking_ != was_speaking) {
-    // Snap the mouth immediately rather than waiting up to a tick, so the picture and the audio
-    // start and stop together.
-    ApplyMouthFrame();
-  }
 
   if (subtitle_label_ != nullptr) {
     if (s == "聆听中") {
@@ -758,7 +764,7 @@ void Display::ApplyMouthFrame() {
   if (mouth_overlay_ == nullptr) {
     return;
   }
-  if (!is_speaking_) {
+  if (!mouth_open_) {
     lv_obj_add_flag(mouth_overlay_, LV_OBJ_FLAG_HIDDEN);  // Back to the base portrait's soft smile.
     return;
   }
@@ -779,53 +785,62 @@ void Display::ApplyHairFrame() {
     return;
   }
 
-  auto set_part = [](lv_obj_t* obj, int8_t dir, const lv_image_dsc_t* left_dsc,
-                     const lv_image_dsc_t* right_dsc) {
-    if (dir == 0) {
+  // Level -2..+2, where 0 means "hidden, the base portrait already shows the hair at rest". The
+  // half steps exist purely so a sway never jumps the full 2-3px in one frame.
+  static const lv_image_dsc_t* const kBangs[5] = {
+      &enco_face_bangs_left, &enco_face_bangs_lhalf, nullptr, &enco_face_bangs_rhalf, &enco_face_bangs_right};
+  static const lv_image_dsc_t* const kLocksL[5] = {
+      &enco_face_locks_l_left, &enco_face_locks_l_lhalf, nullptr, &enco_face_locks_l_rhalf, &enco_face_locks_l_right};
+  static const lv_image_dsc_t* const kLocksR[5] = {
+      &enco_face_locks_r_left, &enco_face_locks_r_lhalf, nullptr, &enco_face_locks_r_rhalf, &enco_face_locks_r_right};
+
+  auto set_part = [](lv_obj_t* obj, int8_t level, const lv_image_dsc_t* const* table) {
+    const lv_image_dsc_t* dsc = table[level + 2];
+    if (dsc == nullptr) {
       lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
-    } else {
-      lv_image_set_src(obj, dir < 0 ? left_dsc : right_dsc);
-      lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
+      return;
     }
+    lv_image_set_src(obj, dsc);
+    lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
   };
 
-  if (hair_step_ == 0) {
-    set_part(bangs_overlay_, 0, &enco_face_bangs_left, &enco_face_bangs_right);
-    set_part(locks_l_overlay_, 0, &enco_face_locks_l_left, &enco_face_locks_l_right);
-    set_part(locks_r_overlay_, 0, &enco_face_locks_r_left, &enco_face_locks_r_right);
-    return;
-  }
-
-  // Each step in a breeze sets (bangs_dir, side_locks_dir) in {-1, 0, +1}. Letting the lighter
-  // bangs lead or flutter on their own keeps the motion organic rather than rigid.
+  // Each pose is (bangs, side locks) as a level in [-2, +2]. Consecutive poses never differ by more
+  // than one level in either channel, which is what keeps the motion continuous; the side locks are
+  // heavier than the bangs, so they lag a beat behind and settle a beat later.
   struct HairPose {
     int8_t bangs;
     int8_t locks;
   };
-  static constexpr HairPose kPatterns[4][6] = {
-      // 0: Leftward breeze with gentle rebound; bangs lead the heavier side locks by a beat.
-      {{-1, 0}, {-1, -1}, {-1, -1}, {1, -1}, {0, 1}, {0, 0}},
-      // 1: Rightward breeze with gentle rebound.
-      {{1, 0}, {1, 1}, {1, 1}, {-1, 1}, {0, -1}, {0, 0}},
-      // 2: Light rustle of the front bangs only.
-      {{-1, 0}, {-1, 0}, {1, 0}, {1, 0}, {0, 0}, {0, 0}},
-      // 3: Playful two-way sway across both bangs and side locks.
-      {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}, {-1, 0}, {0, 0}},
+  static const HairPose kPatterns[4][kHairPoseCount] = {
+      // 0: Leftward gust - bangs lift first, the locks follow, then both drift back with a rebound.
+      {{-1, 0}, {-2, -1}, {-2, -1}, {-2, -2}, {-2, -2}, {-1, -2}, {0, -2},
+       {0, -1}, {1, 0}, {1, 1}, {0, 1}, {0, 0}, {0, 0}, {0, 0}},
+      // 1: The same gust from the other side.
+      {{1, 0}, {2, 1}, {2, 1}, {2, 2}, {2, 2}, {1, 2}, {0, 2},
+       {0, 1}, {-1, 0}, {-1, -1}, {0, -1}, {0, 0}, {0, 0}, {0, 0}},
+      // 2: Just the light front bangs stirring; the locks never move, so they are never redrawn.
+      {{-1, 0}, {-2, 0}, {-2, 0}, {-1, 0}, {0, 0}, {1, 0}, {2, 0},
+       {2, 0}, {1, 0}, {1, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}},
+      // 3: Slow two-way sway, the locks trailing the bangs through the whole arc.
+      {{-1, 0}, {-2, -1}, {-1, -2}, {0, -1}, {1, 0}, {2, 1}, {1, 2},
+       {0, 1}, {-1, 0}, {-1, -1}, {0, -1}, {0, 0}, {0, 0}, {0, 0}},
   };
 
-  const uint8_t idx = (hair_step_ - 1) / 2;
-  if (idx >= 6) {
-    hair_step_ = 0;
-    set_part(bangs_overlay_, 0, &enco_face_bangs_left, &enco_face_bangs_right);
-    set_part(locks_l_overlay_, 0, &enco_face_locks_l_left, &enco_face_locks_l_right);
-    set_part(locks_r_overlay_, 0, &enco_face_locks_r_left, &enco_face_locks_r_right);
-    return;
-  }
+  const uint8_t idx = hair_step_ == 0 ? kHairPoseCount : static_cast<uint8_t>(hair_step_ - 1);
+  const HairPose pose = idx >= kHairPoseCount ? HairPose{0, 0} : kPatterns[hair_pattern_ & 3][idx];
 
-  const HairPose pose = kPatterns[hair_pattern_ & 3][idx];
-  set_part(bangs_overlay_, pose.bangs, &enco_face_bangs_left, &enco_face_bangs_right);
-  set_part(locks_l_overlay_, pose.locks, &enco_face_locks_l_left, &enco_face_locks_l_right);
-  set_part(locks_r_overlay_, pose.locks, &enco_face_locks_r_left, &enco_face_locks_r_right);
+  // LVGL invalidates an image object whenever its source is set, even to the value it already
+  // holds. Redrawing an unchanged side lock costs 8K pixels over the SPI bus, so only touch the
+  // sprites whose level actually moved.
+  if (pose.bangs != hair_level_bangs_) {
+    hair_level_bangs_ = pose.bangs;
+    set_part(bangs_overlay_, pose.bangs, kBangs);
+  }
+  if (pose.locks != hair_level_locks_) {
+    hair_level_locks_ = pose.locks;
+    set_part(locks_l_overlay_, pose.locks, kLocksL);
+    set_part(locks_r_overlay_, pose.locks, kLocksR);
+  }
 }
 
 void Display::OnFaceTimer(lv_timer_t* timer) {
@@ -858,11 +873,13 @@ void Display::OnFaceTimer(lv_timer_t* timer) {
   }
 
   // --- Random hair breeze ------------------------------------------------------------------
+  // One pose per tick rather than one every other tick: with the half-strength frames available
+  // that halves the size of each visible jump instead of doubling the frame rate of a coarse one.
   if (self->hair_step_ != 0) {
     self->hair_step_++;
-    if (self->hair_step_ > 12) {
+    if (self->hair_step_ > kHairPoseCount) {
       self->hair_step_ = 0;
-      self->next_hair_tick_ = self->face_tick_ + 16 + (esp_random() % 32);
+      self->next_hair_tick_ = self->face_tick_ + kHairMinGapTicks + (esp_random() % kHairGapSpreadTicks);
     }
     self->ApplyHairFrame();
   } else if (self->face_tick_ >= self->next_hair_tick_) {
@@ -872,15 +889,14 @@ void Display::OnFaceTimer(lv_timer_t* timer) {
   }
 
   // --- Mouth -------------------------------------------------------------------------------
+  // Follows the amplifier, not the chat state: see core/audio_playback_signal.h. This is what
+  // keeps the lips in step with the speaker when a servo command is answered in the same turn.
+  self->mouth_open_ = audio_playback_signal::IsPlaying(kMouthHoldMs);
   self->ApplyMouthFrame();
 
-  // --- Idle sway ---------------------------------------------------------------------------
-  // Shifting the portrait invalidates the entire screen, so this only happens while she is quiet
-  // (the mouth is providing the movement otherwise) and only every few seconds.
-  if (!self->is_speaking_ && self->blink_frame_ == 0 && self->hair_step_ == 0 &&
-      (self->face_tick_ % kSwayPeriodTicks) == 0) {
-    static const int8_t kSway[] = {0, 1, 2, 1, 0, -1, -2, -1};
-    const uint32_t step = (self->face_tick_ / kSwayPeriodTicks) % (sizeof(kSway) / sizeof(kSway[0]));
-    self->ApplyHeadOffset(kSway[step], 0);
-  }
+  // No automatic idle sway. Shifting the portrait repositions every overlay and invalidates the
+  // whole 240x240 screen at once, which on this panel reads as the character twitching sideways
+  // with a visible flash. The hair breeze above provides the idle movement instead, and it only
+  // dirties the three small hair rectangles. LookDirection() still moves the head, but only when
+  // the user actually asked for it.
 }

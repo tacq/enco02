@@ -11,6 +11,7 @@
 #include <cstdint>
 
 #include "audio_output_device.h"
+#include "core/audio_playback_signal.h"
 
 namespace ai_vox {
 class AudioOutputDeviceI2sStd : public AudioOutputDevice {
@@ -88,6 +89,11 @@ class AudioOutputDeviceI2sStd : public AudioOutputDevice {
     if (pcm == nullptr || samples == 0 || i2s_tx_handle_ == nullptr) {
       return 0;
     }
+
+    // Everything audible goes through here - TTS replies and the boot / notification clips alike -
+    // which makes it the one honest answer to "is the speaker making a sound right now". The UI
+    // reads this to drive the character's mouth; see core/audio_playback_signal.h.
+    audio_playback_signal::NotifyPcmWritten();
 
     // This runs ~17-50 times a second for the whole duration of every reply. The previous
     // implementation allocated a std::vector<int32_t> of `samples` entries per call (5.7KB for a

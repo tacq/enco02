@@ -27,11 +27,19 @@ extern const lv_image_dsc_t enco_face_eyes_half;
 extern const lv_image_dsc_t enco_face_eyes_shut;
 extern const lv_image_dsc_t enco_face_mouth_small;
 extern const lv_image_dsc_t enco_face_mouth_wide;
+
+// Hair sway frames, ordered from full-left to full-right.
 extern const lv_image_dsc_t enco_face_bangs_left;
+extern const lv_image_dsc_t enco_face_bangs_lhalf;
+extern const lv_image_dsc_t enco_face_bangs_rhalf;
 extern const lv_image_dsc_t enco_face_bangs_right;
 extern const lv_image_dsc_t enco_face_locks_l_left;
+extern const lv_image_dsc_t enco_face_locks_l_lhalf;
+extern const lv_image_dsc_t enco_face_locks_l_rhalf;
 extern const lv_image_dsc_t enco_face_locks_l_right;
 extern const lv_image_dsc_t enco_face_locks_r_left;
+extern const lv_image_dsc_t enco_face_locks_r_lhalf;
+extern const lv_image_dsc_t enco_face_locks_r_rhalf;
 extern const lv_image_dsc_t enco_face_locks_r_right;
 
 #ifdef __cplusplus

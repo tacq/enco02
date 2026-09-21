@@ -106,16 +106,26 @@ class Display {
   lv_timer_t* face_timer_ = nullptr;
 
   std::string current_emotion_ = "neutral";
+  // What the chat state machine says. Used for the status text only: the mouth follows the
+  // amplifier (see mouth_open_ below), not the protocol.
   bool is_speaking_ = false;
 
   // Animation state, all driven from the single face timer.
   uint32_t face_tick_ = 0;        // increments once per timer period
   uint32_t next_blink_tick_ = 0;  // when the next blink starts
   uint8_t blink_frame_ = 0;       // 0 = eyes open, otherwise a step in the blink sequence
+  bool mouth_open_ = false;       // true while PCM is actually reaching the speaker
   uint32_t next_hair_tick_ = 0;   // when the next random hair breeze starts
   uint8_t hair_step_ = 0;         // 0 = hair at rest, otherwise 1-based step in the breeze sequence
   uint8_t hair_pattern_ = 0;      // which breeze pattern is playing
-  int8_t head_offset_x_ = 0;      // current idle sway / look-direction offset
+  // Last level applied to each hair sprite, in [-2, +2]. Cached because LVGL invalidates an image
+  // whenever its source is set, even to the value it already held - and a redundant lock redraw is
+  // 8K pixels over the SPI bus.
+  int8_t hair_level_bangs_ = 0;
+  int8_t hair_level_locks_ = 0;
+  // Current explicit look-direction offset. Only ever changed by LookDirection(); there is no
+  // automatic sway, because shifting the portrait invalidates the whole screen and read as a flash.
+  int8_t head_offset_x_ = 0;
   int8_t head_offset_y_ = 0;
 
   static void OnFaceTimer(lv_timer_t* timer);
