@@ -7,6 +7,11 @@ Emits one full-screen 240x320 I4 base image plus small I4 overlay sprites for th
 and hair-breeze frames.  Every image shares the base's 16-colour palette, which is what lets the
 overlays composite onto the base without a seam.
 
+Fifteen of those sixteen colours are quantised from the portrait; the last is reserved for the
+emitter on the sci-fi accessories, which accessories.py cuts out of the approved concept render
+and composites into every frame.  Because the same pixels land in all nine frames, the overlay
+sprites never see them change and their rectangles are unaffected.
+
 Intermediate artefacts (the quantised palette + index map, and composite previews) land in
 tools/face_assets/build/ for align_check.py and zoom_face.py to use.
 """
@@ -16,6 +21,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import accessories as A
 import face_lib as F
 
 SOURCE = os.path.join(HERE, "source")
@@ -125,14 +131,23 @@ def main():
     os.makedirs(BUILD, exist_ok=True)
 
     base_rgb, w, h = F.load_rgb(os.path.join(SOURCE, "portrait_base.jpg"), W, H)
-    palette = F.median_cut(base_rgb[::4], F.N_COLORS)
-    base = F.build_index_map(base_rgb, palette)
+
+    # The palette has to be measured on the *clean* portrait. median_cut() repeatedly splits the
+    # largest box in RGB space, and the emitter cyan sits a long way from every colour in this
+    # picture, so if it can see the accessories it spends several of the sixteen slots on shades
+    # of cyan and starves her face. Quantising the portrait into the remaining fifteen and
+    # pinning the accent on the end costs a handful of portrait pixels a shift to a neighbouring
+    # tone, which is not visible at this resolution. The accessory metal is grey, and greys the
+    # portrait already owns, so it needs no slot at all.
+    accents = A.accent_colors()
+    palette = F.median_cut(base_rgb[::4], F.N_COLORS - len(accents)) + accents
+    base = F.build_index_map(A.draw(list(base_rgb), w, h), palette)
     F.save_state(os.path.join(BUILD, "state.bin"), palette, base, w, h)
 
     quantised, group_mask = {}, {}
     for fname, win, group, name in VARIANTS:
         pixels, _, _ = F.load_rgb(os.path.join(SOURCE, fname), w, h)
-        var = F.build_index_map(pixels, palette)
+        var = F.build_index_map(A.draw(pixels, w, h), palette)
         quantised[name] = var
         m = F.change_mask(base, var, w, h, win)
         assert any(m), f"{fname}: no change detected in {win}"
@@ -156,8 +171,10 @@ def main():
         x, y, cw, ch = rects[group]
         return F.crop(px, w, h, x, y, cw, ch), px
 
+    # Warp first, accessories second. The warp slides pixels sideways by up to 3px, which would
+    # smear the hard edges of the metal into the hair.
     hair_frames = {
-        name: F.build_index_map(warp_hair(base_rgb, w, h, amount), palette)
+        name: F.build_index_map(A.draw(warp_hair(base_rgb, w, h, amount), w, h), palette)
         for name, amount in HAIR_LEVELS
     }
     for region, (rx, ry, rw, rh) in HAIR_REGIONS:
