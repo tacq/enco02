@@ -25,6 +25,7 @@
 #include <Preferences.h>
 #include "components/wifi_configurator/wifi_configurator.h"
 #include "web_wifi_configurator.h"
+#include "cam_link.h"
 #include "servo_controller.h"
 #include "servo_web_server.h"
 #include "display.h"
@@ -870,6 +871,18 @@ void InitMcpTools() {
                     });
   engine.AddMcpTool("self.timer.cancel", "Cancel the running countdown timer (取消定时器/停止倒计时/不用提醒了).", {});
   engine.AddMcpTool("self.timer.query", "Seconds left on the countdown timer, 0 if none (还剩多久/定时器还有多长时间).", {});
+
+  // The camera is a second board. This device cannot hold a JPEG - with the
+  // assistant speaking its largest free block is ~2KB - so the cam does the
+  // capture, the upload and the recognition itself and hands back one short
+  // sentence. That sentence becomes this tool's result, and the model upstream
+  // turns it into an answer. The image never crosses this board.
+  engine.AddMcpTool("self.camera.look",
+                    "Look through the robot's eye camera and describe what is in front of it "
+                    "(这是什么/你看到了什么/看一下/帮我看看/前面是什么). Returns a short description.",
+                    {});
+  engine.AddMcpTool("self.camera.track_on", "Make the robot follow the user with its head (看着我/跟着我/别走神).", {});
+  engine.AddMcpTool("self.camera.track_off", "Stop following the user with the head (别看我了/不用跟着我/头别动).", {});
 }
 }  // namespace
 
@@ -893,6 +906,12 @@ void setup() {
 
   // Immediately initialize MG92B servos to 90 degrees
   ServoController::GetInstance().Init();
+
+  // Opens UART2 towards the ESP32-CAM. Done here, not lazily: begin() allocates
+  // the driver's 256 byte RX ring, and at this point ~180KB is free. Deferring
+  // it would mean asking for that memory mid-session, when the largest
+  // contiguous block has been measured at 2,036 bytes.
+  CamLink::GetInstance().Init();
 
   pinMode(kLedPin, OUTPUT);
   digitalWrite(kLedPin, LOW);
@@ -1035,6 +1054,31 @@ void loop() {
   // the engine state is still whatever the last event left it as.
   TimerTick();
 
+  // Drains at most a few bytes of UART and, at most once per 60ms, nudges a
+  // servo. Nothing here allocates.
+  auto& cam = CamLink::GetInstance();
+  cam.Poll();
+
+  // A "这是什么?" answer coming back from the camera board, seconds after the
+  // tool call that asked for it. tools/call is asynchronous - the engine took
+  // the id, and this is where we finally redeem it.
+  {
+    int64_t look_id = 0;
+    bool look_ok = false;
+    const char* look_text = nullptr;
+    if (cam.TakeLookResult(&look_id, &look_ok, &look_text)) {
+      printf("cam look result (%s): %s\n", look_ok ? "ok" : "err", look_text);
+      if (look_ok) {
+        // The description, not a finished sentence: the server's model reads
+        // this and phrases the reply itself, so it comes out in the assistant's
+        // own voice rather than as a readout.
+        engine.SendMcpCallResponse(look_id, std::string(look_text));
+      } else {
+        engine.SendMcpCallError(look_id, std::string(look_text));
+      }
+    }
+  }
+
   const auto events = g_observer->PopEvents();
 
   for (auto& event : events) {
@@ -1145,7 +1189,31 @@ void loop() {
         return false;
       };
 
-      if (matches("self.audio_speaker.set_volume", "set_volume")) {
+      // Any explicit head command wins over the tracker for a few seconds.
+      // Otherwise "向左转头" is obeyed and then silently undone as the tracker
+      // drags the head back onto the user's face.
+      if (name.find("head") != std::string::npos) {
+        cam.NoteManualHeadCommand();
+      }
+
+      if (matches("self.camera.look", "take_photo")) {
+        // Deliberately does NOT answer here. The cam needs a few seconds to
+        // capture, upload and recognise; the id is parked and redeemed at the
+        // top of a later loop() pass. Answering now would mean answering
+        // before we know anything.
+        if (!cam.RequestLook(mcp_tool_call_event->id)) {
+          engine.SendMcpCallError(mcp_tool_call_event->id,
+                                  cam.IsPresent() ? "Camera is already busy" : "Camera not connected");
+        } else if (g_display) {
+          g_display->ShowStatus("看一下...");
+        }
+      } else if (matches("self.camera.track_on")) {
+        cam.SetTrackingEnabled(true);
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, cam.IsPresent());
+      } else if (matches("self.camera.track_off")) {
+        cam.SetTrackingEnabled(false);
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+      } else if (matches("self.audio_speaker.set_volume", "set_volume")) {
         const auto volume_ptr = mcp_tool_call_event->param<int64_t>("volume");
         if (volume_ptr != nullptr) {
           printf("on mcp tool call: set_volume, volume: %" PRId64 "\n", *volume_ptr);

@@ -1,0 +1,46 @@
+#pragma once
+
+// Copy this file to cam_config.h and fill it in. cam_config.h is gitignored so
+// your Wi-Fi password and API key never reach the repository.
+//
+//   cp firmware/cam/cam_config.h.example firmware/cam/cam_config.h
+
+#ifndef _CAM_CONFIG_H_
+#define _CAM_CONFIG_H_
+
+// ---------------------------------------------------------------------------
+// Wi-Fi
+// ---------------------------------------------------------------------------
+// The cam joins the same network as the main board, but keeps its own
+// credentials: the main board's live in NVS behind a captive portal, and there
+// is no link between the boards fast enough to be worth shipping them across.
+#define CAM_WIFI_SSID "your-ssid"
+#define CAM_WIFI_PASSWORD "your-password"
+
+// ---------------------------------------------------------------------------
+// Vision API (any OpenAI-compatible /chat/completions endpoint that accepts an
+// image_url part - OpenAI, most proxies, and vLLM/Ollama gateways all do)
+// ---------------------------------------------------------------------------
+#define CAM_VISION_ENDPOINT "https://api.openai.com/v1/chat/completions"
+#define CAM_VISION_API_KEY "sk-..."
+#define CAM_VISION_MODEL "gpt-4o-mini"
+
+// Kept short on purpose. This string is handed back to the assistant's LLM as
+// an MCP tool result and that model does the actual talking, so we want a terse
+// factual description rather than a finished sentence.
+#define CAM_VISION_PROMPT "用一句话描述画面里最主要的物体，不超过20个字，只描述不要寒暄。"
+
+// ---------------------------------------------------------------------------
+// Sensor orientation
+// ---------------------------------------------------------------------------
+// Set both to 1 if the module is mounted upside down in the head shell - that
+// combination is a 180 degree rotation and leaves left/right correct.
+//
+// These matter for more than looks. The main board reads "subject is to the
+// right of frame centre" and turns the head right; get the mirroring wrong and
+// the head runs away from the user instead of towards them. If tracking drives
+// the head to an end stop, flip CAM_HMIRROR.
+#define CAM_VFLIP 1
+#define CAM_HMIRROR 1
+
+#endif  // _CAM_CONFIG_H_

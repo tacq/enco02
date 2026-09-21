@@ -6,3 +6,7 @@ __pycache__/
 
 # Intermediate artefacts from tools/face_assets/build_face_assets.py
 tools/face_assets/build/
+
+# Wi-Fi password and vision API key for the camera board.
+# Copy firmware/cam/cam_config.h.example and fill it in.
+firmware/cam/cam_config.h
