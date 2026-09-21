@@ -29,6 +29,7 @@
 #include "servo_web_server.h"
 #include "display.h"
 #include "volume_command.h"
+#include "timer_command.h"
 #include "network_config_mode_mp3.h"
 #include "network_connected_mp3.h"
 #include "notification_0_mp3.h"
@@ -624,6 +625,213 @@ void CheckAndExecuteMotionFallback(const std::string& query) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Countdown timer
+//
+// Runs entirely on the device. The websocket session is torn down between turns, so a timer the
+// cloud model "remembered" would not survive the user simply not talking for five minutes - which
+// is exactly what someone who just set a five minute timer is about to do.
+// ---------------------------------------------------------------------------
+
+bool g_timer_running = false;
+uint32_t g_timer_deadline = 0;         // millis() value at which it fires
+uint32_t g_timer_total_seconds = 0;    // what was asked for, so the announcement can name it
+int32_t g_timer_shown_remaining = -1;  // last value painted, so identical seconds are not repainted
+// Set when the deadline passes. Announcing is a separate step from firing because the sentence can
+// only be injected while the engine is listening, which it may well not be at that exact moment.
+bool g_timer_finished = false;
+bool g_timer_announced = false;
+uint32_t g_timer_finished_at = 0;
+uint32_t g_timer_last_announce_try = 0;
+uint32_t g_last_timer_exec_time = 0;
+
+// How long "时间到" stays in the status bar before the bar goes back to normal on its own.
+constexpr uint32_t kTimerFinishedHoldMs = 60000;
+constexpr uint32_t kTimerAnnounceRetryMs = 1500;
+// Stop retrying eventually: an alarm half a minute late is worse than no alarm, and the screen has
+// been saying 时间到 the whole time anyway.
+constexpr uint32_t kTimerAnnounceGiveUpMs = 30000;
+// The announcement is delivered down the wake-word channel, and the server polices what that is
+// allowed to carry: a full sentence comes back as
+//   {"type":"alert","status":"ERROR","message":"Detect is only for wake words, do not send long
+//    texts."}
+// and is never spoken. So the injected phrase has to stay wake-word sized; anything longer than
+// this many UTF-8 characters falls back to a fixed short one.
+constexpr size_t kTimerAnnounceMaxChars = 10;
+
+// Characters, not bytes: a Chinese character is three bytes, so strlen() would put even a five
+// character phrase well over any sane wake-word budget.
+size_t Utf8Length(const std::string& s) {
+  size_t count = 0;
+  for (const char ch : s) {
+    if ((static_cast<unsigned char>(ch) & 0xC0) != 0x80) {  // Skip continuation bytes.
+      ++count;
+    }
+  }
+  return count;
+}
+
+// "5分钟" / "1小时30分钟". Only ever spoken, never displayed.
+std::string DescribeDuration(const uint32_t total_seconds) {
+  const unsigned hours = static_cast<unsigned>(total_seconds / 3600);
+  const unsigned minutes = static_cast<unsigned>((total_seconds % 3600) / 60);
+  const unsigned seconds = static_cast<unsigned>(total_seconds % 60);
+  char text[48];
+  if (hours > 0 && minutes > 0) {
+    snprintf(text, sizeof(text), "%u小时%u分钟", hours, minutes);
+  } else if (hours > 0) {
+    snprintf(text, sizeof(text), "%u小时", hours);
+  } else if (minutes > 0 && seconds > 0) {
+    snprintf(text, sizeof(text), "%u分%u秒", minutes, seconds);
+  } else if (minutes > 0) {
+    snprintf(text, sizeof(text), "%u分钟", minutes);
+  } else {
+    snprintf(text, sizeof(text), "%u秒", seconds);
+  }
+  return text;
+}
+
+void StartTimer(const uint32_t seconds) {
+  const uint32_t clamped = std::clamp<uint32_t>(seconds, 1, kTimerMaxSeconds);
+  g_timer_running = true;
+  g_timer_finished = false;
+  g_timer_announced = false;
+  g_timer_total_seconds = clamped;
+  g_timer_deadline = millis() + clamped * 1000;
+  g_timer_shown_remaining = static_cast<int32_t>(clamped);
+  g_last_timer_exec_time = millis();
+  if (g_display) {
+    g_display->ShowTimer(clamped);
+  }
+  printf("[timer] started: %u seconds\n", static_cast<unsigned>(clamped));
+}
+
+// Returns whether there was anything to cancel, so the tool call can answer honestly.
+bool CancelTimer() {
+  const bool was_active = g_timer_running || g_timer_finished;
+  g_timer_running = false;
+  g_timer_finished = false;
+  g_timer_announced = true;  // Nothing left to say.
+  g_timer_shown_remaining = -1;
+  g_last_timer_exec_time = millis();
+  if (g_display) {
+    g_display->HideTimer();
+  }
+  if (was_active) {
+    printf("[timer] cancelled\n");
+  }
+  return was_active;
+}
+
+uint32_t TimerRemainingSeconds() {
+  if (!g_timer_running) {
+    return 0;
+  }
+  const int32_t remaining_ms = static_cast<int32_t>(g_timer_deadline - millis());
+  if (remaining_ms <= 0) {
+    return 0;
+  }
+  return static_cast<uint32_t>((remaining_ms + 999) / 1000);
+}
+
+// Driven from loop(). Deliberately not from the display's own LVGL timer: that one early-returns
+// unless the character view is on screen, so a countdown hung off it would freeze in chat mode.
+void TimerTick() {
+  if (g_timer_running) {
+    // Signed subtraction, so this still works across the 49-day millis() wrap.
+    const int32_t remaining_ms = static_cast<int32_t>(g_timer_deadline - millis());
+    if (remaining_ms <= 0) {
+      g_timer_running = false;
+      g_timer_finished = true;
+      g_timer_announced = false;
+      g_timer_finished_at = millis();
+      g_timer_last_announce_try = 0;
+      g_timer_shown_remaining = -1;
+      printf("[timer] fired after %u seconds\n", static_cast<unsigned>(g_timer_total_seconds));
+      if (g_display) {
+        g_display->ShowTimerFinished();
+        g_display->UpdateRobotFaceEmotion("surprised");
+      }
+      // No local MP3 chime here. Firing almost always happens with a websocket session open, and
+      // spinning up the mp3 decoder at that moment wants a 2.3KB contiguous block the heap does not
+      // have - measured: "ALLOC FAILED #2: 2312 bytes, free: 5960, largest: 1396", which took the
+      // low-water mark down to 4.6KB and came uncomfortably close to taking the connection with it.
+      // The screen says 时间到 immediately, and the spoken announcement below follows a second later.
+    } else {
+      // Round up, so a five minute timer reads 05:00 for its first second rather than 04:59.
+      const int32_t remaining = (remaining_ms + 999) / 1000;
+      if (remaining != g_timer_shown_remaining) {
+        g_timer_shown_remaining = remaining;
+        if (g_display) {
+          g_display->ShowTimer(static_cast<uint32_t>(remaining));
+        }
+      }
+    }
+  }
+
+  if (g_timer_finished && !g_timer_announced &&
+      (g_timer_last_announce_try == 0 || millis() - g_timer_last_announce_try >= kTimerAnnounceRetryMs)) {
+    g_timer_last_announce_try = millis();
+    if (millis() - g_timer_finished_at >= kTimerAnnounceGiveUpMs) {
+      printf("[timer] gave up on the spoken announcement\n");
+      g_timer_announced = true;
+    } else {
+      // Phrased as something the user said: SendWakeText() hands the server a transcript, and the
+      // reply to it is what actually comes out of the speaker.
+      //
+      // It has to read like a wake word, not a sentence - see kTimerAnnounceMaxChars. "5分钟时间到"
+      // is within budget and still tells the assistant which timer went off, so its reply names the
+      // duration back to the user.
+      std::string text = DescribeDuration(g_timer_total_seconds) + "时间到";
+      if (Utf8Length(text) > kTimerAnnounceMaxChars) {
+        text = "定时时间到";  // Very long durations; drop the duration rather than be rejected.
+      }
+      if (ai_vox::Engine::GetInstance().SendWakeText(text)) {
+        printf("[timer] announcing: %s\n", text.c_str());
+        g_timer_announced = true;
+      }
+    }
+  }
+
+  if (g_timer_finished && millis() - g_timer_finished_at >= kTimerFinishedHoldMs) {
+    g_timer_finished = false;
+    if (g_display) {
+      g_display->HideTimer();
+    }
+  }
+}
+
+// Speech fallback, for the same reason as the volume one: asked for a timer in plain words, the
+// model frequently just says "好的，五分钟后提醒你" without ever emitting a tool call - and then
+// nothing would actually be counting down.
+bool CheckAndExecuteTimerFallback(const std::string& query) {
+  if (millis() - g_last_timer_exec_time < 2500) {
+    return false;  // Debounce, same as the volume and motion fallbacks.
+  }
+
+  const auto command = ClassifyTimerCommand(query);
+  switch (command.kind) {
+    case TimerCommandKind::kStart: {
+      printf("[Voice Timer Fallback] start %u seconds\n", static_cast<unsigned>(command.seconds));
+      StartTimer(command.seconds);
+      return true;
+    }
+    case TimerCommandKind::kCancel: {
+      printf("[Voice Timer Fallback] cancel\n");
+      CancelTimer();
+      return true;
+    }
+    case TimerCommandKind::kQuery: {
+      // Nothing to do - the countdown is already on screen and the assistant's own reply covers it.
+      // Still claim the utterance if a timer is running, so the head fallback does not also fire.
+      return g_timer_running;
+    }
+    default: {
+      return false;
+    }
+  }
+}
+
 void InitMcpTools() {
   auto& engine = ai_vox::Engine::GetInstance();
 
@@ -651,6 +859,17 @@ void InitMcpTools() {
     {"mode", ai_vox::ParamSchema<std::string>{.default_value = "face"}},
   });
   engine.AddMcpTool("self.screen.toggle_mode", "Toggle screen mode between face and chat (切换屏幕显示模式).", {});
+
+  // The countdown lives on the device, so these have to be tools rather than something the model
+  // keeps in its head - the session does not outlive the turn that created it.
+  engine.AddMcpTool("self.timer.start",
+                    "Start a countdown timer shown on screen (设置定时器/倒计时/几分钟后提醒我). "
+                    "seconds is the total duration in seconds.",
+                    {
+                        {"seconds", ai_vox::ParamSchema<int64_t>{.default_value = std::nullopt, .min = 1, .max = static_cast<int64_t>(kTimerMaxSeconds)}},
+                    });
+  engine.AddMcpTool("self.timer.cancel", "Cancel the running countdown timer (取消定时器/停止倒计时/不用提醒了).", {});
+  engine.AddMcpTool("self.timer.query", "Seconds left on the countdown timer, 0 if none (还剩多久/定时器还有多长时间).", {});
 }
 }  // namespace
 
@@ -812,6 +1031,10 @@ void loop() {
     FlushVolumeToNvs();
   }
 
+  // Before the event pump, so a countdown that expires on this pass gets its announcement in while
+  // the engine state is still whatever the last event left it as.
+  TimerTick();
+
   const auto events = g_observer->PopEvents();
 
   for (auto& event : events) {
@@ -886,9 +1109,10 @@ void loop() {
           g_display->SetChatMessage(Display::Role::kAssistant, chat_message_event->content);
           // If MCP tool was not called for this query, trigger speech fallback motion
           if (!g_last_user_query.empty()) {
-            // Volume first, and only on what the user actually said. A phrase that turned out to
-            // be a volume command is not also a head command, so don't let both fire.
-            if (!CheckAndExecuteVolumeFallback(g_last_user_query)) {
+            // Timer first, then volume, and only on what the user actually said. Each of these is
+            // exclusive: a phrase that turned out to be a timer request is not also a head command,
+            // so the first one to claim it wins.
+            if (!CheckAndExecuteTimerFallback(g_last_user_query) && !CheckAndExecuteVolumeFallback(g_last_user_query)) {
               CheckAndExecuteMotionFallback(g_last_user_query);
             }
             g_last_user_query.clear();
@@ -1070,6 +1294,38 @@ void loop() {
       } else if (matches("self.screen.toggle_mode", "toggle_mode")) {
         g_display->ToggleUiMode();
         engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+      } else if (matches("self.timer.start", "start_timer") || matches("self.timer.set", "set_timer")) {
+        int64_t seconds = 0;
+        const auto seconds_ptr = mcp_tool_call_event->param<int64_t>("seconds");
+        if (seconds_ptr != nullptr) {
+          seconds = *seconds_ptr;
+        } else {
+          // Models routinely answer in minutes whatever the schema declares, and a dropped tool
+          // call here means the user's timer silently never runs.
+          const auto minutes_ptr = mcp_tool_call_event->param<int64_t>("minutes");
+          if (minutes_ptr != nullptr) {
+            seconds = *minutes_ptr * 60;
+          } else {
+            const auto duration_ptr = mcp_tool_call_event->param<int64_t>("duration");
+            if (duration_ptr != nullptr) {
+              seconds = *duration_ptr;
+            }
+          }
+        }
+        if (seconds > 0) {
+          StartTimer(static_cast<uint32_t>(std::min<int64_t>(seconds, kTimerMaxSeconds)));
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, static_cast<int64_t>(g_timer_total_seconds));
+        } else {
+          engine.SendMcpCallError(mcp_tool_call_event->id, "Missing valid argument: seconds");
+        }
+      } else if (matches("self.timer.cancel", "cancel_timer") || matches("self.timer.stop", "stop_timer")) {
+        const bool was_active = CancelTimer();
+        printf("on mcp tool call: timer.cancel (was active: %d)\n", static_cast<int>(was_active));
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, was_active);
+      } else if (matches("self.timer.query", "query_timer") || matches("self.timer.get", "get_timer")) {
+        const auto remaining = static_cast<int64_t>(TimerRemainingSeconds());
+        printf("on mcp tool call: timer.query -> %" PRId64 " s\n", remaining);
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, remaining);
       }
     }
   }

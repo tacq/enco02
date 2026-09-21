@@ -46,6 +46,7 @@ class EngineImpl : public Engine {
   void Advance() override;
   // void Process() override;
   void SendText(std::string text) override;
+  bool SendWakeText(std::string text) override;
   void SendMcpCallResponse(const int64_t id, std::variant<std::string, int64_t, bool> response) override;
   void SendMcpCallError(const int64_t id, const std::string error) override;
 
@@ -122,6 +123,10 @@ class EngineImpl : public Engine {
   const uint32_t audio_frame_duration_ = 60;
   // steady_clock tick of the last inbound TTS audio frame; see ArmSpeakingWatchdog().
   std::chrono::steady_clock::time_point last_tts_activity_;
+  // Utterance to inject once the session exists. SendWakeText() can be called while the device is
+  // still in standby - the timer does exactly that if it fires after the socket has dropped - and
+  // the detect frame needs a session_id, which only arrives with the server's hello.
+  std::string pending_wake_text_;
 };
 }  // namespace ai_vox
 

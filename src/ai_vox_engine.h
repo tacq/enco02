@@ -28,6 +28,12 @@ class Engine {
   virtual void Advance() = 0;
   // virtual void Process() = 0;
   virtual void SendText(std::string text) = 0;
+  // Injects `text` as though the user had just spoken it, so the assistant answers out loud.
+  //
+  // Needed for anything the device decides to say on its own initiative - the countdown timer
+  // firing, for instance. Returns false if the engine is in a state where the utterance cannot be
+  // delivered (mid-reply, or still loading), so the caller can retry.
+  virtual bool SendWakeText(std::string text) = 0;
   virtual void SendMcpCallResponse(const int64_t id, std::variant<std::string, int64_t, bool> response) = 0;
   virtual void SendMcpCallError(const int64_t id, const std::string error) = 0;
 

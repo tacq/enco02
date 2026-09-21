@@ -229,6 +229,15 @@ void Display::Start() {
   lv_label_set_text(emotion_label_, FONT_AWESOME_AI_CHIP);
   lv_obj_set_style_margin_right(emotion_label_, 5, 0);  // 添加右边距，与后面的元素分隔
 
+  // 倒计时标签。Flex order is creation order, so this has to be built before the notification and
+  // status labels for the countdown to end up in the middle of the bar. It stays hidden (and
+  // without flex grow) until a timer is actually running, so it costs no space the rest of the time.
+  timer_label_ = lv_label_create(status_bar_);
+  lv_obj_set_style_text_align(timer_label_, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_text_color(timer_label_, current_theme_.jarvis_cyan, 0);
+  lv_label_set_text(timer_label_, "");
+  lv_obj_add_flag(timer_label_, LV_OBJ_FLAG_HIDDEN);
+
   notification_label_ = lv_label_create(status_bar_);
   lv_obj_set_flex_grow(notification_label_, 1);
   lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_CENTER, 0);
@@ -522,7 +531,11 @@ void Display::SetChatMessage(const Role role, const std::string& content) {
 void Display::ShowStatus(const char* status) {
   lvgl_port_lock(0);
   lv_label_set_text(status_label_, status);
-  lv_obj_clear_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+  // A running countdown owns the middle of the bar; leave the status text parked until it is done.
+  // The same information is spelled out in the subtitle box below, so nothing becomes unreadable.
+  if (!timer_visible_) {
+    lv_obj_clear_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+  }
   lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
 
   const std::string s(status);
@@ -596,7 +609,10 @@ void Display::ShowVolume(const uint16_t volume) {
     lv_label_set_text(volume_label_, icon);
   }
 
-  if (notification_label_ != nullptr && status_label_ != nullptr) {
+  // The toast and the countdown both want the middle of the bar. The countdown is the one the user
+  // is actively watching, so it keeps it; the speaker icon above still reflects the new level, and
+  // the percentage is repeated in the subtitle box below.
+  if (!timer_visible_ && notification_label_ != nullptr && status_label_ != nullptr) {
     lv_label_set_text(notification_label_, text);
     lv_obj_clear_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
@@ -606,6 +622,79 @@ void Display::ShowVolume(const uint16_t volume) {
     lv_label_set_text(subtitle_label_, text);
   }
 
+  lvgl_port_unlock();
+}
+
+// Paints the remaining time into the status bar, e.g. "计时 04:32".
+//
+// Called once a second from loop(); LVGL redraws a label only when the text actually changes, so
+// re-sending an identical string is cheap and the caller does not have to track what is on screen.
+void Display::ShowTimer(const uint32_t remaining_seconds) {
+  char text[24];
+  const unsigned hours = static_cast<unsigned>(remaining_seconds / 3600);
+  const unsigned minutes = static_cast<unsigned>((remaining_seconds % 3600) / 60);
+  const unsigned seconds = static_cast<unsigned>(remaining_seconds % 60);
+  if (hours > 0) {
+    snprintf(text, sizeof(text), "计时 %u:%02u:%02u", hours, minutes, seconds);
+  } else {
+    snprintf(text, sizeof(text), "计时 %02u:%02u", minutes, seconds);
+  }
+
+  lvgl_port_lock(0);
+  if (timer_label_ != nullptr) {
+    lv_label_set_text(timer_label_, text);
+    if (!timer_visible_) {
+      timer_visible_ = true;
+      // Take over the grow that status_label_ normally has, so the digits sit in the centre of the
+      // screen rather than being crowded against the emotion icon.
+      lv_obj_set_flex_grow(timer_label_, 1);
+      lv_obj_clear_flag(timer_label_, LV_OBJ_FLAG_HIDDEN);
+      if (status_label_ != nullptr) {
+        lv_obj_add_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+      }
+      if (notification_label_ != nullptr) {
+        lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+      }
+    }
+  }
+  lvgl_port_unlock();
+}
+
+// "时间到" stays up until the caller hides it, which main.cpp does once the assistant has finished
+// announcing it. Holding it there is deliberate: the announcement is easy to miss if the room is
+// noisy, and the screen is the fallback.
+void Display::ShowTimerFinished() {
+  lvgl_port_lock(0);
+  if (timer_label_ != nullptr) {
+    lv_label_set_text(timer_label_, "时间到");
+    if (!timer_visible_) {
+      timer_visible_ = true;
+      lv_obj_set_flex_grow(timer_label_, 1);
+      lv_obj_clear_flag(timer_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (status_label_ != nullptr) {
+      lv_obj_add_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (notification_label_ != nullptr) {
+      lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+  lvgl_port_unlock();
+}
+
+void Display::HideTimer() {
+  lvgl_port_lock(0);
+  if (timer_label_ != nullptr && timer_visible_) {
+    timer_visible_ = false;
+    lv_obj_add_flag(timer_label_, LV_OBJ_FLAG_HIDDEN);
+    // Give the space back before the status text reappears, otherwise two grown children share the
+    // centre and the status sits half a bar to the right.
+    lv_obj_set_flex_grow(timer_label_, 0);
+    lv_label_set_text(timer_label_, "");
+    if (status_label_ != nullptr) {
+      lv_obj_clear_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
   lvgl_port_unlock();
 }
 

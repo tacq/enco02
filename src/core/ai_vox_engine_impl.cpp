@@ -220,6 +220,44 @@ void EngineImpl::SendText(std::string text) {
   SendTextInternal(std::move(text));
 }
 
+// Makes the assistant say something the user did not ask for, by handing the server a transcript as
+// though the wake word had been heard followed by that sentence. This is the same mechanism the
+// wake word itself uses (see the hello handler), so no server-side support is needed.
+bool EngineImpl::SendWakeText(std::string text) {
+  std::lock_guard lock(mutex_);
+  if (text.empty()) {
+    return false;
+  }
+
+  switch (state_) {
+    case State::kListening: {
+      // A session is already open, so the detect frame can go out immediately.
+      auto message_json_obj = cjson_util::MakeUnique();
+      cJSON_AddStringToObject(message_json_obj.get(), "session_id", session_id_.c_str());
+      cJSON_AddStringToObject(message_json_obj.get(), "type", "listen");
+      cJSON_AddStringToObject(message_json_obj.get(), "state", "detect");
+      cJSON_AddStringToObject(message_json_obj.get(), "text", text.c_str());
+      SendTextInternal(cjson_util::ToString(message_json_obj));
+      return true;
+    }
+    case State::kInitted:
+    case State::kLoadingProtocolFailed:
+    case State::kStandby: {
+      // No session yet. Park the sentence and start the same connect-with-wakeup sequence the wake
+      // word triggers; the hello handler below sends it once the session_id arrives.
+      pending_wake_text_ = std::move(text);
+      task_queue_.Enqueue([this]() { OnWakeUp(); });
+      return true;
+    }
+    default: {
+      // Connecting, or mid-reply. Refuse rather than queue: the caller knows whether the message is
+      // still worth saying by the time the device is free, and a stale one is worse than none.
+      CLOGW("cannot inject wake text in state %u", state_);
+      return false;
+    }
+  }
+}
+
 void EngineImpl::SendMcpCallResponse(const int64_t id, std::variant<std::string, int64_t, bool> response) {
   std::lock_guard lock(mutex_);
   if (state_ == State::kIdle) {
@@ -424,12 +462,20 @@ void EngineImpl::OnJsonData(FlexArray<uint8_t> &&data) {
     StartListening();
 
     if (state == State::kWebsocketConnectedWithWakeup) {
+      // Either the wake word fired, or SendWakeText() parked something for us to say. Both are
+      // delivered the same way: a transcript the server answers as if the user had spoken it.
+      std::string text = pending_wake_text_.empty() ? std::string("你好小智") : std::move(pending_wake_text_);
+      pending_wake_text_.clear();
       auto message_json_obj = cjson_util::MakeUnique();
       cJSON_AddStringToObject(message_json_obj.get(), "session_id", session_id_.c_str());
       cJSON_AddStringToObject(message_json_obj.get(), "type", "listen");
       cJSON_AddStringToObject(message_json_obj.get(), "state", "detect");
-      cJSON_AddStringToObject(message_json_obj.get(), "text", "你好小智");
+      cJSON_AddStringToObject(message_json_obj.get(), "text", text.c_str());
       SendTextInternal(cjson_util::ToString(message_json_obj));
+    } else {
+      // Connected without a wake-up, so anything parked is stale - a timer chime the user has long
+      // since dealt with, say. Drop it rather than blurt it out at the start of the next session.
+      pending_wake_text_.clear();
     }
   } else if (*type == "goodbye") {
     CLOGI("goodbye");
@@ -502,6 +548,13 @@ void EngineImpl::OnJsonData(FlexArray<uint8_t> &&data) {
     }
   } else if (*type == "mcp") {
     OnMcpJsonObj(cJSON_GetObjectItem(root_json_obj.get(), "payload"));
+  } else if (*type == "alert") {
+    // How the server reports that it refused something we sent, e.g. "Detect is only for wake
+    // words, do not send long texts." Worth a line of its own: as an "unknown type" it looks like a
+    // protocol version mismatch, when in fact it is telling us exactly what we did wrong.
+    const auto message = cjson_util::GetString(root_json_obj.get(), "message");
+    const auto status = cjson_util::GetString(root_json_obj.get(), "status");
+    CLOGE("server alert [%s]: %s", status ? status->c_str() : "", message ? message->c_str() : "");
   } else {
     CLOGE("unknown type: %s", type->c_str());
   }

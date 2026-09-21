@@ -39,6 +39,12 @@ class Display {
   // through ShowStatus(): that derives is_speaking_ from the string it is given, and the volume
   // almost always changes while the assistant is mid-sentence.
   void ShowVolume(uint16_t volume);
+  // Countdown chip in the middle of the status bar. While it is up it owns the centre of the bar:
+  // the chat status and the volume toast both step aside, so the digits land on the optical middle
+  // of the screen rather than being pushed off to one side.
+  void ShowTimer(uint32_t remaining_seconds);
+  void ShowTimerFinished();
+  void HideTimer();
   void SetEmotion(const std::string& emotion);
 
   void SetUiMode(UiMode mode);
@@ -90,6 +96,13 @@ class Display {
   lv_obj_t* status_label_ = nullptr;
   // Speaker icon reflecting the current output volume. (Was an unused mute indicator.)
   lv_obj_t* volume_label_ = nullptr;
+  // Countdown readout. Shares the centre of the status bar with status_label_/notification_label_,
+  // and wins while a timer is running - see timer_visible_.
+  lv_obj_t* timer_label_ = nullptr;
+  // Latch so ShowStatus()/ShowVolume() know to leave the centre of the bar alone. Without it the
+  // next chat state change would unhide status_label_ underneath the countdown and the two would
+  // sit side by side, each with flex_grow 1, pushing the digits off centre.
+  bool timer_visible_ = false;
 
   // Character face mode: a full-screen portrait plus small sprites that are swapped over the
   // hair, eyes and mouth to animate it. Everything else about the picture stays put.
