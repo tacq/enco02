@@ -107,8 +107,8 @@ EngineImpl::EngineImpl()
       // including the HTTPS/TLS handshake: AiVoxMain peaked at 2,576 bytes and AiVoxNetwork at
       // 3,340. Both keep ~2.5KB of headroom; the 8KB of DRAM this frees goes back to the heap,
       // which is the resource the Wi-Fi receive path actually runs out of.
-      task_queue_("AiVoxMain", 5 * 1024, tskIDLE_PRIORITY + 1),
-      network_task_queue_("AiVoxNetwork", 6 * 1024, tskIDLE_PRIORITY + 1, false) {
+      task_queue_("AiVoxMain", 4 * 1024, tskIDLE_PRIORITY + 1),
+      network_task_queue_("AiVoxNetwork", 5 * 1024, tskIDLE_PRIORITY + 1, false) {
 }
 
 EngineImpl::~EngineImpl() {
@@ -645,16 +645,16 @@ void EngineImpl::OnMcpJsonObj(cJSON *root_json_obj) {
     // auto const reply_text = cjson_util::ToString(reply_obj);
     SendMcpResponse(id.value(), std::move(response_json_obj));
   } else if (*method == "tools/list") {
-    const std::string tools_json = mcp_tool_manager_.GetToolsJsonString();
+    const std::string& tools_body = mcp_tool_manager_.GetToolsBody();
     std::string response;
-    response.reserve(session_id_.length() + tools_json.length() + 80);
+    response.reserve(session_id_.length() + tools_body.length() + 96);
     response += "{\"session_id\":\"";
     response += session_id_;
     response += "\",\"type\":\"mcp\",\"payload\":{\"jsonrpc\":\"2.0\",\"id\":";
     response += std::to_string(id.value());
-    response += ",\"result\":";
-    response += tools_json;
-    response += "}}";
+    response += ",\"result\":{\"tools\":[";
+    response += tools_body;
+    response += "]}}}";
     SendTextInternal(std::move(response));
   } else if (*method == "tools/call") {
     auto params_json_obj = cJSON_GetObjectItem(root_json_obj, "params");

@@ -84,7 +84,7 @@ class Display {
   // Like the countdown panel, the card is created when it is needed and destroyed when it clears,
   // so neither costs anything while the robot is just sitting there. Calling ShowAlert() twice
   // rewrites the existing card rather than stacking a second one.
-  void ShowAlert(const char* title, const char* body);
+  void ShowAlert(const char* title, const char* body, uint32_t duration_ms = 5000);
   void HideAlert();
 
 
@@ -105,6 +105,8 @@ class Display {
   // nothing has changed and the caller must not start the video link.
   bool EnterCameraView();
   void ExitCameraView();
+  void SuspendCameraVideo();
+  bool ResumeCameraVideo();
   bool InCameraView() const { return ui_mode_ == UiMode::kCameraView; }
 
   // Big caption over the picture - "识别中…", the answer, an error. Pass nullptr
@@ -242,6 +244,7 @@ class Display {
   lv_obj_t* alert_card_ = nullptr;
   lv_obj_t* alert_title_ = nullptr;
   lv_obj_t* alert_body_ = nullptr;
+  uint32_t alert_hide_at_ms_ = 0;
 
   // Returns false if the heap could not take it, in which case the caller falls back to the
   // status-bar countdown, which costs nothing because those widgets already exist.

@@ -64,11 +64,17 @@ class CamLink {
   // raises the frame size, so this was never going to be stable.
   //
   // 230400 puts a 2KB frame on the wire for ~87ms against a 79-98ms decode, so
-  // occupancy stays near zero with a whole room of margin. It costs no frame
-  // rate at all, because the decoder - not the wire - is the bottleneck: at
-  // ~85ms/frame the ceiling is ~11fps either way, and the cam only offers a
-  // frame every 90ms.
-  static constexpr uint32_t kFastBaud = 230400;
+  // occupancy stays near zero with a whole room of margin.
+  //
+  // Why 231884 instead of 230400: the cam board builds against Arduino 3.2.0,
+  // whose esp32-hal-uart.c switches UART1 to the 1 MHz REF_TICK clock whenever
+  // baud <= 250000 (REF_TICK_BAUDRATE_LIMIT). At 1 MHz, 230400 produces a
+  // 16x-fractional divisor of 69 (div_int=4, div_frag=5), whose actual bit
+  // rate is 16,000,000 / 69 = 231,884.058 Hz (+0.65% above 230,400). This
+  // board (Arduino 2.0.11) clocks UART2 from 80 MHz APB, where 231884 gives an
+  // exact integer divisor of 345 (80,000,000 / 345 = 231,884.058 Hz, 5 * 69 =
+  // 345) - matching the cam board's bit clock to 0.000000%.
+  static constexpr uint32_t kFastBaud = 231884;
 
   // How long to wait for a vision answer before giving up on the tool call.
   // Capture plus a TLS round trip to a vision API runs 3-8s; 15s is generous
@@ -130,6 +136,7 @@ class CamLink {
   bool BeginVideo();
   void EndVideo();
   bool video_active() const { return video_active_; }
+  uint32_t active_baud() const { return link_fast_ ? kFastBaud : kBaud; }
 
   // Frames actually drawn since BeginVideo(). Lets the UI show a real rate
   // rather than claiming one.
@@ -155,7 +162,12 @@ class CamLink {
   // Changes the UART speed on both ends and waits up to `ack_timeout_ms` for
   // the cam to confirm at the new rate. Returns false if it never did, meaning
   // the two boards are no longer agreed and nothing sent now will be heard.
-  bool SetLinkFast(bool fast, uint32_t ack_timeout_ms);
+  bool SetLinkFast(bool fast, uint32_t ack_timeout_ms, bool force = false);
+
+  // Downshifts an active viewfinder stream to 115200 baud (B 0 + F 1) when the
+  // fast rate produces corrupted frames, keeping the camera view live rather
+  // than closing it.
+  bool FallbackVideoToSlow();
 
   // Reads one binary video frame, header already consumed, and feeds it to the
   // decoder. Blocks for as long as the frame takes (~65ms at 921600), which is
@@ -206,6 +218,9 @@ class CamLink {
   int64_t look_id_ = 0;
   bool look_pending_ = false;
   uint32_t look_started_ms_ = 0;
+  uint32_t look_last_tx_ms_ = 0;
+  uint8_t look_retries_ = 0;
+  char look_cmd_[192] = {0};
 
   bool result_ready_ = false;
   bool result_ok_ = false;
@@ -214,6 +229,8 @@ class CamLink {
   // Viewfinder state.
   bool video_active_ = false;
   bool link_fast_ = false;
+  bool video_slow_fallback_ = false;
+  uint32_t video_stopped_ms_ = 0;
   uint16_t video_frames_ = 0;
   // Frames whose CRC did not match, or that the decoder rejected. A handful is
   // normal on jumper wire at 921600; a flood means the wiring cannot take it.
@@ -225,6 +242,8 @@ class CamLink {
   // how much of its payload is still on the wire.
   uint16_t frame_crc_ = 0;
   uint32_t frame_left_ = 0;
+  uint8_t frame_head_[8] = {0};
+  uint8_t frame_head_len_ = 0;
 
   // 320, and the cam's send buffer is the same.
   //
@@ -236,6 +255,7 @@ class CamLink {
   // line_len_ is uint16_t because a uint8_t wraps at 255 and would have turned
   // the bounds check into an infinite write.
   uint16_t line_len_ = 0;
+  bool line_corrupt_ = false;
   char line_[320];
   char result_[320];
 

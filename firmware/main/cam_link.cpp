@@ -7,6 +7,7 @@
 // For esp_read_mac(): the vision token is issued against this board's MAC, so
 // the K command has to carry it.
 #include <esp_mac.h>
+#include <hal/uart_ll.h>
 
 #include "servo_controller.h"
 #include "video_sink.h"
@@ -170,8 +171,10 @@ void CamLink::Init() {
   // over the old value. Set before begin(), which is where the driver
   // allocates it - at boot with ~180KB free, rather than mid-session with 2KB
   // of contiguous heap.
-  Serial2.setRxBufferSize(1024);
+  Serial2.setRxBufferSize(2048);
   Serial2.begin(kBaud, SERIAL_8N1, kPinRx, kPinTx);
+  uart_ll_set_sclk(UART_LL_GET_HW(2), SOC_MOD_CLK_APB);
+  uart_ll_set_baudrate(UART_LL_GET_HW(2), kBaud, 80000000);
   // Bounds readBytes() inside the video path. The Stream default is 1000ms,
   // which on a truncated frame would freeze the head, the screen and the button
   // for a full second.
@@ -250,49 +253,65 @@ bool CamLink::RequestLook(int64_t mcp_id, const char* question) {
     return false;
   }
 
+  // If video was just turned off ("F 0"), the cam board needs ~350ms to finish
+  // its in-flight JPEG write and run InitTrackingCamera(). Wait out any remaining
+  // portion of that window and drain residual bytes before sending K and V.
+  if (video_stopped_ms_ != 0) {
+    const int32_t elapsed = static_cast<int32_t>(millis() - video_stopped_ms_);
+    if (elapsed >= 0 && elapsed < 380) {
+      const uint32_t until = millis() + static_cast<uint32_t>(380 - elapsed);
+      while (static_cast<int32_t>(millis() - until) < 0) {
+        while (Serial2.available() > 0) {
+          Serial2.read();
+        }
+        delay(4);
+      }
+    }
+    video_stopped_ms_ = 0;
+    line_len_ = 0;
+    line_corrupt_ = false;
+  }
+
   // Recognition mode. Stop the head BEFORE asking for the photo.
-  //
-  // Tracking and recognition are mutually exclusive on this hardware: the
-  // tracker is steering the lens at the user's face at 3 deg per 60ms, so a
-  // capture taken mid-pan is motion-blurred and framed on the wrong thing
-  // entirely - which is exactly why "这是什么" came back with nonsense while
-  // tracking was on. `A 0` stops the cam reporting, NoteManualHeadCommand()
-  // stops this side from acting on any T already in the buffer, and the cam
-  // adds its own 350ms settle before the shutter. Tracking is restored when the
-  // answer arrives.
   if (tracking_enabled_) {
     look_resume_tracking_ = true;
     SetTrackingEnabled(false);
   }
   NoteManualHeadCommand();
 
+  // Always refresh the vision endpoint before a look in case the cam missed K
+  // while streaming video or re-initialising its sensor.
+  SendVisionEndpoint();
+
   look_id_ = mcp_id;
   look_pending_ = true;
   look_started_ms_ = millis();
+  look_last_tx_ms_ = look_started_ms_;
+  look_retries_ = 0;
 
   if (question == nullptr || *question == '\0') {
-    SendCommand("V");
+    snprintf(look_cmd_, sizeof(look_cmd_), "V");
+    SendCommand(look_cmd_);
     return true;
   }
 
   // One line per message, so a newline inside the question would split it in
-  // two and the cam would act on half a sentence. The assistant writes this
-  // text, so it is not hostile, but it is not constrained either.
-  char cmd[192];
-  int n = snprintf(cmd, sizeof(cmd), "V %s", question);
+  // two and the cam would act on half a sentence.
+  int n = snprintf(look_cmd_, sizeof(look_cmd_), "V %s", question);
   if (n < 0) {
-    SendCommand("V");
+    snprintf(look_cmd_, sizeof(look_cmd_), "V");
+    SendCommand(look_cmd_);
     return true;
   }
-  if (static_cast<size_t>(n) >= sizeof(cmd)) {
-    n = sizeof(cmd) - 1;
+  if (static_cast<size_t>(n) >= sizeof(look_cmd_)) {
+    n = sizeof(look_cmd_) - 1;
   }
   for (int i = 0; i < n; ++i) {
-    if (cmd[i] == '\n' || cmd[i] == '\r') {
-      cmd[i] = ' ';
+    if (look_cmd_[i] == '\n' || look_cmd_[i] == '\r') {
+      look_cmd_[i] = ' ';
     }
   }
-  SendCommand(cmd);
+  SendCommand(look_cmd_);
   return true;
 }
 
@@ -537,11 +556,11 @@ void CamLink::CoastTracking() {
 // So: send at the old rate, switch, then wait for the cam's `B` ack at the new
 // rate. Returns false if it never comes, which is the caller's cue that the
 // link is not where it thinks it is.
-bool CamLink::SetLinkFast(bool fast, uint32_t ack_timeout_ms) {
+bool CamLink::SetLinkFast(bool fast, uint32_t ack_timeout_ms, bool force) {
   if (!initialised_) {
     return false;
   }
-  if (fast == link_fast_) {
+  if (!force && fast == link_fast_) {
     return true;
   }
   SendCommand(fast ? "B 1" : "B 0");
@@ -570,7 +589,17 @@ bool CamLink::SetLinkFast(bool fast, uint32_t ack_timeout_ms) {
   }
 
   delay(5);
-  Serial2.updateBaudRate(fast ? kFastBaud : kBaud);
+  const uint32_t target_baud = fast ? kFastBaud : kBaud;
+  Serial2.updateBaudRate(target_baud);
+  // Arduino 3.2.0 switches UARTs to the 1 MHz REF_TICK clock whenever baud <=
+  // 250000 (REF_TICK_BAUDRATE_LIMIT). At ~230kbaud a 1 MHz receiver only has
+  // 4.34 clock ticks per bit (div_int=4), so its 1us start-bit quantization
+  // plus the cam's 1us fractional bit step shifts the sample point by up to 2us
+  // (46% of a bit cell) and corrupts every JPEG header with JDR_FMT1. Keep
+  // UART2 on the 80 MHz APB clock (12.5ns resolution, div_int=345, div_frag=0
+  // at 231884 Hz) so every bit is sampled at its exact centre.
+  uart_ll_set_sclk(UART_LL_GET_HW(2), SOC_MOD_CLK_APB);
+  uart_ll_set_baudrate(UART_LL_GET_HW(2), target_baud, 80000000);
   link_fast_ = fast;
   line_len_ = 0;
 
@@ -604,39 +633,38 @@ bool CamLink::SetLinkFast(bool fast, uint32_t ack_timeout_ms) {
 }
 
 bool CamLink::BeginVideo() {
-  if (!initialised_ || !present_ || !video_sink::IsOpen()) {
+  if (!initialised_ || !video_sink::IsOpen()) {
     return false;
   }
   if (video_active_) {
     return true;
   }
-  // 400ms: with video off the cam's loop is short, but it may still be in the
-  // middle of a tracking frame grab or an HTTP poll.
-  if (!SetLinkFast(true, 400)) {
-    // A missing ack does NOT mean the cam ignored us. It may well have switched
-    // and had its reply lost, in which case both ends are now at different
-    // rates and every command is noise until the cam's 7s idle watchdog drops
-    // it back on its own - eight seconds of "camera lost" for what is really a
-    // two-byte hiccup.
-    //
-    // So tell it to come back down while we are still speaking its (possible)
-    // new language, then revert. If it never switched, this line is garbage to
-    // a port listening at 115200 and is discarded as an unknown command.
+  if (link_fast_) {
     SendCommand("B 0");
     Serial2.flush();
     delay(5);
     Serial2.updateBaudRate(kBaud);
+    uart_ll_set_sclk(UART_LL_GET_HW(2), SOC_MOD_CLK_APB);
+    uart_ll_set_baudrate(UART_LL_GET_HW(2), kBaud, 80000000);
     link_fast_ = false;
-    line_len_ = 0;
-    return false;
   }
+  line_len_ = 0;
+
+  video_sink::ResetErrors();
   video_frames_ = 0;
   video_bad_ = 0;
   video_retry_ = 0;
+  video_decode_ms_ = 0;
+  video_timed_ = 0;
+  video_stat_ms_ = millis();
   last_frame_ms_ = millis();
   SendCommand("F 1");
   video_active_ = true;
   return true;
+}
+
+bool CamLink::FallbackVideoToSlow() {
+  return BeginVideo();
 }
 
 void CamLink::EndVideo() {
@@ -648,25 +676,28 @@ void CamLink::EndVideo() {
 
   if (was_active) {
     printf("cam link: video off after %u frames, %u bad\n", static_cast<unsigned>(video_frames_), static_cast<unsigned>(video_bad_));
-    // Stop the stream BEFORE changing speed, at the rate the cam is currently
-    // listening at. Otherwise the baud switch races the frame still on the wire.
     SendCommand("F 0");
     Serial2.flush();
+    // Non-blocking drain of bytes already in the FIFO. Do NOT block loopTask for
+    // 300ms here: when the user says "关闭摄像头", TTS starts simultaneously and
+    // blocking loopTask delays freeing the camera UI heap and starves the event pump.
+    // Any in-flight 0xA5 0x5A JPEG frames are consumed cleanly by Poll() below.
+    while (Serial2.available() > 0) {
+      Serial2.read();
+    }
+    line_len_ = 0;
+    line_corrupt_ = false;
+    video_stopped_ms_ = millis();
   }
 
-  // 900ms, because `F 0` sends the cam into esp_camera_init() to go back to the
-  // tracking frame size, and it services no UART at all for a few hundred
-  // milliseconds while it does. The `B 0` waits in its receive buffer until it
-  // is done; this side must not give up before then, because everything that
-  // follows - `A 0`, `V` - depends on both ends agreeing on the rate.
-  SetLinkFast(false, 900);
-
-  // Whatever state the ack left us in, the slow rate is where the cam ends up:
-  // if it never heard `B 0`, its own idle watchdog drops it back within 7s.
   if (link_fast_) {
-    Serial2.updateBaudRate(kBaud);
-    link_fast_ = false;
+    SetLinkFast(false, 500);
   }
+
+  Serial2.updateBaudRate(kBaud);
+  uart_ll_set_sclk(UART_LL_GET_HW(2), SOC_MOD_CLK_APB);
+  uart_ll_set_baudrate(UART_LL_GET_HW(2), kBaud, 80000000);
+  link_fast_ = false;
 }
 
 size_t CamLink::VideoRead(void* ctx, uint8_t* dst, size_t len) {
@@ -698,6 +729,9 @@ size_t CamLink::VideoRead(void* ctx, uint8_t* dst, size_t len) {
     const size_t n = Serial2.readBytes(p, chunk);
     if (n == 0) {
       break;  // the cam stopped mid-frame
+    }
+    for (size_t i = 0; i < n && self->frame_head_len_ < sizeof(self->frame_head_); ++i) {
+      self->frame_head_[self->frame_head_len_++] = p[i];
     }
     self->frame_crc_ = Crc16Update(self->frame_crc_, p, n);
     got += n;
@@ -738,6 +772,7 @@ void CamLink::ReceiveVideoFrame() {
 
   frame_left_ = len;
   frame_crc_ = 0xFFFF;
+  frame_head_len_ = 0;
 
   const uint32_t decode_start_ms = millis();
 
@@ -756,6 +791,9 @@ void CamLink::ReceiveVideoFrame() {
 
   last_frame_ms_ = millis();
   last_rx_ms_ = last_frame_ms_;  // a frame proves the cam is alive as well as a line does
+  if (!video_active_) {
+    return;
+  }
 
   if (ok && frame_crc_ == want_crc) {
     ++video_frames_;
@@ -764,25 +802,28 @@ void CamLink::ReceiveVideoFrame() {
     video_sink::DrawReticle();
   } else {
     ++video_bad_;
+    if (video_bad_ <= 3) {
+      printf("video: bad #%u len=%u %ux%u crc=%04x(want %04x) left=%u head=%02x %02x %02x %02x %02x %02x\n",
+             static_cast<unsigned>(video_bad_), static_cast<unsigned>(len), static_cast<unsigned>(w),
+             static_cast<unsigned>(h), static_cast<unsigned>(frame_crc_), static_cast<unsigned>(want_crc),
+             static_cast<unsigned>(frame_left_), frame_head_[0], frame_head_[1], frame_head_[2],
+             frame_head_[3], frame_head_[4], frame_head_[5]);
+    }
   }
 
   // The one measurement that says whether this link rate is sustainable.
   //
-  // `wire` is how long `len` bytes take to arrive at kFastBaud; `decode` is how
-  // long we took to consume them. Decode longer than wire means we are falling
-  // behind every frame and the driver buffer is absorbing the difference until
-  // it cannot - which is exactly how 921600 failed. Seeing decode comfortably
-  // under wire here is the evidence that 460800 fixed it rather than just
-  // moving the problem.
+  // `wire` is how long `len` bytes take to arrive at active_baud(); `decode` is
+  // how long we took to consume them.
   video_decode_ms_ += decode_ms;
   ++video_timed_;
   if (millis() - video_stat_ms_ >= 2000) {
     video_stat_ms_ = millis();
     const uint32_t avg = video_timed_ ? (video_decode_ms_ / video_timed_) : 0;
-    const uint32_t wire_ms = (len * 10UL * 1000UL) / kFastBaud;
-    printf("video: %u ok, %u bad, %uB/frame, decode %ums vs wire %ums\n", static_cast<unsigned>(video_frames_),
+    const uint32_t wire_ms = (len * 10UL * 1000UL) / active_baud();
+    printf("video: %u ok, %u bad, %uB/frame, decode %ums vs wire %ums (@%u)\n", static_cast<unsigned>(video_frames_),
            static_cast<unsigned>(video_bad_), static_cast<unsigned>(len), static_cast<unsigned>(avg),
-           static_cast<unsigned>(wire_ms));
+           static_cast<unsigned>(wire_ms), static_cast<unsigned>(active_baud()));
     video_decode_ms_ = 0;
     video_timed_ = 0;
   }
@@ -808,20 +849,38 @@ void CamLink::HandleLine(const char* line) {
       if (sscanf(line + 1, "%d %d %d %d", &dx, &dy, &conf, &roll) >= 3) {
         ApplyTracking(dx, dy, conf, roll);
       }
+      // RunVision() on the cam board is synchronous and blocks loop(), so receiving
+      // a 'T' line >700ms after we sent 'V' proves the cam is idle in loop() and
+      // missed our 'V' command (e.g. while re-initialising its sensor after F 0).
+      if (look_pending_ && look_cmd_[0] != '\0' && look_retries_ < 2 &&
+          (millis() - look_last_tx_ms_ > 700)) {
+        ++look_retries_;
+        look_last_tx_ms_ = millis();
+        printf("cam link: cam idle while look pending -> retry #%u: %s\n",
+               static_cast<unsigned>(look_retries_), look_cmd_);
+        SendVisionEndpoint();
+        SendCommand(look_cmd_);
+      }
       break;
     }
     case 'L':
     case 'E': {
+      if (line[1] != ' ') {
+        break;  // require protocol space delimiter to reject stray noise
+      }
       if (!look_pending_) {
         break;  // late arrival after a timeout, or an unsolicited boot error
       }
       look_pending_ = false;
+      look_cmd_[0] = '\0';
+      look_retries_ = 0;
       result_ready_ = true;
       result_ok_ = (line[0] == 'L');
       result_id_ = look_id_;
-      const char* body = (line[1] == ' ') ? line + 2 : line + 1;
+      const char* body = line + 2;
       strncpy(result_, body, sizeof(result_) - 1);
       result_[sizeof(result_) - 1] = '\0';
+      printf("cam link: look result (%c): %.80s\n", line[0], result_);
       // The photo has been taken and answered; put the head back to work if the
       // user had tracking on before they asked.
       if (look_resume_tracking_) {
@@ -847,6 +906,13 @@ void CamLink::HandleLine(const char* line) {
       // so is its vision endpoint, which lives in RAM over there.
       tracking_armed_ = false;
       SendVisionEndpoint();
+      if (look_pending_ && look_cmd_[0] != '\0' && look_retries_ < 2) {
+        ++look_retries_;
+        look_last_tx_ms_ = millis();
+        printf("cam link: cam rebooted while look pending -> retry #%u\n",
+               static_cast<unsigned>(look_retries_));
+        SendCommand(look_cmd_);
+      }
       break;
     }
     default:
@@ -872,13 +938,14 @@ void CamLink::Poll() {
     }
     // Video frames are binary and a JPEG is full of 0x0A, so they cannot travel
     // as lines. 0xA5 never occurs in the ASCII protocol, which lets the parser
-    // stay exactly as it was and simply step aside when it sees the magic. Only
-    // checked while the viewfinder is up, so nothing changes the rest of the
-    // time.
-    if (video_active_ && c == kFrameMagic0) {
+    // stay exactly as it was and simply step aside when it sees the magic.
+    // Always intercept 0xA5 0x5A even right after video_active_ turns false so
+    // an in-flight JPEG frame after "F 0" never spills raw binary into line_[].
+    if (c == kFrameMagic0) {
       const int c2 = ReadByteTimed(5);
       if (c2 == kFrameMagic1) {
         line_len_ = 0;  // a frame cannot arrive mid-line; if it did, that line was junk
+        line_corrupt_ = false;
         ReceiveVideoFrame();
       }
       // A lone 0xA5 is noise. Both bytes are dropped: they are not ASCII, so
@@ -886,12 +953,17 @@ void CamLink::Poll() {
       continue;
     }
     if (c == '\n' || c == '\r') {
-      if (line_len_ > 0) {
+      if (line_len_ > 0 && !line_corrupt_) {
         line_[line_len_] = '\0';
         HandleLine(line_);
-        line_len_ = 0;
       }
+      line_len_ = 0;
+      line_corrupt_ = false;
       continue;
+    }
+    const uint8_t uc = static_cast<uint8_t>(c);
+    if ((uc < 0x20 && uc != '\t') || uc >= 0xFE) {
+      line_corrupt_ = true;
     }
     if (line_len_ < sizeof(line_) - 1) {
       line_[line_len_++] = static_cast<char>(c);
@@ -899,15 +971,26 @@ void CamLink::Poll() {
       // A line this long is a framing error, not a message. Drop it whole
       // rather than act on a fragment.
       line_len_ = 0;
+      line_corrupt_ = true;
     }
   }
 
   const uint32_t now = millis();
 
-  if (present_ && now - last_rx_ms_ > kPresenceTimeoutMs) {
+  if (present_ && !look_pending_ && now - last_rx_ms_ > kPresenceTimeoutMs) {
     present_ = false;
     tracking_armed_ = false;
     printf("cam link: camera lost\n");
+  }
+
+  // If a vision request is pending and the link has been silent for >900ms,
+  // send a lightweight 'P' ping. If the cam is idle in loop() (because it
+  // missed 'V' during sensor re-init), it will immediately reply "T 0 0 0 0",
+  // triggering HandleLine('T') to re-send look_cmd_.
+  if (look_pending_ && look_retries_ < 2 && (now - look_last_tx_ms_ > 900) &&
+      (now - last_ping_ms_ > 900)) {
+    last_ping_ms_ = now;
+    SendCommand("P");
   }
 
   // Ping both while searching (!present_) and whenever the link has been quiet
@@ -941,6 +1024,8 @@ void CamLink::Poll() {
 
   if (look_pending_ && now - look_started_ms_ > kLookTimeoutMs) {
     look_pending_ = false;
+    look_cmd_[0] = '\0';
+    look_retries_ = 0;
     result_ready_ = true;
     result_ok_ = false;
     result_id_ = look_id_;
@@ -954,44 +1039,11 @@ void CamLink::Poll() {
     }
   }
 
-  // The picture stopped. Either the cam reset, or its own fast-link watchdog
-  // fired and it is back at 115200 while we are still listening at 921600 -
-  // from here those look identical. Drop the link speed, which is the state the
-  // cam will be in either way, and stop claiming video is running so the UI can
-  // take itself off the viewfinder.
-  if (video_active_ && now - last_frame_ms_ > kVideoStallMs) {
-    printf("cam link: video stalled after %u frames (%u bad)\n", static_cast<unsigned>(video_frames_), static_cast<unsigned>(video_bad_));
-    EndVideo();
-  }
-
-  // Nothing at all since BeginVideo(). The likeliest cause is the cam having
-  // been mid-capture when the baud switch went out, so it never saw `F 1` - it
-  // reads its UART between frames, not during one. Say it again at the new
-  // rate, then give up fast: twelve seconds of a blank viewfinder is a much
-  // worse failure than two.
-  if (video_active_ && video_frames_ == 0 && video_bad_ == 0) {
-    const uint32_t waited = now - last_frame_ms_;
-    if (waited > 700 && video_retry_ == 0) {
-      video_retry_ = 1;
-      SendCommand("F 1");
-    } else if (waited > 2000) {
-      printf("cam link: no video from cam, giving up\n");
-      EndVideo();
-    }
-  }
-
-  // Too much of the stream is arriving damaged to be worth showing. Give up on
-  // video rather than put a screen of coloured hash in front of the user;
-  // 115200 still carries tracking and recognition perfectly well, which are the
-  // features that matter.
-  //
-  // The message deliberately does NOT say "too noisy". It said that once, and
-  // it was wrong: the failures were jd_prepare=OK with jd_decomp=JDR_FMT1 on
-  // every frame, which is a starved decoder, not a dirty wire. If this fires
-  // again, check whether the header is still parsing before blaming the cable.
-  if (video_active_ && video_bad_ > 12 && video_bad_ > video_frames_) {
-    printf("cam link: %u of %u frames corrupt at %u baud - giving up on video\n", static_cast<unsigned>(video_bad_),
-           static_cast<unsigned>(video_bad_ + video_frames_), static_cast<unsigned>(kFastBaud));
-    EndVideo();
+  // If the cam briefly paused (e.g. sensor re-init or web snapshot), re-send
+  // `F 1` rather than killing `video_active_` so the camera view stays open
+  // until the user explicitly closes it.
+  if (video_active_ && now - last_frame_ms_ > 1500) {
+    last_frame_ms_ = now;
+    SendCommand("F 1");
   }
 }

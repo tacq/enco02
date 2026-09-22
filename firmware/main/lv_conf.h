@@ -53,7 +53,7 @@
 // Montserrat rather than a generated subset because it ships with LVGL and costs only a flag;
 // flash is at 72%, with ~1.1MB spare, so there is no reason to build a digits-only font. It has no
 // CJK, which is fine - only the digits and the colon are ever rendered in it.
-#define CONFIG_LV_FONT_MONTSERRAT_40 1
+#define CONFIG_LV_FONT_MONTSERRAT_32 1
 #define CONFIG_LV_FONT_FMT_TXT_LARGE 1
 #define CONFIG_LV_USE_FONT_COMPRESSED 1
 #define CONFIG_LV_USE_FONT_PLACEHOLDER 1

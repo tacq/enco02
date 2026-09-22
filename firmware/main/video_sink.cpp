@@ -169,6 +169,8 @@ bool IsOpen() { return g_pool != nullptr && g_panel != nullptr; }
 
 uint16_t error_count() { return g_errors; }
 
+void ResetErrors() { g_errors = 0; }
+
 bool DecodeFrame(ReadFn read, void* ctx) {
   if (!IsOpen()) {
     return false;

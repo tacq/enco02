@@ -69,6 +69,7 @@ bool DecodeFrame(ReadFn read, void* ctx);
 // Number of frames that failed to decode since Begin(). Used to decide whether
 // the fast link is actually viable on this particular set of wires.
 uint16_t error_count();
+void ResetErrors();
 
 }  // namespace video_sink
 

@@ -120,6 +120,8 @@ class ToolManager {
     return json;
   }
 
+  const std::string& GetToolsBody() const { return tools_body_; }
+
  private:
   std::string tools_body_;
 };

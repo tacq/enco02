@@ -647,7 +647,7 @@ uint32_t g_timer_last_announce_try = 0;
 uint32_t g_last_timer_exec_time = 0;
 
 // How long "时间到" stays in the status bar before the bar goes back to normal on its own.
-constexpr uint32_t kTimerFinishedHoldMs = 60000;
+constexpr uint32_t kTimerFinishedHoldMs = 5000;
 constexpr uint32_t kTimerAnnounceRetryMs = 1500;
 // Stop retrying eventually: an alarm half a minute late is worse than no alarm, and the screen has
 // been saying 时间到 the whole time anyway.
@@ -660,39 +660,46 @@ constexpr uint32_t kTimerAnnounceGiveUpMs = 30000;
 // this many UTF-8 characters falls back to a fixed short one.
 constexpr size_t kTimerAnnounceMaxChars = 10;
 
+// Characters, not bytes: a Chinese character is three bytes, so strlen() would put even a five
+// character phrase well over any sane wake-word budget.
+size_t Utf8Length(const std::string& s) {
+  size_t count = 0;
+  for (const char ch : s) {
+    if ((static_cast<unsigned char>(ch) & 0xC0) != 0x80) {  // Skip continuation bytes.
+      ++count;
+    }
+  }
+  return count;
+}
+
 // ---------------------------------------------------------------------------
-// Event notification card
+// Event notification toast
 // ---------------------------------------------------------------------------
-// The card itself lives in Display (ShowAlert/HideAlert); this is just its lifetime. One slot, not
-// a queue: Display::ShowAlert() deliberately rewrites the existing card rather than stacking a
-// second one, so a second event supersedes the first and a single deadline is all that is needed.
+// The toast itself lives in Display (ShowAlert/HideAlert); this tracks its lifetime. One slot, not
+// a queue: Display::ShowAlert() deliberately rewrites the existing toast and resets its timer
+// rather than stacking a second one.
 //
-// Everything that raises a card goes through ShowNotification() so that nothing can put one up
-// without also arranging for it to come down - the first cut of this wired ShowAlert() straight
-// into the timer and the card then sat on screen forever.
+// Follows standard toast UX best practices: auto-dismisses after ~5 seconds (scaled slightly by
+// character count between 4.5s and 8s so longer 2-line reminders stay readable without lingering).
 bool g_alert_visible = false;
 uint32_t g_alert_expires_at = 0;
-constexpr uint32_t kAlertDefaultHoldMs = 60000;
-// Two minutes. Long enough for a reminder the user walked away from, short enough that a stale card
-// is not still claiming the screen an hour later.
-constexpr uint32_t kAlertMaxHoldMs = 120000;
+constexpr uint32_t kAlertMinHoldMs = 4500;
+constexpr uint32_t kAlertDefaultHoldMs = 5000;
+constexpr uint32_t kAlertMaxHoldMs = 8000;
 
-// The only sanctioned way to raise the card. hold_ms is clamped rather than rejected so a model
-// that asks for a day-long notification gets a reasonable one instead of none.
 void ShowNotification(const char* title, const char* body, uint32_t hold_ms) {
   if (g_display == nullptr) {
     return;
   }
-  if (hold_ms == 0 || hold_ms > kAlertMaxHoldMs) {
-    hold_ms = kAlertMaxHoldMs;
+  if (hold_ms == 0 || hold_ms == kAlertDefaultHoldMs) {
+    const size_t chars = Utf8Length(title ? title : "") + Utf8Length(body ? body : "");
+    hold_ms = kAlertMinHoldMs + static_cast<uint32_t>(chars) * 65;
   }
-  // Display::ShowAlert() can decline (viewfinder up, or free heap under its guard). Mark the slot
-  // occupied anyway: HideAlert() is a no-op on a card that was never built, and the alternative is
-  // a flag that says "nothing on screen" while a previous card is in fact still up.
-  g_display->ShowAlert(title, body);
+  hold_ms = std::clamp<uint32_t>(hold_ms, kAlertMinHoldMs, kAlertMaxHoldMs);
+  g_display->ShowAlert(title, body, hold_ms);
   g_alert_visible = true;
   g_alert_expires_at = millis() + hold_ms;
-  printf("[alert] %s | %s (%us)\n", title, body, static_cast<unsigned>(hold_ms / 1000));
+  printf("[alert] %s | %s (%ums)\n", title ? title : "", body ? body : "", static_cast<unsigned>(hold_ms));
 }
 
 void ClearNotification() {
@@ -708,18 +715,6 @@ void NotificationTick() {
   if (g_alert_visible && static_cast<int32_t>(g_alert_expires_at - millis()) <= 0) {
     ClearNotification();
   }
-}
-
-// Characters, not bytes: a Chinese character is three bytes, so strlen() would put even a five
-// character phrase well over any sane wake-word budget.
-size_t Utf8Length(const std::string& s) {
-  size_t count = 0;
-  for (const char ch : s) {
-    if ((static_cast<unsigned char>(ch) & 0xC0) != 0x80) {  // Skip continuation bytes.
-      ++count;
-    }
-  }
-  return count;
 }
 
 // "5分钟" / "1小时30分钟". Only ever spoken, never displayed.
@@ -858,13 +853,12 @@ void TimerTick() {
   }
 
   if (g_timer_finished && millis() - g_timer_finished_at >= kTimerFinishedHoldMs) {
-    g_timer_finished = false;
     if (g_display) {
       g_display->HideTimer();
     }
-    // The card is not touched here: it was raised with this same hold, so NotificationTick() takes
-    // it down on the same tick. Doing it in both places would tear down a *newer* card that some
-    // other event raised in the meantime.
+    if (g_timer_announced) {
+      g_timer_finished = false;
+    }
   }
 }
 
@@ -955,8 +949,8 @@ void InitMcpTools() {
   // No hold_seconds parameter for the same reason: a third schema entry costs more than it buys
   // when every card wants the same minute on screen anyway.
   engine.AddMcpTool("self.screen.notify",
-                    "Show a short note on the robot's screen (提醒我/记一下/通知我). "
-                    "title <=8 chars, body <=4 short lines. Clears itself after a minute.",
+                    "Show a short toast reminder on the robot's screen (提醒我/记一下/通知我). "
+                    "title <=8 chars, body <=3 short lines. Auto-disappears after ~5 seconds.",
                     {
                         {"title", ai_vox::ParamSchema<std::string>{.default_value = "提醒"}},
                         {"body", ai_vox::ParamSchema<std::string>{.default_value = std::nullopt}},
@@ -1110,14 +1104,15 @@ bool OpenCameraView(bool transient, const char** why = nullptr) {
     return false;
   }
   auto& cam = CamLink::GetInstance();
-  if (!cam.IsPresent()) {
-    if (why) *why = "Camera not connected";
-    return false;
-  }
   if (g_display->InCameraView()) {
-    // Already up. A look that arrives while the user is watching the live feed
-    // must not mark the view transient, or it would close their camera for them.
+    if (!transient) {
+      g_cam_view_transient = false;
+    }
     g_cam_view_deadline_ms = 0;
+    if (!g_cam_view_frozen && !cam.video_active()) {
+      g_display->ResumeCameraVideo();
+      cam.BeginVideo();
+    }
     return true;
   }
   if (!g_display->EnterCameraView()) {
@@ -1139,30 +1134,28 @@ bool OpenCameraView(bool transient, const char** why = nullptr) {
 }
 
 void CloseCameraView() {
-  if (!g_display) {
-    return;
-  }
-  CamLink::GetInstance().EndVideo();
-  if (g_display->InCameraView()) {
+  g_pending_look.active = false;
+  g_pending_look.question.clear();
+  if (g_display && g_display->InCameraView()) {
+    // Free the 4KB JPEG pool and 2.4KB LVGL camera HUD first before switching
+    // back to the homepage or touching UART, so taskLVGL and AudioOutputEngine
+    // have full contiguous heap immediately when TTS starts.
     g_display->ExitCameraView();
   }
+  CamLink::GetInstance().EndVideo();
   g_cam_view_transient = false;
   g_cam_view_frozen = false;
   g_cam_view_deadline_ms = 0;
+  LogHeap("camera view closed");
 }
 
-// Stops the stream and leaves the last frame on the panel - which is the photo,
-// as far as the user is concerned.
-//
-// This is not cosmetic. The cam stops servicing its UART for the several
-// seconds it spends uploading and waiting on the vision service, so a `B 0`
-// sent after the `V` would sit unread while the two boards ran at different
-// rates, and the answer would come back at 115200 into a port listening at
-// 921600. Dropping the link speed first is what makes the reply readable.
 void FreezeCameraView() {
   CamLink::GetInstance().EndVideo();
   g_cam_view_frozen = true;
   if (g_display) {
+    // Release the 4KB JPEG decode buffer while keeping the frozen frame on the
+    // ST7789 GRAM so TTS playback has plenty of contiguous internal RAM.
+    g_display->SuspendCameraVideo();
     g_display->SetCameraCapturing(true);
   }
 }
@@ -1171,14 +1164,17 @@ void ThawCameraView() {
   if (!g_display || !g_display->InCameraView()) {
     return;
   }
+  if (!g_display->ResumeCameraVideo()) {
+    printf("camera view: deferring thaw (heap %u)\n", static_cast<unsigned>(esp_get_free_heap_size()));
+    g_cam_view_deadline_ms = millis() + 1000;
+    return;
+  }
   g_display->SetCameraHint(nullptr);
   g_display->SetCameraCapturing(false);
   g_cam_view_frozen = false;
   g_cam_view_stat_ms = 0;
   g_cam_view_last_frames = 0;
-  if (!CamLink::GetInstance().BeginVideo()) {
-    CloseCameraView();
-  }
+  CamLink::GetInstance().BeginVideo();
 }
 }  // namespace
 
@@ -1284,6 +1280,7 @@ void setup() {
       nullptr,
       [](void* button_handle, void* usr_data) {
         printf("boot button pressed\n");
+        ClearNotification();
         ai_vox::Engine::GetInstance().Advance();
       },
       nullptr));
@@ -1411,6 +1408,24 @@ void loop() {
     const char* look_text = nullptr;
     if (cam.TakeLookResult(&look_id, &look_ok, &look_text)) {
       printf("cam look result (%s): %s\n", look_ok ? "ok" : "err", look_text);
+      if (g_display && g_display->InCameraView()) {
+        if (g_cam_view_transient) {
+          // Free the transient viewfinder (6.5KB of heap) BEFORE sending the MCP
+          // response so AudioOutputEngine has full contiguous memory when TTS starts.
+          CloseCameraView();
+          if (look_ok) {
+            g_display->ShowStatus("已识别");
+          }
+        } else {
+          // Persistent viewfinder ("打开摄像头"): keep the frozen frame up (4KB JPEG
+          // pool already freed by FreezeCameraView) and thaw after TTS finishes.
+          g_display->SetCameraHint(look_text);
+          g_display->SetCameraCapturing(false);
+          g_cam_view_deadline_ms = millis() + 2500;
+        }
+      } else if (look_ok && g_display) {
+        g_display->ShowStatus("已识别");
+      }
       if (look_ok) {
         // The description, not a finished sentence: the server's model reads
         // this and phrases the reply itself, so it comes out in the assistant's
@@ -1418,17 +1433,6 @@ void loop() {
         engine.SendMcpCallResponse(look_id, std::string(look_text));
       } else {
         engine.SendMcpCallError(look_id, std::string(look_text));
-      }
-      if (g_display && g_display->InCameraView()) {
-        // Put what the camera decided on the frozen frame. The spoken reply is
-        // the server's job and arrives a second or two later; this is so the
-        // user can see the recognition landed on the right object.
-        g_display->SetCameraHint(look_text);
-        g_display->SetCameraCapturing(false);
-        // Either close the detour or thaw the picture, 2.5s from now: long
-        // enough to read a short line, short enough that the robot is back to
-        // normal before the assistant has finished speaking.
-        g_cam_view_deadline_ms = millis() + 2500;
       }
     }
   }
@@ -1449,7 +1453,7 @@ void loop() {
     }
     if (!cam.RequestLook(g_pending_look.id, g_pending_look.question.c_str())) {
       engine.SendMcpCallError(g_pending_look.id, "Camera is busy");
-      CloseCameraView();
+      ThawCameraView();
     }
     g_pending_look.question.clear();
   }
@@ -1458,39 +1462,36 @@ void loop() {
   if (g_display && g_display->InCameraView()) {
     const uint32_t now_ms = millis();
 
-    // The cam went away, the link got too noisy, or the picture stalled - all
-    // of which CamLink handles by turning video off. There is no point leaving
-    // an empty viewfinder on screen once that happens. A frozen view is a
-    // different thing entirely: video is off because we turned it off.
+    // Keep the stream alive as long as the camera view is open. Never close the
+    // camera view automatically; it only closes when the user says "关闭摄像头".
     if (!cam.video_active() && !g_cam_view_frozen) {
-      printf("camera view: video stopped, closing\n");
-      CloseCameraView();
-    } else {
-      if (now_ms - g_cam_view_stat_ms >= 1000) {
-        // Once a second, and only once: lv_label_set_text() invalidates the
-        // label whether or not the text changed, and loop() runs hundreds of
-        // times in that second.
-        g_cam_view_stat_ms = now_ms;
-        if (g_cam_view_frozen) {
-          g_display->SetCameraTelemetry("HOLD");
-        } else {
-          // Measured frame rate. Claiming a number here rather than counting
-          // one would be the easiest thing in this whole feature to get quietly
-          // wrong.
-          const uint16_t frames = cam.video_frames();
-          char line[32];
-          snprintf(line, sizeof(line), "%u FPS · 921K", static_cast<unsigned>(frames - g_cam_view_last_frames));
-          g_cam_view_last_frames = frames;
-          g_display->SetCameraTelemetry(line);
-        }
+      cam.BeginVideo();
+    }
+    if (now_ms - g_cam_view_stat_ms >= 1000) {
+      // Once a second, and only once: lv_label_set_text() invalidates the
+      // label whether or not the text changed, and loop() runs hundreds of
+      // times in that second.
+      g_cam_view_stat_ms = now_ms;
+      if (g_cam_view_frozen) {
+        g_display->SetCameraTelemetry("HOLD");
+      } else {
+        const uint16_t frames = cam.video_frames();
+        char line[32];
+        snprintf(line, sizeof(line), "%u FPS · %uK", static_cast<unsigned>(frames - g_cam_view_last_frames),
+                 static_cast<unsigned>(cam.active_baud() / 1000));
+        g_cam_view_last_frames = frames;
+        g_display->SetCameraTelemetry(line);
       }
-      if (g_cam_view_deadline_ms != 0 && static_cast<int32_t>(now_ms - g_cam_view_deadline_ms) >= 0) {
+    }
+    if (g_cam_view_deadline_ms != 0 && static_cast<int32_t>(now_ms - g_cam_view_deadline_ms) >= 0) {
+      if (g_chat_state == ai_vox::ChatState::kSpeaking) {
+        // Defer re-allocating the 4KB JPEG pool until TTS playback completes.
+        g_cam_view_deadline_ms = now_ms + 500;
+      } else {
         g_cam_view_deadline_ms = 0;
         if (g_cam_view_transient) {
           CloseCameraView();
         } else {
-          // The user opened the camera themselves, so it goes back to live
-          // rather than away.
           ThawCameraView();
         }
       }
@@ -1588,11 +1589,22 @@ void loop() {
           printf("role: user, content: %s\n", chat_message_event->content.c_str());
           g_display->SetChatMessage(Display::Role::kUser, chat_message_event->content);
           g_last_user_query = chat_message_event->content;
+          if (chat_message_event->content.find("关闭摄像头") != std::string::npos ||
+              chat_message_event->content.find("关掉摄像头") != std::string::npos ||
+              chat_message_event->content.find("退出摄像头") != std::string::npos ||
+              chat_message_event->content.find("关摄像头") != std::string::npos) {
+            printf("camera view: closing on user voice command\n");
+            CloseCameraView();
+          } else if (chat_message_event->content.find("打开摄像头") != std::string::npos ||
+                     chat_message_event->content.find("开启摄像头") != std::string::npos) {
+            OpenCameraView(/*transient=*/false);
+          }
           break;
         }
       }
     } else if (auto mcp_tool_call_event = std::get_if<ai_vox::McpToolCallEvent>(&event)) {
       printf("on mcp tool call: %s\n", mcp_tool_call_event->ToString().c_str());
+      const std::string user_said = g_last_user_query;
       g_last_user_query.clear();  // MCP tool call received, clear query to avoid duplicate fallback
       const std::string& name = mcp_tool_call_event->name;
 
@@ -1623,30 +1635,22 @@ void loop() {
         const auto question_ptr = mcp_tool_call_event->param<std::string>("question");
         const char* question = question_ptr != nullptr ? question_ptr->c_str() : "";
         const int64_t look_id = mcp_tool_call_event->id;
+        const bool already_in_view = (g_display && g_display->InCameraView());
 
         if (!cam.IsPresent()) {
           engine.SendMcpCallError(look_id, "Camera not connected");
         } else if (g_pending_look.active) {
           engine.SendMcpCallError(look_id, "Camera is already busy");
         } else if (OpenCameraView(/*transient=*/true)) {
-          // Show the shot before taking it. The character is 40px tall on a
-          // 240x320 panel and says nothing about what is being pointed at;
-          // putting the actual frame up is the difference between the robot
-          // looking at your hand and the robot appearing to ignore you.
-          //
-          // The request itself waits for kLookPreviewMs - see the pending-look
-          // block in loop() for why it cannot simply be sent now.
           g_pending_look.active = true;
           g_pending_look.id = look_id;
           g_pending_look.question = question;
-          g_pending_look.fire_at_ms = millis() + kLookPreviewMs;
+          g_pending_look.fire_at_ms = millis() + (already_in_view ? 350 : kLookPreviewMs);
           if (g_display) {
             g_display->ShowStatus("看一下...");
             g_display->SetCameraHint("取景中…");
           }
         } else if (cam.RequestLook(look_id, question)) {
-          // No viewfinder - not enough heap, or the display refused. The
-          // feature still works, it just does it without showing its work.
           if (g_display) {
             g_display->ShowStatus("看一下...");
           }
@@ -1667,7 +1671,13 @@ void loop() {
           engine.SendMcpCallError(mcp_tool_call_event->id, why);
         }
       } else if (matches("self.camera.view_off")) {
-        CloseCameraView();
+        if (user_said.empty() ||
+            user_said.find("关闭摄像头") != std::string::npos ||
+            user_said.find("关掉摄像头") != std::string::npos ||
+            user_said.find("退出摄像头") != std::string::npos ||
+            user_said.find("关摄像头") != std::string::npos) {
+          CloseCameraView();
+        }
         engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
       } else if (matches("self.audio_speaker.set_volume", "set_volume")) {
         const auto volume_ptr = mcp_tool_call_event->param<int64_t>("volume");

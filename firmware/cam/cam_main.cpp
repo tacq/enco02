@@ -29,6 +29,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_camera.h>
+#include <hal/uart_ll.h>
 #include <img_converters.h>
 
 #include "cam_config.h"
@@ -537,7 +538,10 @@ bool HandleCommand(char* line) {
       const bool fast = (line[1] == ' ' && line[2] == '1');
       Serial1.flush();
       delay(5);
-      Serial1.updateBaudRate(fast ? kLinkFastBaud : LINK_BAUD);
+      const uint32_t target_baud = fast ? kLinkFastBaud : LINK_BAUD;
+      Serial1.updateBaudRate(target_baud);
+      uart_ll_set_sclk(UART_LL_GET_HW(1), SOC_MOD_CLK_APB);
+      uart_ll_set_baudrate(UART_LL_GET_HW(1), target_baud, 80000000);
       g_link_fast = fast;
 
       // Acknowledge, at the NEW rate. This is what makes the switch reliable
@@ -784,6 +788,8 @@ void setup() {
   // UART1. Its default pins sit on the flash bus, so they must be remapped -
   // the GPIO matrix makes that free.
   Serial1.begin(LINK_BAUD, SERIAL_8N1, LINK_RX_GPIO, LINK_TX_GPIO);
+  uart_ll_set_sclk(UART_LL_GET_HW(1), SOC_MOD_CLK_APB);
+  uart_ll_set_baudrate(UART_LL_GET_HW(1), LINK_BAUD, 80000000);
 
   if (!psramFound()) {
     // Without PSRAM neither a QVGA RGB565 frame (150KB) nor a base64 VGA JPEG

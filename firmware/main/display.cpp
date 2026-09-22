@@ -774,12 +774,12 @@ bool Display::EnsureTimerPanel() {
   }
 
   timer_panel_ = lv_obj_create(lv_screen_active());
-  lv_obj_set_pos(timer_panel_, 4, 232);
-  lv_obj_set_size(timer_panel_, 232, 84);
-  lv_obj_set_style_radius(timer_panel_, 6, 0);
+  lv_obj_set_pos(timer_panel_, 27, 278);
+  lv_obj_set_size(timer_panel_, 186, 38);
+  lv_obj_set_style_radius(timer_panel_, 5, 0);
   lv_obj_set_style_pad_all(timer_panel_, 0, 0);
   lv_obj_set_style_bg_color(timer_panel_, lv_color_hex(0x0a0f1a), 0);
-  lv_obj_set_style_bg_opa(timer_panel_, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_opa(timer_panel_, LV_OPA_50, 0);
   lv_obj_set_style_border_width(timer_panel_, 1, 0);
   lv_obj_set_style_border_color(timer_panel_, current_theme_.jarvis_gold, 0);
   lv_obj_set_style_outline_width(timer_panel_, 1, 0);
@@ -790,16 +790,16 @@ bool Display::EnsureTimerPanel() {
 
   auto* caption = lv_label_create(timer_panel_);
   lv_label_set_text(caption, "T-MINUS");
-  lv_obj_set_style_text_font(caption, &font_puhui_16_4, 0);
+  lv_obj_set_style_text_font(caption, &lv_font_montserrat_14, 0);
   lv_obj_set_style_text_color(caption, current_theme_.jarvis_gold, 0);
-  lv_obj_align(caption, LV_ALIGN_TOP_MID, 0, 4);
+  lv_obj_align(caption, LV_ALIGN_LEFT_MID, 8, 0);
 
   timer_digits_ = lv_label_create(timer_panel_);
-  // Montserrat, because the digits have to be 40px and the CJK font here is only built at 16.
-  lv_obj_set_style_text_font(timer_digits_, &lv_font_montserrat_40, 0);
+  // Montserrat 32px (80% of 40px) so the digits scale down proportionally with the 186x38 panel.
+  lv_obj_set_style_text_font(timer_digits_, &lv_font_montserrat_32, 0);
   lv_obj_set_style_text_color(timer_digits_, current_theme_.jarvis_gold, 0);
   lv_label_set_text(timer_digits_, "00:00");
-  lv_obj_align(timer_digits_, LV_ALIGN_BOTTOM_MID, 0, -4);
+  lv_obj_align(timer_digits_, LV_ALIGN_RIGHT_MID, -8, 0);
 
   lv_obj_move_foreground(timer_panel_);
   SetSubtitleHidden(true);
@@ -816,7 +816,7 @@ void Display::DestroyTimerPanel() {
   SetSubtitleHidden(false);
 }
 
-void Display::ShowAlert(const char* title, const char* body) {
+void Display::ShowAlert(const char* title, const char* body, const uint32_t duration_ms) {
   if (title == nullptr) {
     title = "";
   }
@@ -835,36 +835,43 @@ void Display::ShowAlert(const char* title, const char* body) {
       return;
     }
 
+    // Compact floating top-toast banner: auto-height (LV_SIZE_CONTENT) and positioned right below
+    // the status bar so it never blocks the character's eyes/mouth with a fixed oversized box.
     alert_card_ = lv_obj_create(lv_screen_active());
-    lv_obj_set_pos(alert_card_, 86, 42);
-    lv_obj_set_size(alert_card_, 150, 184);
-    lv_obj_set_style_radius(alert_card_, 4, 0);
-    lv_obj_set_style_pad_all(alert_card_, 7, 0);
+    lv_obj_set_pos(alert_card_, 12, 28);
+    lv_obj_set_size(alert_card_, 216, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(alert_card_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(alert_card_, 2, 0);
+    lv_obj_set_style_pad_top(alert_card_, 6, 0);
+    lv_obj_set_style_pad_bottom(alert_card_, 6, 0);
+    lv_obj_set_style_pad_left(alert_card_, 10, 0);
+    lv_obj_set_style_pad_right(alert_card_, 10, 0);
+    lv_obj_set_style_radius(alert_card_, 8, 0);
     lv_obj_set_style_bg_color(alert_card_, lv_color_hex(0x1a1206), 0);
-    lv_obj_set_style_bg_opa(alert_card_, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(alert_card_, 2, 0);
+    lv_obj_set_style_bg_opa(alert_card_, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(alert_card_, 1, 0);
     lv_obj_set_style_border_color(alert_card_, current_theme_.jarvis_gold, 0);
     lv_obj_clear_flag(alert_card_, LV_OBJ_FLAG_SCROLLABLE);
 
     alert_title_ = lv_label_create(alert_card_);
-    lv_obj_set_width(alert_title_, 136);
+    lv_obj_set_width(alert_title_, 194);
     lv_obj_set_style_text_font(alert_title_, &font_puhui_16_4, 0);
     lv_obj_set_style_text_color(alert_title_, current_theme_.jarvis_gold, 0);
     lv_label_set_long_mode(alert_title_, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(alert_title_, 0, 0);
 
     alert_body_ = lv_label_create(alert_card_);
-    lv_obj_set_width(alert_body_, 136);
+    lv_obj_set_width(alert_body_, 194);
     lv_obj_set_style_text_font(alert_body_, &font_puhui_16_4, 0);
     lv_obj_set_style_text_color(alert_body_, current_theme_.assistant_text, 0);
     lv_label_set_long_mode(alert_body_, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(alert_body_, 0, 46);
   }
 
-  // A second alert rewrites the card rather than stacking one on top of the other. Stacking would
-  // leak a widget per event and hide the newest behind the oldest.
+  // A second alert rewrites the card and resets its opacity and auto-dismiss timer rather than
+  // stacking one on top of the other.
+  lv_obj_set_style_opa(alert_card_, LV_OPA_COVER, 0);
   lv_label_set_text(alert_title_, title);
   lv_label_set_text(alert_body_, body);
+  alert_hide_at_ms_ = lv_tick_get() + (duration_ms > 0 ? duration_ms : 5000);
   lv_obj_move_foreground(alert_card_);
   // Below the countdown, so a timer that fires while a card is up still reads.
   if (timer_panel_ != nullptr) {
@@ -882,6 +889,7 @@ void Display::HideAlert() {
     alert_title_ = nullptr;
     alert_body_ = nullptr;
   }
+  alert_hide_at_ms_ = 0;
   lvgl_port_unlock();
 }
 
@@ -1052,7 +1060,7 @@ void Display::SetUiMode(UiMode mode) {
     // memory the audio path is about to need.
     const size_t free_heap = esp_get_free_heap_size();
     const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (free_heap < 16000 || largest < 6500) {
+    if (free_heap < 14500 || largest < 6000) {
       printf("[display] camera view refused (free %u, largest %u)\n", static_cast<unsigned>(free_heap), static_cast<unsigned>(largest));
       lvgl_port_unlock();
       return;
@@ -1339,13 +1347,11 @@ bool Display::EnterCameraView() {
 
 void Display::ExitCameraView() {
   video_sink::End();
-  const UiMode back = cam_return_mode_;
-  SetUiMode(back);
 
-  // Tear the HUD down rather than hide it. ~3KB of small LVGL objects sitting
-  // idle is 3KB of fragmentation, and on this board the TLS handshake has been
-  // logged failing a 2,308 byte allocation. Rebuilding takes a few milliseconds
-  // and only happens when the user actually opens the camera.
+  // Hold the LVGL lock across both the HUD deletion and SetUiMode(back), and delete
+  // cam_container_ FIRST. Otherwise SetUiMode(back)'s unlock immediately wakes taskLVGL
+  // (priority 2 > loopTask priority 1) to render the homepage while the 15 camera HUD
+  // widgets (~2.4KB) are still allocated, starving the heap right as TTS starts.
   lvgl_port_lock(0);
   if (cam_container_ != nullptr) {
     lv_obj_delete(cam_container_);
@@ -1357,7 +1363,21 @@ void Display::ExitCameraView() {
   cam_telemetry_label_ = nullptr;
   cam_built_ = false;
   cam_capturing_ = false;
+
+  const UiMode back = cam_return_mode_;
+  SetUiMode(back);
   lvgl_port_unlock();
+}
+
+void Display::SuspendCameraVideo() {
+  video_sink::End();
+}
+
+bool Display::ResumeCameraVideo() {
+  if (ui_mode_ != UiMode::kCameraView || panel_ == nullptr) {
+    return false;
+  }
+  return video_sink::Begin(panel_, kCamVideoX, kCamVideoY, kCamInset, kCamInset, kCamCropW, kCamCropH);
 }
 
 void Display::SetCameraHint(const char* text) {
@@ -1561,6 +1581,21 @@ void Display::OnFaceTimer(lv_timer_t* timer) {
   auto* self = static_cast<Display*>(lv_timer_get_user_data(timer));
   if (self == nullptr) {
     return;
+  }
+
+  // Toast auto-dismiss & smooth fade-out (runs in every UI mode with zero heap overhead).
+  if (self->alert_card_ != nullptr && self->alert_hide_at_ms_ != 0) {
+    const int32_t remaining_ms = static_cast<int32_t>(self->alert_hide_at_ms_ - lv_tick_get());
+    if (remaining_ms <= 0) {
+      lv_obj_del(self->alert_card_);
+      self->alert_card_ = nullptr;
+      self->alert_title_ = nullptr;
+      self->alert_body_ = nullptr;
+      self->alert_hide_at_ms_ = 0;
+    } else if (remaining_ms < 400) {
+      const lv_opa_t opa = static_cast<lv_opa_t>((remaining_ms * LV_OPA_COVER) / 400);
+      lv_obj_set_style_opa(self->alert_card_, opa, 0);
+    }
   }
 
   // The viewfinder borrows this timer rather than starting one of its own: the
