@@ -1,3 +1,4 @@
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_random.h>
 #include <esp_system.h>
@@ -14,6 +15,7 @@
 #include "lv_i4_decoder.h"
 #include "core/audio_playback_signal.h"
 #include "display.h"
+#include "video_sink.h"
 
 LV_FONT_DECLARE(font_puhui_16_4);
 LV_FONT_DECLARE(font_awesome_30_4);
@@ -36,6 +38,15 @@ static constexpr uint32_t kMouthHoldMs = 200;
 static constexpr uint8_t kHairPoseCount = 14;
 static constexpr uint32_t kHairMinGapTicks = 20;   // 1.6s
 static constexpr uint32_t kHairGapSpreadTicks = 40;  // up to a further 3.2s
+
+// What the caption pill says when nothing is going on.
+//
+// It used to read "Enco 正在待命..." - true, but it told the user nothing they could act on. This
+// device has exactly one control and no labels on it, so the idle state is the only moment there is
+// room to explain it. Both routes named here are real: WakeNet runs continuously (see
+// EngineImpl::OnWakeUp), and the boot button is wired to Engine::Advance(), which starts a session
+// from standby and interrupts her while she is talking.
+static constexpr const char* kIdleCaption = "待命中\n按键或唤醒词开始对话";
 
 // Sci-Fi HUD Jarvis Theme Color Definitions
 #define SCI_FI_BG_COLOR lv_color_hex(0x060c14)             // Deep space holographic dark
@@ -64,6 +75,7 @@ Display::Display(esp_lcd_panel_io_handle_t panel_io,
                  bool swap_xy)
     : width_(width),
       height_(height),
+      panel_(panel),
       current_theme_{
           .background = SCI_FI_BG_COLOR,
           .text = SCI_FI_TEXT_COLOR,
@@ -212,22 +224,37 @@ void Display::Start() {
   /* Status bar */
   lv_obj_set_flex_flow(status_bar_, LV_FLEX_FLOW_ROW);
   lv_obj_set_style_pad_all(status_bar_, 0, 0);
-  lv_obj_set_style_border_width(status_bar_, 0, 0);
+  // A hairline rule under the bar, in the same gold as the status text. This is the one piece of
+  // chrome the reference HUD leans on hardest, and it costs no object: it separates the bar from
+  // the portrait, which shares its near-black background and otherwise ran straight into it.
+  lv_obj_set_style_border_width(status_bar_, 1, 0);
+  lv_obj_set_style_border_side(status_bar_, LV_BORDER_SIDE_BOTTOM, 0);
+  lv_obj_set_style_border_color(status_bar_, current_theme_.jarvis_gold, 0);
+  lv_obj_set_style_border_opa(status_bar_, LV_OPA_60, 0);
   lv_obj_set_style_pad_column(status_bar_, 0, 0);
-  lv_obj_set_style_pad_left(status_bar_, 10, 0);
-  lv_obj_set_style_pad_right(status_bar_, 10, 0);
-  lv_obj_set_style_pad_top(status_bar_, 2, 0);
-  lv_obj_set_style_pad_bottom(status_bar_, 2, 0);
+  lv_obj_set_style_pad_left(status_bar_, 8, 0);
+  lv_obj_set_style_pad_right(status_bar_, 8, 0);
+  lv_obj_set_style_pad_top(status_bar_, 3, 0);
+  lv_obj_set_style_pad_bottom(status_bar_, 3, 0);
   lv_obj_set_scrollbar_mode(status_bar_, LV_SCROLLBAR_MODE_OFF);
   // 设置状态栏的内容垂直居中
   lv_obj_set_flex_align(status_bar_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
   // 创建emotion_label_在状态栏最左侧
+  //
+  // 16px, not 30px. The bar is LV_SIZE_CONTENT, so the emotion glyph alone used to set its height
+  // at ~36px - a ninth of the screen spent on one icon, and the portrait pushed down by the same
+  // amount. font_awesome_16_4 is generated from the identical glyph subset as font_awesome_30_4
+  // (both cover range 57419 + 6008), so every emotion still has an icon; it just sits level with
+  // the volume and network indicators now, which is what makes the bar read as one strip.
+  //
+  // This was briefly put back to 30px on the theory that a bigger network icon needed matching
+  // siblings. On the actual panel the whole row came out oversized; 16px is the right size here.
   emotion_label_ = lv_label_create(status_bar_);
-  lv_obj_set_style_text_font(emotion_label_, &font_awesome_30_4, 0);
+  lv_obj_set_style_text_font(emotion_label_, &font_awesome_16_4, 0);
   lv_obj_set_style_text_color(emotion_label_, current_theme_.jarvis_cyan, 0);
   lv_label_set_text(emotion_label_, FONT_AWESOME_AI_CHIP);
-  lv_obj_set_style_margin_right(emotion_label_, 5, 0);  // 添加右边距，与后面的元素分隔
+  lv_obj_set_style_margin_right(emotion_label_, 6, 0);  // 添加右边距，与后面的元素分隔
 
   // 倒计时标签。Flex order is creation order, so this has to be built before the notification and
   // status labels for the countdown to end up in the middle of the bar. It stays hidden (and
@@ -258,10 +285,12 @@ void Display::Start() {
   lv_obj_set_style_text_color(volume_label_, current_theme_.jarvis_cyan, 0);
 
   network_label_ = lv_label_create(status_bar_);
-  lv_label_set_text(network_label_, "");
+  // Starts as "no link" rather than blank. An empty label here reads as "everything is fine" when
+  // it actually means "nobody has told the screen anything yet", which is the opposite.
+  lv_label_set_text(network_label_, FONT_AWESOME_WIFI_OFF);
   lv_obj_set_style_text_font(network_label_, &font_awesome_16_4, 0);
-  lv_obj_set_style_text_color(network_label_, current_theme_.jarvis_cyan, 0);
-  lv_obj_set_style_margin_left(network_label_, 5, 0);  // 添加左边距，与前面的元素分隔
+  lv_obj_set_style_text_color(network_label_, current_theme_.jarvis_cyan_dim, 0);
+  lv_obj_set_style_margin_left(network_label_, 6, 0);  // 添加左边距，与前面的元素分隔
 
   lvgl_port_unlock();
 }
@@ -329,14 +358,30 @@ void Display::BuildRobotFace() {
   lv_obj_set_pos(mouth_overlay_, ENCO_FACE_MOUTH_X, ENCO_FACE_MOUTH_Y);
   lv_obj_add_flag(mouth_overlay_, LV_OBJ_FLAG_HIDDEN);
 
+  // The caption pill. This is the bottom half of the reference HUD, reduced to the part that
+  // carries information: what she is saying, or - when nothing is happening - how to talk to her.
+  //
+  // The reference also has an oscilloscope trace, a spectrum bar graph and a second copy of the
+  // connection banner. The banner is a duplicate of the top bar and is simply dropped. The two
+  // visualisers are not built: at ~430 bytes of heap per LVGL object they would cost several KB of
+  // a board that has ~6KB free during TTS, and neither is driven by anything real - there is a
+  // playback beacon (audio_playback_signal) but no amplitude, so they would animate to nothing.
   subtitle_box_ = lv_obj_create(face_container_);
   lv_obj_set_size(subtitle_box_, 232, 52);
   lv_obj_align(subtitle_box_, LV_ALIGN_BOTTOM_MID, 0, -4);
-  lv_obj_set_style_radius(subtitle_box_, 8, 0);
-  lv_obj_set_style_bg_color(subtitle_box_, lv_color_hex(0x0f172a), 0);
-  lv_obj_set_style_bg_opa(subtitle_box_, LV_OPA_80, 0);
+  lv_obj_set_style_radius(subtitle_box_, 12, 0);
+  lv_obj_set_style_bg_color(subtitle_box_, lv_color_hex(0x0b1220), 0);
+  // 80 -> 90: her hair is near-white and sits directly behind this, and at 80 the descenders of the
+  // caption were competing with it.
+  lv_obj_set_style_bg_opa(subtitle_box_, LV_OPA_90, 0);
   lv_obj_set_style_border_width(subtitle_box_, 1, 0);
   lv_obj_set_style_border_color(subtitle_box_, lv_color_hex(0x38bdf8), 0);
+  // The faint second ring the reference draws around its pill. An outline is a style, not an
+  // object, so the effect is free.
+  lv_obj_set_style_outline_width(subtitle_box_, 1, 0);
+  lv_obj_set_style_outline_color(subtitle_box_, lv_color_hex(0x38bdf8), 0);
+  lv_obj_set_style_outline_opa(subtitle_box_, LV_OPA_30, 0);
+  lv_obj_set_style_outline_pad(subtitle_box_, 2, 0);
   lv_obj_set_style_pad_all(subtitle_box_, 5, 0);
   lv_obj_set_scrollbar_mode(subtitle_box_, LV_SCROLLBAR_MODE_OFF);
 
@@ -346,7 +391,7 @@ void Display::BuildRobotFace() {
   lv_obj_set_style_text_color(subtitle_label_, lv_color_hex(0xf1f5f9), 0);
   lv_obj_set_style_text_align(subtitle_label_, LV_TEXT_ALIGN_CENTER, 0);
   lv_label_set_long_mode(subtitle_label_, LV_LABEL_LONG_WRAP);
-  lv_label_set_text(subtitle_label_, "Enco 正在待命...");
+  lv_label_set_text(subtitle_label_, kIdleCaption);
 
   next_blink_tick_ = kBlinkMinTicks;
   next_hair_tick_ = 14;
@@ -358,6 +403,39 @@ void Display::BuildRobotFace() {
 #define MAX_MESSAGES (3)
 void Display::SetChatMessage(const Role role, const std::string& content) {
   if (content.empty()) {
+    return;
+  }
+
+  // The caption under the character comes first, and is deliberately outside both guards below.
+  //
+  // It used to be the last thing this function did, which meant the low-heap bail-out took it down
+  // with the transcript - so in exactly the conditions where the screen is the only feedback the
+  // user has, the character went silent and kept smiling. Writing an existing label is a realloc of
+  // one small buffer, not two new widgets; it is not what puts the board under pressure.
+  if (subtitle_label_ != nullptr) {
+    lvgl_port_lock(0);
+    if (role == Role::kUser) {
+      lv_label_set_text(subtitle_label_, ("你: " + content).c_str());
+    } else if (role == Role::kAssistant) {
+      lv_label_set_text(subtitle_label_, ("Enco: " + content).c_str());
+    } else {
+      lv_label_set_text(subtitle_label_, content.c_str());
+    }
+    lvgl_port_unlock();
+  }
+
+  // Everything below builds the scrolling transcript, which only kChatText ever shows.
+  //
+  // It used to be built in every mode. The device boots into the character view and mostly stays
+  // there, so up to MAX_MESSAGES bubbles - each a container plus a wrapped label, ~430 bytes of
+  // heap apiece - were being created, laid out and retained behind a hidden parent that the user
+  // was not looking at. That is on the order of 2.5KB permanently unavailable, on a board that
+  // spends TTS with ~6KB free and where the Wi-Fi stack is already failing 2,308-byte allocations.
+  //
+  // The cost of this: switching to chat mode starts from an empty transcript rather than showing
+  // the last three exchanges. Nothing is actually lost - that history was never on screen - and
+  // the caption above has carried the current exchange the whole time.
+  if (ui_mode_ != UiMode::kChatText) {
     return;
   }
 
@@ -514,16 +592,8 @@ void Display::SetChatMessage(const Role role, const std::string& content) {
   // Store reference to the latest message label
   chat_message_label_ = msg_text;
 
-  // Update virtual anime avatar subtitle if active
-  if (subtitle_label_ != nullptr) {
-    if (role == Role::kUser) {
-      lv_label_set_text(subtitle_label_, ("你: " + content).c_str());
-    } else if (role == Role::kAssistant) {
-      lv_label_set_text(subtitle_label_, ("Enco: " + content).c_str());
-    } else {
-      lv_label_set_text(subtitle_label_, content.c_str());
-    }
-  }
+  // (The character's caption was already updated at the top of this function, before the mode and
+  // heap guards, so that it keeps working when the transcript is skipped.)
 
   lvgl_port_unlock();
 }
@@ -552,7 +622,7 @@ void Display::ShowStatus(const char* status) {
       lv_label_set_text(subtitle_label_, "正在聆听你的指令...");
       UpdateRobotFaceEmotion("neutral");
     } else if (s == "待命") {
-      lv_label_set_text(subtitle_label_, "Enco 正在待命...");
+      lv_label_set_text(subtitle_label_, kIdleCaption);
       UpdateRobotFaceEmotion("neutral");
     } else if (s == "连接中...") {
       lv_label_set_text(subtitle_label_, "正在连接小智云端...");
@@ -579,6 +649,51 @@ void Display::ShowStatus(const char* status) {
     }
   }
 
+  lvgl_port_unlock();
+}
+
+// Wi-Fi arc + signal bars at the right-hand end of the bar, the way the reference HUD shows them.
+//
+// Two glyphs in one label rather than two labels: the pair is always written together, and an
+// LVGL object costs ~430 bytes of heap here (measured - the camera view's 15 widgets cost 6,480).
+// On a board that spends TTS with 6KB free and a 2.1KB largest block, a second label for something
+// that never changes independently is not worth it.
+//
+// Only the colours have been touched. Two things were wrong, and neither was the glyph choice:
+//
+//  1. Amber started at -77dBm, which is an ordinary reading for a device one room from the access
+//     point. Measured on this board: -49 to -57dBm, so that threshold was not the reported problem,
+//     but it would have cried wolf on any weaker install. Amber now means close to dropping.
+//  2. A disconnected link painted red, including the ~12s WiFi takes to associate from reset. Every
+//     single boot therefore put a red icon in the corner - "not up yet" shown as a fault.
+void Display::ShowNetwork(const bool connected, const int rssi_dbm) {
+  if (network_label_ == nullptr) {
+    return;
+  }
+
+  const char* glyphs;
+  lv_color_t colour = current_theme_.jarvis_cyan;
+  if (!connected) {
+    glyphs = FONT_AWESOME_WIFI_OFF;
+    colour = net_ever_connected_ ? current_theme_.low_battery : current_theme_.jarvis_cyan_dim;
+  } else {
+    net_ever_connected_ = true;
+    if (rssi_dbm >= -70) {
+      glyphs = FONT_AWESOME_WIFI FONT_AWESOME_SIGNAL_FULL;
+    } else if (rssi_dbm >= -80) {
+      glyphs = FONT_AWESOME_WIFI FONT_AWESOME_SIGNAL_4;
+    } else if (rssi_dbm >= -88) {
+      glyphs = FONT_AWESOME_WIFI_FAIR FONT_AWESOME_SIGNAL_3;
+      colour = current_theme_.jarvis_cyan_dim;  // marginal, but still carrying audio
+    } else {
+      glyphs = FONT_AWESOME_WIFI_WEAK FONT_AWESOME_SIGNAL_2;
+      colour = current_theme_.jarvis_gold;  // amber: this is where dropouts actually start
+    }
+  }
+
+  lvgl_port_lock(0);
+  lv_label_set_text(network_label_, glyphs);
+  lv_obj_set_style_text_color(network_label_, colour, 0);
   lvgl_port_unlock();
 }
 
@@ -625,6 +740,151 @@ void Display::ShowVolume(const uint16_t volume) {
   lvgl_port_unlock();
 }
 
+// ---------------------------------------------------------------- countdown + alert overlay
+
+// The caption pill and the countdown panel both live at the bottom of the screen. Whichever is up
+// owns it; there is no room to stack them, and a timer the user asked for outranks "待命中".
+void Display::SetSubtitleHidden(const bool hidden) {
+  if (subtitle_box_ == nullptr) {
+    return;
+  }
+  if (hidden) {
+    lv_obj_add_flag(subtitle_box_, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_clear_flag(subtitle_box_, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+// Three widgets: panel, "T-MINUS" caption, digits. Caller must hold the LVGL lock.
+bool Display::EnsureTimerPanel() {
+  if (timer_panel_ != nullptr) {
+    return true;
+  }
+  // The viewfinder paints straight to the panel, bypassing LVGL, so anything drawn over it is
+  // erased by the next frame. Refusing here keeps the countdown in the status bar, where it stays
+  // visible, instead of flickering underneath the video.
+  if (ui_mode_ == UiMode::kCameraView) {
+    return false;
+  }
+  // Same reasoning as the camera view's guard, scaled to three widgets rather than fifteen.
+  const size_t free_heap = esp_get_free_heap_size();
+  if (free_heap < 12000) {
+    printf("[display] countdown panel refused (free %u)\n", static_cast<unsigned>(free_heap));
+    return false;
+  }
+
+  timer_panel_ = lv_obj_create(lv_screen_active());
+  lv_obj_set_pos(timer_panel_, 4, 232);
+  lv_obj_set_size(timer_panel_, 232, 84);
+  lv_obj_set_style_radius(timer_panel_, 6, 0);
+  lv_obj_set_style_pad_all(timer_panel_, 0, 0);
+  lv_obj_set_style_bg_color(timer_panel_, lv_color_hex(0x0a0f1a), 0);
+  lv_obj_set_style_bg_opa(timer_panel_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(timer_panel_, 1, 0);
+  lv_obj_set_style_border_color(timer_panel_, current_theme_.jarvis_gold, 0);
+  lv_obj_set_style_outline_width(timer_panel_, 1, 0);
+  lv_obj_set_style_outline_color(timer_panel_, current_theme_.jarvis_gold, 0);
+  lv_obj_set_style_outline_opa(timer_panel_, LV_OPA_30, 0);
+  lv_obj_set_style_outline_pad(timer_panel_, 2, 0);
+  lv_obj_clear_flag(timer_panel_, LV_OBJ_FLAG_SCROLLABLE);
+
+  auto* caption = lv_label_create(timer_panel_);
+  lv_label_set_text(caption, "T-MINUS");
+  lv_obj_set_style_text_font(caption, &font_puhui_16_4, 0);
+  lv_obj_set_style_text_color(caption, current_theme_.jarvis_gold, 0);
+  lv_obj_align(caption, LV_ALIGN_TOP_MID, 0, 4);
+
+  timer_digits_ = lv_label_create(timer_panel_);
+  // Montserrat, because the digits have to be 40px and the CJK font here is only built at 16.
+  lv_obj_set_style_text_font(timer_digits_, &lv_font_montserrat_40, 0);
+  lv_obj_set_style_text_color(timer_digits_, current_theme_.jarvis_gold, 0);
+  lv_label_set_text(timer_digits_, "00:00");
+  lv_obj_align(timer_digits_, LV_ALIGN_BOTTOM_MID, 0, -4);
+
+  lv_obj_move_foreground(timer_panel_);
+  SetSubtitleHidden(true);
+  return true;
+}
+
+void Display::DestroyTimerPanel() {
+  if (timer_panel_ == nullptr) {
+    return;
+  }
+  lv_obj_del(timer_panel_);  // deletes its children too
+  timer_panel_ = nullptr;
+  timer_digits_ = nullptr;
+  SetSubtitleHidden(false);
+}
+
+void Display::ShowAlert(const char* title, const char* body) {
+  if (title == nullptr) {
+    title = "";
+  }
+  if (body == nullptr) {
+    body = "";
+  }
+
+  lvgl_port_lock(0);
+
+  if (alert_card_ == nullptr) {
+    // See EnsureTimerPanel() - the viewfinder owns the panel and would paint over this.
+    const size_t free_heap = esp_get_free_heap_size();
+    if (ui_mode_ == UiMode::kCameraView || free_heap < 12000) {
+      printf("[display] alert card refused (free %u)\n", static_cast<unsigned>(free_heap));
+      lvgl_port_unlock();
+      return;
+    }
+
+    alert_card_ = lv_obj_create(lv_screen_active());
+    lv_obj_set_pos(alert_card_, 86, 42);
+    lv_obj_set_size(alert_card_, 150, 184);
+    lv_obj_set_style_radius(alert_card_, 4, 0);
+    lv_obj_set_style_pad_all(alert_card_, 7, 0);
+    lv_obj_set_style_bg_color(alert_card_, lv_color_hex(0x1a1206), 0);
+    lv_obj_set_style_bg_opa(alert_card_, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(alert_card_, 2, 0);
+    lv_obj_set_style_border_color(alert_card_, current_theme_.jarvis_gold, 0);
+    lv_obj_clear_flag(alert_card_, LV_OBJ_FLAG_SCROLLABLE);
+
+    alert_title_ = lv_label_create(alert_card_);
+    lv_obj_set_width(alert_title_, 136);
+    lv_obj_set_style_text_font(alert_title_, &font_puhui_16_4, 0);
+    lv_obj_set_style_text_color(alert_title_, current_theme_.jarvis_gold, 0);
+    lv_label_set_long_mode(alert_title_, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(alert_title_, 0, 0);
+
+    alert_body_ = lv_label_create(alert_card_);
+    lv_obj_set_width(alert_body_, 136);
+    lv_obj_set_style_text_font(alert_body_, &font_puhui_16_4, 0);
+    lv_obj_set_style_text_color(alert_body_, current_theme_.assistant_text, 0);
+    lv_label_set_long_mode(alert_body_, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(alert_body_, 0, 46);
+  }
+
+  // A second alert rewrites the card rather than stacking one on top of the other. Stacking would
+  // leak a widget per event and hide the newest behind the oldest.
+  lv_label_set_text(alert_title_, title);
+  lv_label_set_text(alert_body_, body);
+  lv_obj_move_foreground(alert_card_);
+  // Below the countdown, so a timer that fires while a card is up still reads.
+  if (timer_panel_ != nullptr) {
+    lv_obj_move_foreground(timer_panel_);
+  }
+
+  lvgl_port_unlock();
+}
+
+void Display::HideAlert() {
+  lvgl_port_lock(0);
+  if (alert_card_ != nullptr) {
+    lv_obj_del(alert_card_);
+    alert_card_ = nullptr;
+    alert_title_ = nullptr;
+    alert_body_ = nullptr;
+  }
+  lvgl_port_unlock();
+}
+
 // Paints the remaining time into the status bar, e.g. "计时 04:32".
 //
 // Called once a second from loop(); LVGL redraws a label only when the text actually changes, so
@@ -657,6 +917,20 @@ void Display::ShowTimer(const uint32_t remaining_seconds) {
       }
     }
   }
+
+  // The big T-MINUS panel. The status-bar readout above is kept rather than replaced: it is the
+  // fallback for the cases this panel declines - low heap, or the viewfinder owning the screen -
+  // and it is what chat mode and the camera view show. Neither path can leave the user with no
+  // countdown at all.
+  if (EnsureTimerPanel() && timer_digits_ != nullptr) {
+    char big[16];
+    if (hours > 0) {
+      snprintf(big, sizeof(big), "%u:%02u:%02u", hours, minutes, seconds);
+    } else {
+      snprintf(big, sizeof(big), "%02u:%02u", minutes, seconds);
+    }
+    lv_label_set_text(timer_digits_, big);
+  }
   lvgl_port_unlock();
 }
 
@@ -679,6 +953,13 @@ void Display::ShowTimerFinished() {
       lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
     }
   }
+  // Park the big digits at zero rather than leaving them on the last value they happened to be
+  // polled at. loop() calls this the moment the deadline passes, which is usually somewhere inside
+  // the final second, so without this the panel would freeze on "00:01" while the status bar said
+  // 时间到 - two readouts disagreeing about whether the timer had finished.
+  if (timer_digits_ != nullptr) {
+    lv_label_set_text(timer_digits_, "00:00");
+  }
   lvgl_port_unlock();
 }
 
@@ -695,6 +976,10 @@ void Display::HideTimer() {
       lv_obj_clear_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
     }
   }
+  // Hand the overlay's heap back. This is the whole reason it is built on demand: holding ~1.3KB
+  // of countdown panel for the hours between timers is exactly the kind of idle cost that has the
+  // Wi-Fi task failing 2,308-byte allocations during TTS.
+  DestroyTimerPanel();
   lvgl_port_unlock();
 }
 
@@ -753,12 +1038,78 @@ void Display::SetUiMode(UiMode mode) {
     BuildRobotFace();
     printf("[display] face built, free heap: %u\n", static_cast<unsigned>(esp_get_free_heap_size()));
   }
+  if (mode == UiMode::kCameraView && !cam_built_) {
+    // Unlike the face, there is no fallback for this one: the caller asked for
+    // the viewfinder specifically, and a viewfinder with no picture is not a
+    // useful thing to show. Refuse and leave the screen alone - "这是什么" then
+    // takes the path that does not show its work, which still answers.
+    //
+    // The thresholds are measured, not guessed. On this board the HUD plus the
+    // 4KB decoder pool cost 6,480 bytes of free heap and take the largest free
+    // block from 11,764 down to 5,364. Idle-but-connected sits around 19,600
+    // free, and the wifi task has been logged failing a 2,308 byte allocation
+    // when free fell to 7,276 - so opening this below 16,000 would be spending
+    // memory the audio path is about to need.
+    const size_t free_heap = esp_get_free_heap_size();
+    const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (free_heap < 16000 || largest < 6500) {
+      printf("[display] camera view refused (free %u, largest %u)\n", static_cast<unsigned>(free_heap), static_cast<unsigned>(largest));
+      lvgl_port_unlock();
+      return;
+    }
+    BuildCameraView();
+  }
 
   ui_mode_ = mode;
+
+  // The overlay and the viewfinder cannot share the screen. The video is blitted straight to the
+  // ST7789 without going through LVGL, so LVGL has no idea those pixels changed and will not
+  // redraw anything sitting on top of them - the countdown would be half-eaten by the next frame.
+  //
+  // The countdown panel is destroyed rather than hidden: loop() calls ShowTimer() once a second,
+  // so it rebuilds itself within a second of the camera closing, and in the meantime the status-bar
+  // readout carries the countdown. The alert card is only hidden - nothing re-sends an alert, so
+  // deleting it would silently drop the notification the user has not read yet.
+  if (mode == UiMode::kCameraView) {
+    DestroyTimerPanel();
+    if (alert_card_ != nullptr) {
+      lv_obj_add_flag(alert_card_, LV_OBJ_FLAG_HIDDEN);
+    }
+  } else if (alert_card_ != nullptr) {
+    lv_obj_clear_flag(alert_card_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(alert_card_);
+  }
+
+  // The viewfinder covers the whole panel, status bar included, so it is shown
+  // or hidden as a unit with everything else rather than alongside it.
+  const bool camera = (ui_mode_ == UiMode::kCameraView);
+  if (cam_container_) {
+    if (camera) {
+      lv_obj_clear_flag(cam_container_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_move_foreground(cam_container_);
+    } else {
+      lv_obj_add_flag(cam_container_, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+  if (container_) {
+    if (camera) {
+      lv_obj_add_flag(container_, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_clear_flag(container_, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
   if (ui_mode_ == UiMode::kRobotFace) {
-    if (content_) lv_obj_add_flag(content_, LV_OBJ_FLAG_HIDDEN);
+    // Hiding the transcript is not the same as giving its memory back. SetChatMessage() no longer
+    // adds to it outside chat mode, but whatever was on screen when the user switched away would
+    // otherwise stay allocated for the rest of the session - and the character view is where the
+    // device spends nearly all its time. Dropping it here is what makes the saving permanent.
+    if (content_) {
+      lv_obj_clean(content_);
+      chat_message_label_ = nullptr;
+      lv_obj_add_flag(content_, LV_OBJ_FLAG_HIDDEN);
+    }
     if (face_container_) lv_obj_clear_flag(face_container_, LV_OBJ_FLAG_HIDDEN);
-  } else {
+  } else if (ui_mode_ == UiMode::kChatText) {
     if (face_container_) lv_obj_add_flag(face_container_, LV_OBJ_FLAG_HIDDEN);
     if (content_) lv_obj_clear_flag(content_, LV_OBJ_FLAG_HIDDEN);
   }
@@ -766,11 +1117,285 @@ void Display::SetUiMode(UiMode mode) {
 }
 
 void Display::ToggleUiMode() {
-  if (ui_mode_ == UiMode::kRobotFace) {
+  if (ui_mode_ == UiMode::kCameraView) {
+    // The button is the way out of a viewfinder that will not close itself -
+    // e.g. the camera stopped answering while it was on screen.
+    ExitCameraView();
+  } else if (ui_mode_ == UiMode::kRobotFace) {
     SetUiMode(UiMode::kChatText);
   } else {
     SetUiMode(UiMode::kRobotFace);
   }
+}
+
+// The viewfinder HUD.
+//
+// Everything here is positioned absolutely against the panel, not laid out by
+// flex, and that is deliberate. The picture does not go through LVGL at all -
+// there is no framebuffer on this board to put it in - so it is blitted to the
+// panel at the fixed rectangle in Display::kCam*. The chrome has to be built
+// around that rectangle to the pixel, because anything LVGL draws inside it is
+// erased by the next frame 90ms later.
+//
+// The corner brackets exploit the kCamInset margin: each is an empty box with
+// borders on two sides only, positioned so the drawn edges fall in the margin
+// and the transparent interior overlaps the picture harmlessly.
+void Display::BuildCameraView() {
+  if (cam_built_) {
+    return;
+  }
+
+  auto screen = lv_screen_active();
+  cam_container_ = lv_obj_create(screen);
+  lv_obj_set_pos(cam_container_, 0, 0);
+  lv_obj_set_size(cam_container_, LV_HOR_RES, LV_VER_RES);
+  lv_obj_set_style_radius(cam_container_, 0, 0);
+  lv_obj_set_style_pad_all(cam_container_, 0, 0);
+  lv_obj_set_style_border_width(cam_container_, 0, 0);
+  lv_obj_set_style_bg_color(cam_container_, lv_color_hex(0x050b14), 0);
+  lv_obj_set_style_bg_opa(cam_container_, LV_OPA_COVER, 0);
+  lv_obj_clear_flag(cam_container_, LV_OBJ_FLAG_SCROLLABLE);
+
+  /* Header: mode on the left, recording state on the right. */
+  auto* title = lv_label_create(cam_container_);
+  lv_label_set_text(title, "TGT ACQ");
+  lv_obj_set_style_text_color(title, current_theme_.jarvis_cyan, 0);
+  lv_obj_set_pos(title, 6, 2);
+
+  cam_rec_label_ = lv_label_create(cam_container_);
+  lv_label_set_text(cam_rec_label_, "REC");
+  lv_obj_set_style_text_color(cam_rec_label_, lv_color_hex(0xef4444), 0);
+  lv_obj_align(cam_rec_label_, LV_ALIGN_TOP_RIGHT, -6, 2);
+  cam_rec_on_ = true;
+  cam_rec_next_tick_ = 0;
+
+  /* The viewfinder frame. Its interior is painted once, then owned by video. */
+  auto* frame = lv_obj_create(cam_container_);
+  lv_obj_set_pos(frame, kCamFrameX, kCamFrameY);
+  lv_obj_set_size(frame, kCamFrameW, kCamFrameH);
+  lv_obj_set_style_radius(frame, 0, 0);
+  lv_obj_set_style_pad_all(frame, 0, 0);
+  lv_obj_set_style_bg_color(frame, lv_color_hex(0x000000), 0);
+  lv_obj_set_style_bg_opa(frame, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(frame, 1, 0);
+  lv_obj_set_style_border_color(frame, current_theme_.jarvis_cyan_dim, 0);
+  lv_obj_clear_flag(frame, LV_OBJ_FLAG_SCROLLABLE);
+
+  // Corner brackets. 18px arms, 2px thick, drawn entirely within the 8px margin.
+  struct Corner {
+    int x;
+    int y;
+    lv_border_side_t sides;
+  };
+  static constexpr int kArm = 18;
+  const Corner corners[] = {
+      {kCamFrameX + 2, kCamFrameY + 2, static_cast<lv_border_side_t>(LV_BORDER_SIDE_LEFT | LV_BORDER_SIDE_TOP)},
+      {kCamFrameX + kCamFrameW - 2 - kArm, kCamFrameY + 2, static_cast<lv_border_side_t>(LV_BORDER_SIDE_RIGHT | LV_BORDER_SIDE_TOP)},
+      {kCamFrameX + 2, kCamFrameY + kCamFrameH - 2 - kArm, static_cast<lv_border_side_t>(LV_BORDER_SIDE_LEFT | LV_BORDER_SIDE_BOTTOM)},
+      {kCamFrameX + kCamFrameW - 2 - kArm, kCamFrameY + kCamFrameH - 2 - kArm,
+       static_cast<lv_border_side_t>(LV_BORDER_SIDE_RIGHT | LV_BORDER_SIDE_BOTTOM)},
+  };
+  for (const auto& c : corners) {
+    auto* bracket = lv_obj_create(cam_container_);
+    lv_obj_set_pos(bracket, c.x, c.y);
+    lv_obj_set_size(bracket, kArm, kArm);
+    lv_obj_set_style_radius(bracket, 0, 0);
+    lv_obj_set_style_pad_all(bracket, 0, 0);
+    lv_obj_set_style_bg_opa(bracket, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(bracket, 2, 0);
+    lv_obj_set_style_border_color(bracket, current_theme_.jarvis_cyan, 0);
+    lv_obj_set_style_border_side(bracket, c.sides, 0);
+    lv_obj_clear_flag(bracket, LV_OBJ_FLAG_SCROLLABLE);
+  }
+
+  /* Telemetry strip under the frame. */
+  static constexpr int kStripY = kCamFrameY + kCamFrameH + 4;  // 204
+  auto* strip_left = lv_label_create(cam_container_);
+  lv_label_set_text(strip_left, "TELEMETRY");
+  lv_obj_set_style_text_color(strip_left, current_theme_.jarvis_cyan_dim, 0);
+  lv_obj_set_pos(strip_left, 6, kStripY);
+
+  cam_telemetry_label_ = lv_label_create(cam_container_);
+  lv_label_set_text(cam_telemetry_label_, "STANDBY");
+  lv_obj_set_style_text_color(cam_telemetry_label_, current_theme_.jarvis_gold, 0);
+  lv_obj_align(cam_telemetry_label_, LV_ALIGN_TOP_RIGHT, -6, kStripY);
+
+  /* Bottom row: status panel on the left, the character on the right. */
+  static constexpr int kBottomY = kStripY + 22;  // 226
+
+  auto* info = lv_obj_create(cam_container_);
+  lv_obj_set_pos(info, 4, kBottomY);
+  lv_obj_set_size(info, 142, 88);
+  lv_obj_set_style_radius(info, 4, 0);
+  lv_obj_set_style_pad_all(info, 6, 0);
+  lv_obj_set_style_bg_color(info, lv_color_hex(0x0a1526), 0);
+  lv_obj_set_style_bg_opa(info, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(info, 1, 0);
+  lv_obj_set_style_border_color(info, current_theme_.jarvis_cyan_dim, 0);
+  lv_obj_clear_flag(info, LV_OBJ_FLAG_SCROLLABLE);
+
+  auto* info_title = lv_label_create(info);
+  lv_label_set_text(info_title, "OPTICS");
+  lv_obj_set_style_text_color(info_title, current_theme_.jarvis_cyan_dim, 0);
+  lv_obj_set_pos(info_title, 0, 0);
+
+  auto* info_body = lv_label_create(info);
+  lv_label_set_text(info_body, "ESP32-CAM\n240x176 · 1:1");
+  lv_obj_set_style_text_color(info_body, current_theme_.assistant_text, 0);
+  lv_obj_set_pos(info_body, 0, 22);
+
+  // The character. This is a pre-scaled 82x86 bust (enco_face_thumb), not the
+  // full portrait: it used to be the 240x320 image positioned at (-78, -72), so
+  // the panel acted as a window onto the middle of her face and cut off the top
+  // of her head and her chin.
+  //
+  // It cannot be fixed with lv_image_set_scale(). Scaling runs through LVGL's
+  // transform path, which needs the whole bitmap at once, and this portrait is
+  // drawn by the streaming I4 decoder in lv_i4_decoder.c - it leaves
+  // dsc->decoded NULL and hands back one row per call, so lv_draw_sw_img.c
+  // would take src_w/src_h from a 1-pixel-tall slice and apply the transform to
+  // each row independently. The shrink is baked at build time instead; see
+  // tools/face_assets/build_face_assets.py.
+  auto* avatar_box = lv_obj_create(cam_container_);
+  lv_obj_set_pos(avatar_box, 152, kBottomY);
+  // +2 for the 1px border on each side, so the image fills the interior exactly.
+  lv_obj_set_size(avatar_box, ENCO_FACE_THUMB_W + 2, ENCO_FACE_THUMB_H + 2);
+  lv_obj_set_style_radius(avatar_box, 4, 0);
+  lv_obj_set_style_pad_all(avatar_box, 0, 0);
+  lv_obj_set_style_bg_color(avatar_box, lv_color_hex(0x0c1121), 0);
+  lv_obj_set_style_bg_opa(avatar_box, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(avatar_box, 1, 0);
+  lv_obj_set_style_border_color(avatar_box, current_theme_.jarvis_cyan_dim, 0);
+  lv_obj_set_style_clip_corner(avatar_box, true, 0);
+  lv_obj_clear_flag(avatar_box, LV_OBJ_FLAG_SCROLLABLE);
+
+  auto* avatar = lv_image_create(avatar_box);
+  lv_image_set_src(avatar, &enco_face_thumb);
+  lv_obj_set_pos(avatar, 0, 0);
+
+  auto* avatar_tag = lv_label_create(cam_container_);
+  lv_label_set_text(avatar_tag, "ENCO");
+  lv_obj_set_style_text_color(avatar_tag, current_theme_.jarvis_cyan, 0);
+  lv_obj_set_style_bg_color(avatar_tag, lv_color_hex(0x050b14), 0);
+  lv_obj_set_style_bg_opa(avatar_tag, LV_OPA_80, 0);
+  lv_obj_set_style_pad_hor(avatar_tag, 3, 0);
+  lv_obj_set_pos(avatar_tag, 156, kBottomY + 66);
+
+  /* Caption over the picture. Hidden until there is something to say. */
+  cam_hint_box_ = lv_obj_create(cam_container_);
+  lv_obj_set_pos(cam_hint_box_, 16, kCamFrameY + 108);
+  lv_obj_set_size(cam_hint_box_, 208, 58);
+  lv_obj_set_style_radius(cam_hint_box_, 6, 0);
+  lv_obj_set_style_pad_all(cam_hint_box_, 6, 0);
+  lv_obj_set_style_bg_color(cam_hint_box_, lv_color_hex(0x0f172a), 0);
+  // Opaque, not translucent. LVGL composites against its own render of the
+  // background, not against the panel, so a translucent box over live video
+  // would blend with black rather than with the picture.
+  lv_obj_set_style_bg_opa(cam_hint_box_, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(cam_hint_box_, 1, 0);
+  lv_obj_set_style_border_color(cam_hint_box_, current_theme_.jarvis_cyan, 0);
+  lv_obj_clear_flag(cam_hint_box_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(cam_hint_box_, LV_OBJ_FLAG_HIDDEN);
+
+  cam_hint_label_ = lv_label_create(cam_hint_box_);
+  lv_obj_set_width(cam_hint_label_, 194);
+  lv_label_set_long_mode(cam_hint_label_, LV_LABEL_LONG_WRAP);
+  lv_obj_set_style_text_align(cam_hint_label_, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_text_color(cam_hint_label_, current_theme_.assistant_text, 0);
+  lv_label_set_text(cam_hint_label_, "");
+
+  cam_built_ = true;
+  cam_capturing_ = false;
+}
+
+bool Display::EnterCameraView() {
+  if (ui_mode_ == UiMode::kCameraView) {
+    return true;
+  }
+  if (panel_ == nullptr) {
+    return false;
+  }
+
+  const UiMode previous = ui_mode_;
+  SetUiMode(UiMode::kCameraView);
+  if (ui_mode_ != UiMode::kCameraView) {
+    return false;  // SetUiMode refused - not enough heap for the widgets
+  }
+  cam_return_mode_ = previous;
+
+  // The decoder workspace last, because it is the one allocation that can still
+  // fail after the widgets are up. ExitCameraView() is the unwind: the chrome
+  // has already been built at this point, and leaving it hidden rather than
+  // deleted would leak ~3KB into the fragmented heap for the rest of the
+  // session - the exact thing this mode is careful about everywhere else.
+  if (!video_sink::Begin(panel_, kCamVideoX, kCamVideoY, kCamInset, kCamInset, kCamCropW, kCamCropH)) {
+    ExitCameraView();
+    return false;
+  }
+  SetCameraCapturing(false);
+  SetCameraHint(nullptr);
+  return true;
+}
+
+void Display::ExitCameraView() {
+  video_sink::End();
+  const UiMode back = cam_return_mode_;
+  SetUiMode(back);
+
+  // Tear the HUD down rather than hide it. ~3KB of small LVGL objects sitting
+  // idle is 3KB of fragmentation, and on this board the TLS handshake has been
+  // logged failing a 2,308 byte allocation. Rebuilding takes a few milliseconds
+  // and only happens when the user actually opens the camera.
+  lvgl_port_lock(0);
+  if (cam_container_ != nullptr) {
+    lv_obj_delete(cam_container_);
+    cam_container_ = nullptr;
+  }
+  cam_rec_label_ = nullptr;
+  cam_hint_box_ = nullptr;
+  cam_hint_label_ = nullptr;
+  cam_telemetry_label_ = nullptr;
+  cam_built_ = false;
+  cam_capturing_ = false;
+  lvgl_port_unlock();
+}
+
+void Display::SetCameraHint(const char* text) {
+  lvgl_port_lock(0);
+  if (cam_hint_box_ != nullptr && cam_hint_label_ != nullptr) {
+    if (text == nullptr || *text == '\0') {
+      lv_obj_add_flag(cam_hint_box_, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_label_set_text(cam_hint_label_, text);
+      lv_obj_clear_flag(cam_hint_box_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_move_foreground(cam_hint_box_);
+    }
+  }
+  lvgl_port_unlock();
+}
+
+void Display::SetCameraTelemetry(const char* text) {
+  if (text == nullptr) {
+    return;
+  }
+  lvgl_port_lock(0);
+  if (cam_telemetry_label_ != nullptr) {
+    lv_label_set_text(cam_telemetry_label_, text);
+    lv_obj_align(cam_telemetry_label_, LV_ALIGN_TOP_RIGHT, -6, kCamFrameY + kCamFrameH + 4);
+  }
+  lvgl_port_unlock();
+}
+
+void Display::SetCameraCapturing(bool capturing) {
+  lvgl_port_lock(0);
+  cam_capturing_ = capturing;
+  if (cam_rec_label_ != nullptr) {
+    lv_label_set_text(cam_rec_label_, capturing ? "SHOT" : "REC");
+    lv_obj_set_style_text_color(cam_rec_label_, capturing ? current_theme_.jarvis_gold : lv_color_hex(0xef4444), 0);
+    lv_obj_set_style_text_opa(cam_rec_label_, LV_OPA_COVER, 0);
+    lv_obj_align(cam_rec_label_, LV_ALIGN_TOP_RIGHT, -6, 2);
+  }
+  lvgl_port_unlock();
 }
 
 void Display::UpdateRobotFaceEmotion(const std::string& emotion) {
@@ -934,7 +1559,26 @@ void Display::ApplyHairFrame() {
 
 void Display::OnFaceTimer(lv_timer_t* timer) {
   auto* self = static_cast<Display*>(lv_timer_get_user_data(timer));
-  if (self == nullptr || self->ui_mode_ != UiMode::kRobotFace || self->face_image_ == nullptr) {
+  if (self == nullptr) {
+    return;
+  }
+
+  // The viewfinder borrows this timer rather than starting one of its own: the
+  // only thing moving on that screen is the REC dot, and a second lv_timer is a
+  // second allocation plus a second wakeup every 20ms for one label.
+  if (self->ui_mode_ == UiMode::kCameraView) {
+    if (self->cam_rec_label_ != nullptr && !self->cam_capturing_) {
+      self->face_tick_++;
+      if (self->face_tick_ >= self->cam_rec_next_tick_) {
+        self->cam_rec_on_ = !self->cam_rec_on_;
+        self->cam_rec_next_tick_ = self->face_tick_ + 6;  // ~0.5s per phase
+        lv_obj_set_style_text_opa(self->cam_rec_label_, self->cam_rec_on_ ? LV_OPA_COVER : LV_OPA_30, 0);
+      }
+    }
+    return;
+  }
+
+  if (self->ui_mode_ != UiMode::kRobotFace || self->face_image_ == nullptr) {
     return;
   }
   // Redrawing is not worth crowding out the audio pipeline when memory is already scarce.

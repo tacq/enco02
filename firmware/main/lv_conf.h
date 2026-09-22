@@ -47,6 +47,13 @@
 #define CONFIG_LV_ATTRIBUTE_MEM_ALIGN_SIZE 1
 #define CONFIG_LV_FONT_MONTSERRAT_14 1
 #define CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14 1
+// Big digits for the countdown overlay. Nothing else linked here is larger than 16px, and a
+// T-MINUS readout at 16px is not a countdown, it is a caption.
+//
+// Montserrat rather than a generated subset because it ships with LVGL and costs only a flag;
+// flash is at 72%, with ~1.1MB spare, so there is no reason to build a digits-only font. It has no
+// CJK, which is fine - only the digits and the colon are ever rendered in it.
+#define CONFIG_LV_FONT_MONTSERRAT_40 1
 #define CONFIG_LV_FONT_FMT_TXT_LARGE 1
 #define CONFIG_LV_USE_FONT_COMPRESSED 1
 #define CONFIG_LV_USE_FONT_PLACEHOLDER 1
@@ -86,5 +93,15 @@
 // glyphs instead so it matches the rest of the HUD.
 #define CONFIG_LV_USE_IMGFONT 0
 #define CONFIG_LV_USE_OBSERVER 1
+
+// TJpgDec, for the camera viewfinder.
+//
+// We do not use LVGL's image decoder wrapper around it - the viewfinder calls
+// jd_prepare()/jd_decomp() directly so the JPEG can be pulled off the UART a
+// few hundred bytes at a time and blitted straight to the panel. A frame is
+// ~6KB and the largest free heap block on this board is ~14KB, so there is
+// nowhere to put a whole one. This switch exists purely to get tjpgd.c
+// compiled; the decoder registration it also enables is harmless.
+#define CONFIG_LV_USE_TJPGD 1
 
 #endif

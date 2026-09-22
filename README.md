@@ -41,14 +41,14 @@ text. The main board only ever handles one short sentence.
 
 ### Wiring
 
-Cross-over, and **a common ground is mandatory**:
+Cross-over to the main board's 4-pin `I2C` PH2.0 socket (`SCL · SDA · 5V · G`), and **a common ground is mandatory**:
 
-| ESP32-CAM | → | Main board |
+| ESP32-CAM | → | Main board (`I2C` 4-pin PH2.0 socket) |
 |---|---|---|
-| GPIO 13 (TX) | → | GPIO 18 |
-| GPIO 14 (RX) | ← | GPIO 19 |
-| GND | ↔ | GND |
-| 5V | ↔ | 5V |
+| GPIO 13 (TX) | → | `SCL` (`GPIO 22`, RX) |
+| GPIO 14 (RX) | ← | `SDA` (`GPIO 21`, TX) |
+| 5V | ↔ | `5V` |
+| GND | ↔ | `G` (`GND`) |
 
 GPIO 13/14 are the only pins on the ESP32-CAM that are both free with the
 OV2640 attached and not boot strapping pins. Using them means **no microSD

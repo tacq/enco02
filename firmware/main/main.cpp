@@ -660,6 +660,56 @@ constexpr uint32_t kTimerAnnounceGiveUpMs = 30000;
 // this many UTF-8 characters falls back to a fixed short one.
 constexpr size_t kTimerAnnounceMaxChars = 10;
 
+// ---------------------------------------------------------------------------
+// Event notification card
+// ---------------------------------------------------------------------------
+// The card itself lives in Display (ShowAlert/HideAlert); this is just its lifetime. One slot, not
+// a queue: Display::ShowAlert() deliberately rewrites the existing card rather than stacking a
+// second one, so a second event supersedes the first and a single deadline is all that is needed.
+//
+// Everything that raises a card goes through ShowNotification() so that nothing can put one up
+// without also arranging for it to come down - the first cut of this wired ShowAlert() straight
+// into the timer and the card then sat on screen forever.
+bool g_alert_visible = false;
+uint32_t g_alert_expires_at = 0;
+constexpr uint32_t kAlertDefaultHoldMs = 60000;
+// Two minutes. Long enough for a reminder the user walked away from, short enough that a stale card
+// is not still claiming the screen an hour later.
+constexpr uint32_t kAlertMaxHoldMs = 120000;
+
+// The only sanctioned way to raise the card. hold_ms is clamped rather than rejected so a model
+// that asks for a day-long notification gets a reasonable one instead of none.
+void ShowNotification(const char* title, const char* body, uint32_t hold_ms) {
+  if (g_display == nullptr) {
+    return;
+  }
+  if (hold_ms == 0 || hold_ms > kAlertMaxHoldMs) {
+    hold_ms = kAlertMaxHoldMs;
+  }
+  // Display::ShowAlert() can decline (viewfinder up, or free heap under its guard). Mark the slot
+  // occupied anyway: HideAlert() is a no-op on a card that was never built, and the alternative is
+  // a flag that says "nothing on screen" while a previous card is in fact still up.
+  g_display->ShowAlert(title, body);
+  g_alert_visible = true;
+  g_alert_expires_at = millis() + hold_ms;
+  printf("[alert] %s | %s (%us)\n", title, body, static_cast<unsigned>(hold_ms / 1000));
+}
+
+void ClearNotification() {
+  if (g_display != nullptr) {
+    g_display->HideAlert();
+  }
+  g_alert_visible = false;
+}
+
+// Called from loop(), next to TimerTick().
+void NotificationTick() {
+  // Signed subtraction, so this survives the 49-day millis() wrap like the countdown does.
+  if (g_alert_visible && static_cast<int32_t>(g_alert_expires_at - millis()) <= 0) {
+    ClearNotification();
+  }
+}
+
 // Characters, not bytes: a Chinese character is three bytes, so strlen() would put even a five
 // character phrase well over any sane wake-word budget.
 size_t Utf8Length(const std::string& s) {
@@ -718,6 +768,8 @@ bool CancelTimer() {
   if (g_display) {
     g_display->HideTimer();
   }
+  // Cancel can land inside the post-fire hold window, so the card may still be up.
+  ClearNotification();
   if (was_active) {
     printf("[timer] cancelled\n");
   }
@@ -753,6 +805,17 @@ void TimerTick() {
         g_display->ShowTimerFinished();
         g_display->UpdateRobotFaceEmotion("surprised");
       }
+      // The event card. The status bar only has room for 时间到, which does not say *which*
+      // timer - and "定个五分钟的" followed by "再定个十分钟的" is an ordinary thing to ask for.
+      // DescribeDuration() is the same string the spoken announcement below uses, so the screen
+      // and the speaker name the timer identically.
+      // No emoji in the title: font_puhui_16_4 is a CJK + Latin subset with no pictographs, and
+      // LV_USE_FONT_PLACEHOLDER is on, so a "⏱" would render as a hollow box.
+      //
+      // Held for exactly as long as the status bar keeps saying 时间到, so the two halves of the
+      // same alarm appear and disappear together.
+      const std::string body = DescribeDuration(g_timer_total_seconds) + "的定时已结束";
+      ShowNotification("定时提醒 // 触发", body.c_str(), kTimerFinishedHoldMs);
       // No local MP3 chime here. Firing almost always happens with a websocket session open, and
       // spinning up the mp3 decoder at that moment wants a 2.3KB contiguous block the heap does not
       // have - measured: "ALLOC FAILED #2: 2312 bytes, free: 5960, largest: 1396", which took the
@@ -799,6 +862,9 @@ void TimerTick() {
     if (g_display) {
       g_display->HideTimer();
     }
+    // The card is not touched here: it was raised with this same hold, so NotificationTick() takes
+    // it down on the same tick. Doing it in both places would tear down a *newer* card that some
+    // other event raised in the meantime.
   }
 }
 
@@ -872,20 +938,68 @@ void InitMcpTools() {
   engine.AddMcpTool("self.timer.cancel", "Cancel the running countdown timer (取消定时器/停止倒计时/不用提醒了).", {});
   engine.AddMcpTool("self.timer.query", "Seconds left on the countdown timer, 0 if none (还剩多久/定时器还有多长时间).", {});
 
+  // Event notifications. The timer raises one of these by itself when it fires; this is the same
+  // card exposed to the model, so anything it decides is worth interrupting the user about - a
+  // reminder, a calendar item, a result it looked up - can be put on the screen instead of only
+  // being spoken, which is gone the moment it is said.
+  //
+  // title and body are painted verbatim and must be short: the card is 150x184 px in a 16px font,
+  // which is roughly 8 characters of title and four lines of body before it clips.
+  //
+  // The descriptions below are terse on purpose. Tool text is not free on this board - it is held
+  // as a std::string and serialised again into the tool-list JSON sent at session start, and the
+  // first, chattier draft of these two measurably took the heap low-water mark from 6,652 to 4,632,
+  // which is the same 2KB the UI rework had just recovered. WiFi wants 2308-byte blocks during TTS,
+  // so that margin is not decorative. Anything explanatory belongs in a comment like this one.
+  //
+  // No hold_seconds parameter for the same reason: a third schema entry costs more than it buys
+  // when every card wants the same minute on screen anyway.
+  engine.AddMcpTool("self.screen.notify",
+                    "Show a short note on the robot's screen (提醒我/记一下/通知我). "
+                    "title <=8 chars, body <=4 short lines. Clears itself after a minute.",
+                    {
+                        {"title", ai_vox::ParamSchema<std::string>{.default_value = "提醒"}},
+                        {"body", ai_vox::ParamSchema<std::string>{.default_value = std::nullopt}},
+                    });
+  engine.AddMcpTool("self.screen.notify_clear", "Remove the note from the screen (知道了/取消提醒).", {});
+
+
+
   // The camera is a second board. This device cannot hold a JPEG - with the
   // assistant speaking its largest free block is ~2KB - so the cam does the
   // capture, the upload and the recognition itself and hands back one short
   // sentence. That sentence becomes this tool's result, and the model upstream
   // turns it into an answer. The image never crosses this board.
   engine.AddMcpTool("self.camera.look",
-                    "Look through the robot's eye camera and describe what is in front of it "
-                    "(这是什么/你看到了什么/看一下/帮我看看/前面是什么). Returns a short description. "
-                    "Set question to what you actually want to know about the scene.",
+                    "Look through the robot's eye camera and describe what is in front of it or in the user's hand "
+                    "(这是什么/我手里拿的是什么/看看我手里是什么/你看到了什么/看一下/帮我看看/前面是什么/what is in my hand). "
+                    "Returns a short description. Set question to what you actually want to know about the scene.",
                     {
                         {"question", ai_vox::ParamSchema<std::string>{.default_value = ""}},
                     });
-  engine.AddMcpTool("self.camera.track_on", "Make the robot follow the user with its head (看着我/跟着我/别走神).", {});
-  engine.AddMcpTool("self.camera.track_off", "Stop following the user with the head (别看我了/不用跟着我/头别动).", {});
+  // Tracking is OFF at boot and after every restart. These two are the only way
+  // to turn it on by voice; the other way is to hold up one finger, which the
+  // cam spots by itself and reports as a G line.
+  engine.AddMcpTool("self.camera.track_on",
+                    "Start following the user's head with the robot's head, using the camera "
+                    "(开启跟踪/开始跟踪/打开跟踪/跟踪模式/看着我/跟着我/别走神/start tracking/follow me). "
+                    "The head turns, nods and tilts to match the user until tracking is stopped.",
+                    {});
+  engine.AddMcpTool("self.camera.track_off",
+                    "Stop following the user and hold the head still "
+                    "(关闭跟踪/停止跟踪/结束跟踪/不要跟踪了/别看我了/不用跟着我/头别动/stop tracking).",
+                    {});
+  // The viewfinder. Separate from look: this one shows the user what the robot
+  // sees and leaves it on screen, rather than taking a single picture and going
+  // away again. It replaces the character on the display while it is up.
+  engine.AddMcpTool("self.camera.view_on",
+                    "Show the live camera picture on the robot's screen "
+                    "(打开摄像头/开摄像头/显示摄像头/看看摄像头画面/我想看看你看到什么/show the camera).",
+                    {});
+  engine.AddMcpTool("self.camera.view_off",
+                    "Close the camera picture and go back to the robot's face "
+                    "(关闭摄像头/关掉摄像头/退出摄像头/不看了/close the camera).",
+                    {});
 }
 
 // Reads the quoted value of `key` from `text`, searching in [from, limit).
@@ -950,6 +1064,122 @@ void MaybeAdoptVisionEndpoint(const std::string& text) {
   ReadJsonString(text, v, limit, "\"token\"", &token);  // optional
   CamLink::GetInstance().SetVisionEndpoint(url.c_str(), token.c_str());
 }
+
+// --- Camera viewfinder -------------------------------------------------------
+//
+// Two halves that have to move together: Display owns the HUD and the JPEG
+// decoder's destination, CamLink owns the wire. Opening is ordered so that a
+// failure at either step leaves the screen as it was - there is no half-open
+// state where the chrome is up but no picture ever arrives.
+
+// Set when the viewfinder was opened by a "这是什么" rather than by the user
+// asking for the camera. A transient view closes itself once the answer is in;
+// one the user opened stays up until they say so.
+bool g_cam_view_transient = false;
+// Video deliberately stopped with the last frame left on the panel. Not a
+// fault, so the watchdog below must not treat it as one.
+bool g_cam_view_frozen = false;
+// When to act on the view next - close it, or thaw it. 0 when nothing pending.
+uint32_t g_cam_view_deadline_ms = 0;
+uint32_t g_cam_view_stat_ms = 0;
+uint16_t g_cam_view_last_frames = 0;
+
+// How long the live picture is shown before the shutter. Enough for a few
+// frames to land so the user can see what is in shot and move their hand if it
+// is not, and short enough not to feel like the robot is hesitating.
+constexpr uint32_t kLookPreviewMs = 700;
+
+// A look waiting for its preview to finish. The tool call has already been
+// accepted at this point, so whatever happens, this id must eventually be
+// answered.
+struct PendingLook {
+  bool active = false;
+  int64_t id = 0;
+  std::string question;
+  uint32_t fire_at_ms = 0;
+};
+PendingLook g_pending_look;
+
+// `why`, when given, receives a caller-facing reason for a false return. The
+// distinction matters: the assistant reads it aloud, and "not enough memory"
+// sent the user hunting for a heap problem when the real fault was the cam
+// missing a baud handshake.
+bool OpenCameraView(bool transient, const char** why = nullptr) {
+  if (!g_display) {
+    if (why) *why = "Display not ready";
+    return false;
+  }
+  auto& cam = CamLink::GetInstance();
+  if (!cam.IsPresent()) {
+    if (why) *why = "Camera not connected";
+    return false;
+  }
+  if (g_display->InCameraView()) {
+    // Already up. A look that arrives while the user is watching the live feed
+    // must not mark the view transient, or it would close their camera for them.
+    g_cam_view_deadline_ms = 0;
+    return true;
+  }
+  if (!g_display->EnterCameraView()) {
+    printf("camera view: display refused (free heap %u)\n", static_cast<unsigned>(esp_get_free_heap_size()));
+    if (why) *why = "Not enough memory for the camera view";
+    return false;
+  }
+  if (!cam.BeginVideo()) {
+    g_display->ExitCameraView();
+    if (why) *why = "Camera link did not start the video stream";
+    return false;
+  }
+  g_cam_view_transient = transient;
+  g_cam_view_frozen = false;
+  g_cam_view_deadline_ms = 0;
+  g_cam_view_stat_ms = 0;
+  g_cam_view_last_frames = 0;
+  return true;
+}
+
+void CloseCameraView() {
+  if (!g_display) {
+    return;
+  }
+  CamLink::GetInstance().EndVideo();
+  if (g_display->InCameraView()) {
+    g_display->ExitCameraView();
+  }
+  g_cam_view_transient = false;
+  g_cam_view_frozen = false;
+  g_cam_view_deadline_ms = 0;
+}
+
+// Stops the stream and leaves the last frame on the panel - which is the photo,
+// as far as the user is concerned.
+//
+// This is not cosmetic. The cam stops servicing its UART for the several
+// seconds it spends uploading and waiting on the vision service, so a `B 0`
+// sent after the `V` would sit unread while the two boards ran at different
+// rates, and the answer would come back at 115200 into a port listening at
+// 921600. Dropping the link speed first is what makes the reply readable.
+void FreezeCameraView() {
+  CamLink::GetInstance().EndVideo();
+  g_cam_view_frozen = true;
+  if (g_display) {
+    g_display->SetCameraCapturing(true);
+  }
+}
+
+void ThawCameraView() {
+  if (!g_display || !g_display->InCameraView()) {
+    return;
+  }
+  g_display->SetCameraHint(nullptr);
+  g_display->SetCameraCapturing(false);
+  g_cam_view_frozen = false;
+  g_cam_view_stat_ms = 0;
+  g_cam_view_last_frames = 0;
+  if (!CamLink::GetInstance().BeginVideo()) {
+    CloseCameraView();
+  }
+}
 }  // namespace
 
 void setup() {
@@ -963,6 +1193,11 @@ void setup() {
 
   // Name the culprit if the heap ever runs out instead of just aborting.
   heap_caps_register_failed_alloc_callback(OnHeapAllocFailed);
+
+  // Not here: esp_bt_controller_mem_release(ESP_BT_MODE_BTDM). Nothing uses Bluetooth, so handing
+  // its DRAM back looks like free money on a board with no PSRAM. It is not - measured on device,
+  // the call returns ESP_OK and moves the heap by exactly zero bytes ("free 212284 -> 212284").
+  // This build simply never reserves the region. Do not spend time on it again.
 
   // Reserve the Opus codec state first, before LVGL, WiFi and mbedTLS have had a chance to carve up
   // the internal heap. It needs a ~24KB *contiguous* block, which simply does not exist any more by
@@ -1003,9 +1238,24 @@ void setup() {
   g_display->ShowStatus("初始化");
   // Before the engine starts, so the first thing she says is already at the user's chosen level.
   LoadSavedVolume();
-  ConfigureWifi();
+
+  // Tool registration moved ahead of ConfigureWifi(): it has no network dependency, and the engine
+  // singleton it builds is better allocated while the heap is still clean than after WiFi and TLS
+  // have carved it up.
+  //
+  // The GetInstance() below is not redundant - it forces the singleton up *before* the probe.
+  // InitMcpTools() touches Engine::GetInstance() on its first line, and EngineImpl's constructor
+  // spawns AiVoxMain (5KB stack) and AiVoxNetwork (6KB stack) and reserves the 5KB tools buffer.
+  // With those charged to the bracket the tool table measured 20,520 bytes and looked like a leak.
+  // Measured properly it is *zero*: every AddTool() serialises into the buffer the engine already
+  // reserved, and the cJSON temporaries are freed. Descriptions cost flash, not heap - so do not
+  // trim them hoping to recover RAM.
+  (void)ai_vox::Engine::GetInstance();
+  LogHeap("before mcp tools");
   InitMcpTools();
   LogHeap("after mcp tools");
+
+  ConfigureWifi();
 
 #if AUDIO_INPUT_DEVICE_TYPE == AUDIO_INPUT_DEVICE_TYPE_I2S_STD
   auto audio_input_device = std::make_shared<ai_vox::AudioInputDeviceI2sStd>(kMicPinSck, kMicPinWs, kMicPinSd);
@@ -1109,6 +1359,26 @@ void loop() {
 
   auto& engine = ai_vox::Engine::GetInstance();
 
+  // Wi-Fi strength into the status bar. Polled every 2s rather than driven off WiFi events on
+  // purpose: the failure this board actually suffers is not a disconnect but a link that stays
+  // associated while the signal collapses - which is what "network latency high: 3039 ms" and the
+  // websocket errors in the log are. An event-driven indicator would sit on four bars throughout.
+  static uint32_t s_last_net_report = 0;
+  static int s_last_rssi_logged = 0;
+  if (g_display != nullptr && (s_last_net_report == 0 || millis() - s_last_net_report >= 2000)) {
+    s_last_net_report = millis();
+    const bool up = (WiFi.status() == WL_CONNECTED);
+    const int rssi = up ? WiFi.RSSI() : 0;
+    g_display->ShowNetwork(up, rssi);
+    // Logged on a 5dB step, not every poll: the thresholds in ShowNetwork() are only as good as the
+    // RSSI this room actually produces, and a 2s spam of unchanged numbers buries everything else.
+    if (abs(rssi - s_last_rssi_logged) >= 5) {
+      s_last_rssi_logged = rssi;
+      printf("[wifi] rssi %d dBm\n", rssi);
+    }
+  }
+
+
   // Commit a changed volume once the dust has settled. Waiting for a quiet moment keeps the
   // flash-cache stall an NVS write causes out of the audio path, and the delay also coalesces a
   // burst of "再大声一点...再大声一点" into a single write.
@@ -1119,11 +1389,18 @@ void loop() {
   // Before the event pump, so a countdown that expires on this pass gets its announcement in while
   // the engine state is still whatever the last event left it as.
   TimerTick();
+  NotificationTick();
 
   // Drains at most a few bytes of UART and, at most once per 60ms, nudges a
   // servo. Nothing here allocates.
   auto& cam = CamLink::GetInstance();
   cam.Poll();
+
+  // The cam arms tracking by itself when it sees one raised finger. Say so, or
+  // the head starting to move looks like a fault.
+  if (cam.TakeGestureArmed() && g_display) {
+    g_display->ShowStatus("跟踪开启");
+  }
 
   // A "这是什么?" answer coming back from the camera board, seconds after the
   // tool call that asked for it. tools/call is asynchronous - the engine took
@@ -1141,6 +1418,81 @@ void loop() {
         engine.SendMcpCallResponse(look_id, std::string(look_text));
       } else {
         engine.SendMcpCallError(look_id, std::string(look_text));
+      }
+      if (g_display && g_display->InCameraView()) {
+        // Put what the camera decided on the frozen frame. The spoken reply is
+        // the server's job and arrives a second or two later; this is so the
+        // user can see the recognition landed on the right object.
+        g_display->SetCameraHint(look_text);
+        g_display->SetCameraCapturing(false);
+        // Either close the detour or thaw the picture, 2.5s from now: long
+        // enough to read a short line, short enough that the robot is back to
+        // normal before the assistant has finished speaking.
+        g_cam_view_deadline_ms = millis() + 2500;
+      }
+    }
+  }
+
+  // The deferred half of a look. The preview has been on screen for
+  // kLookPreviewMs, so now the picture is frozen and the request goes out.
+  //
+  // Why it is deferred at all: the cam stops reading its UART for the several
+  // seconds it spends uploading, so every command needed for this exchange has
+  // to arrive before the `V` does. FreezeCameraView() drops the link back to
+  // 115200 first; sending `V` while still at 921600 would have the answer come
+  // back at a rate this board was no longer listening at.
+  if (g_pending_look.active && static_cast<int32_t>(millis() - g_pending_look.fire_at_ms) >= 0) {
+    g_pending_look.active = false;
+    FreezeCameraView();
+    if (g_display) {
+      g_display->SetCameraHint("识别中…");
+    }
+    if (!cam.RequestLook(g_pending_look.id, g_pending_look.question.c_str())) {
+      engine.SendMcpCallError(g_pending_look.id, "Camera is busy");
+      CloseCameraView();
+    }
+    g_pending_look.question.clear();
+  }
+
+  // Viewfinder housekeeping.
+  if (g_display && g_display->InCameraView()) {
+    const uint32_t now_ms = millis();
+
+    // The cam went away, the link got too noisy, or the picture stalled - all
+    // of which CamLink handles by turning video off. There is no point leaving
+    // an empty viewfinder on screen once that happens. A frozen view is a
+    // different thing entirely: video is off because we turned it off.
+    if (!cam.video_active() && !g_cam_view_frozen) {
+      printf("camera view: video stopped, closing\n");
+      CloseCameraView();
+    } else {
+      if (now_ms - g_cam_view_stat_ms >= 1000) {
+        // Once a second, and only once: lv_label_set_text() invalidates the
+        // label whether or not the text changed, and loop() runs hundreds of
+        // times in that second.
+        g_cam_view_stat_ms = now_ms;
+        if (g_cam_view_frozen) {
+          g_display->SetCameraTelemetry("HOLD");
+        } else {
+          // Measured frame rate. Claiming a number here rather than counting
+          // one would be the easiest thing in this whole feature to get quietly
+          // wrong.
+          const uint16_t frames = cam.video_frames();
+          char line[32];
+          snprintf(line, sizeof(line), "%u FPS · 921K", static_cast<unsigned>(frames - g_cam_view_last_frames));
+          g_cam_view_last_frames = frames;
+          g_display->SetCameraTelemetry(line);
+        }
+      }
+      if (g_cam_view_deadline_ms != 0 && static_cast<int32_t>(now_ms - g_cam_view_deadline_ms) >= 0) {
+        g_cam_view_deadline_ms = 0;
+        if (g_cam_view_transient) {
+          CloseCameraView();
+        } else {
+          // The user opened the camera themselves, so it goes back to live
+          // rather than away.
+          ThawCameraView();
+        }
       }
     }
   }
@@ -1269,17 +1621,53 @@ void loop() {
         // top of a later loop() pass. Answering now would mean answering
         // before we know anything.
         const auto question_ptr = mcp_tool_call_event->param<std::string>("question");
-        if (!cam.RequestLook(mcp_tool_call_event->id, question_ptr != nullptr ? question_ptr->c_str() : nullptr)) {
-          engine.SendMcpCallError(mcp_tool_call_event->id,
-                                  cam.IsPresent() ? "Camera is already busy" : "Camera not connected");
-        } else if (g_display) {
-          g_display->ShowStatus("看一下...");
+        const char* question = question_ptr != nullptr ? question_ptr->c_str() : "";
+        const int64_t look_id = mcp_tool_call_event->id;
+
+        if (!cam.IsPresent()) {
+          engine.SendMcpCallError(look_id, "Camera not connected");
+        } else if (g_pending_look.active) {
+          engine.SendMcpCallError(look_id, "Camera is already busy");
+        } else if (OpenCameraView(/*transient=*/true)) {
+          // Show the shot before taking it. The character is 40px tall on a
+          // 240x320 panel and says nothing about what is being pointed at;
+          // putting the actual frame up is the difference between the robot
+          // looking at your hand and the robot appearing to ignore you.
+          //
+          // The request itself waits for kLookPreviewMs - see the pending-look
+          // block in loop() for why it cannot simply be sent now.
+          g_pending_look.active = true;
+          g_pending_look.id = look_id;
+          g_pending_look.question = question;
+          g_pending_look.fire_at_ms = millis() + kLookPreviewMs;
+          if (g_display) {
+            g_display->ShowStatus("看一下...");
+            g_display->SetCameraHint("取景中…");
+          }
+        } else if (cam.RequestLook(look_id, question)) {
+          // No viewfinder - not enough heap, or the display refused. The
+          // feature still works, it just does it without showing its work.
+          if (g_display) {
+            g_display->ShowStatus("看一下...");
+          }
+        } else {
+          engine.SendMcpCallError(look_id, "Camera is already busy");
         }
       } else if (matches("self.camera.track_on")) {
         cam.SetTrackingEnabled(true);
         engine.SendMcpCallResponse(mcp_tool_call_event->id, cam.IsPresent());
       } else if (matches("self.camera.track_off")) {
         cam.SetTrackingEnabled(false);
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+      } else if (matches("self.camera.view_on")) {
+        const char* why = "Camera view unavailable";
+        if (OpenCameraView(/*transient=*/false, &why)) {
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        } else {
+          engine.SendMcpCallError(mcp_tool_call_event->id, why);
+        }
+      } else if (matches("self.camera.view_off")) {
+        CloseCameraView();
         engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
       } else if (matches("self.audio_speaker.set_volume", "set_volume")) {
         const auto volume_ptr = mcp_tool_call_event->param<int64_t>("volume");
@@ -1462,6 +1850,34 @@ void loop() {
         const auto remaining = static_cast<int64_t>(TimerRemainingSeconds());
         printf("on mcp tool call: timer.query -> %" PRId64 " s\n", remaining);
         engine.SendMcpCallResponse(mcp_tool_call_event->id, remaining);
+      } else if (matches("self.screen.notify", "notify") || matches("self.screen.alert", "alert")) {
+        const auto body_ptr = mcp_tool_call_event->param<std::string>("body");
+        // Same defensive argument hunt as timer.start: the model picks its own key names often
+        // enough that insisting on "body" would drop real notifications on the floor.
+        const auto message_ptr = body_ptr != nullptr ? nullptr : mcp_tool_call_event->param<std::string>("message");
+        const auto text_ptr =
+            (body_ptr == nullptr && message_ptr == nullptr) ? mcp_tool_call_event->param<std::string>("text") : nullptr;
+        const std::string* body = body_ptr != nullptr ? body_ptr : (message_ptr != nullptr ? message_ptr : text_ptr);
+        if (body == nullptr || body->empty()) {
+          engine.SendMcpCallError(mcp_tool_call_event->id, "Missing valid argument: body");
+        } else {
+          const auto title_ptr = mcp_tool_call_event->param<std::string>("title");
+          // hold_seconds is deliberately not in the schema (see InitMcpTools) but is still honoured
+          // if the model sends it anyway. Clamped, not rejected: a nonsensical value should land on
+          // a sane hold rather than lose the notification.
+          const auto hold_ptr = mcp_tool_call_event->param<int64_t>("hold_seconds");
+          uint32_t hold_ms = kAlertDefaultHoldMs;
+          if (hold_ptr != nullptr && *hold_ptr > 0) {
+            hold_ms = static_cast<uint32_t>(std::min<int64_t>(*hold_ptr, kAlertMaxHoldMs / 1000)) * 1000;
+          }
+          ShowNotification(title_ptr != nullptr && !title_ptr->empty() ? title_ptr->c_str() : "提醒", body->c_str(), hold_ms);
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        }
+      } else if (matches("self.screen.notify_clear", "notify_clear") || matches("self.screen.alert_clear", "alert_clear")) {
+        const bool was_visible = g_alert_visible;
+        ClearNotification();
+        printf("on mcp tool call: screen.notify_clear (was visible: %d)\n", static_cast<int>(was_visible));
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, was_visible);
       }
     }
   }

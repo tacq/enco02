@@ -82,8 +82,14 @@ struct Tool {
 class ToolManager {
  public:
   ToolManager() {
-    // Sized for the current tool set; avoids a dozen reallocations while the list is being built.
-    tools_body_.reserve(2560);
+    // Sized from the real payload, not a guess: the server's "tools/list" response measures 4,878
+    // bytes on the wire for the current tool set. At the old 2560 this string outgrew its buffer
+    // during boot and libstdc++ doubled it to 5120 - holding both buffers at once and leaving a
+    // 2.5KB hole behind. Reserving the true size costs nothing and avoids the churn.
+    //
+    // If you add tools and this number goes stale the only penalty is that one realloc coming back,
+    // so it is a soft target rather than something that has to be kept exact.
+    tools_body_.reserve(5120);
   }
 
   void AddTool(std::string name, Tool tool) {

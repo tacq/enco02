@@ -10,6 +10,8 @@ struct TrackSample {
   int16_t dx;      // -100 (hard left) .. +100 (hard right)
   int16_t dy;      // -100 (top) .. +100 (bottom)
   uint8_t conf;    // 0 = nothing found, 100 = unambiguous
+  int16_t roll;    // -100 (head tilted left / 歪头) .. +100 (head tilted right)
+  uint8_t gesture; // 0 = none, 1 = one raised finger (食指) held steady
 };
 
 namespace cam_tracker {

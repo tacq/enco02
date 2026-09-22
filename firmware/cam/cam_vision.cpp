@@ -52,6 +52,8 @@ uint8_t* CaptureJpeg(size_t* out_len) {
   if (s == nullptr) {
     return nullptr;
   }
+  const int vflip = s->status.vflip;
+  const int hmirror = s->status.hmirror;
 
   esp_camera_deinit();
 
@@ -85,6 +87,10 @@ uint8_t* CaptureJpeg(size_t* out_len) {
   if (esp_camera_init(&cfg) != ESP_OK) {
     Serial.println("[vision] jpeg reinit failed");
     return nullptr;
+  }
+  if (sensor_t* js = esp_camera_sensor_get()) {
+    js->set_vflip(js, vflip);
+    js->set_hmirror(js, hmirror);
   }
 
   // The first frame after a mode change is exposed for the old mode and comes

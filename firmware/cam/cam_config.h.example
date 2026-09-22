@@ -40,7 +40,7 @@
 // right of frame centre" and turns the head right; get the mirroring wrong and
 // the head runs away from the user instead of towards them. If tracking drives
 // the head to an end stop, flip CAM_HMIRROR.
-#define CAM_VFLIP 1
-#define CAM_HMIRROR 1
+#define CAM_VFLIP 0
+#define CAM_HMIRROR 0
 
 #endif  // _CAM_CONFIG_H_

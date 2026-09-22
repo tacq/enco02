@@ -22,7 +22,14 @@ extern "C" {
 #define ENCO_FACE_LOCKS_R_X 156
 #define ENCO_FACE_LOCKS_R_Y 104
 
+// Pre-scaled bust for the camera HUD's side panel. Baked at build time because
+// the streaming I4 decoder cannot be scaled at runtime - see the note in
+// build_face_assets.py.
+#define ENCO_FACE_THUMB_W 82
+#define ENCO_FACE_THUMB_H 86
+
 extern const lv_image_dsc_t enco_face_base;
+extern const lv_image_dsc_t enco_face_thumb;
 extern const lv_image_dsc_t enco_face_eyes_half;
 extern const lv_image_dsc_t enco_face_eyes_shut;
 extern const lv_image_dsc_t enco_face_mouth_small;

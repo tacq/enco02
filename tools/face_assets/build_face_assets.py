@@ -60,6 +60,59 @@ HAIR_LEVELS = [
 
 PAD = 3
 
+# ---------------------------------------------------------------- camera-view thumbnail
+#
+# The camera HUD shows her in an 84x88 panel beside the viewfinder, and LVGL cannot shrink the
+# portrait to get her in there.  Scaling an image goes through lv_draw_image's transform path,
+# which needs the whole bitmap in memory - but this portrait is drawn by the streaming I4 decoder
+# (lv_i4_decoder.c), which hands back one row at a time and leaves dsc->decoded NULL.  In that
+# path lv_draw_sw_img.c derives src_w/src_h from the *slice* it was given, so a scale factor would
+# be applied to a 1-pixel-tall source, 235 times over.  It does not degrade, it corrupts.
+#
+# So the shrink happens here instead, once, at build time.  The panel's interior is 82x86 after its
+# 1px border, and THUMB_SRC is picked to match that aspect ratio (0.953) exactly so the result
+# neither letterboxes nor overflows.
+#
+# The window itself comes from the silhouette of the quantised portrait: her hair starts at y=10,
+# the head is widest at y=150-160 (x=13..226), the neck pinches in at y=220 and the shoulders flare
+# from y=240.  x=8..231 centres that on the image's own axis, and stopping at y=239 keeps the whole
+# head plus a hint of collar while leaving the shoulders out - they would only shrink the head.
+THUMB_SRC = (8, 4, 224, 235)  # x, y, w, h in the 240x320 portrait
+THUMB_W, THUMB_H = 82, 86     # 84x88 panel less its 1px border
+
+
+def box_downscale(rgb, w, h, crop, out_w, out_h):
+    """Area-average `crop` (x, y, w, h) of `rgb` down to out_w x out_h.
+
+    Point sampling was not an option: this is a 2.7x reduction of line art, so every output pixel
+    has ~7 source pixels under it and picking one of them at random drops whole features - her
+    eyelashes and the 1px specular highlights in the eyes vanish entirely.  Averaging keeps them as
+    a darker tone, which is exactly what the 16-colour palette then needs in order to show them.
+    """
+    cx, cy, cw, ch = crop
+    out = []
+    for oy in range(out_h):
+        sy0 = cy + oy * ch // out_h
+        sy1 = max(sy0 + 1, cy + (oy + 1) * ch // out_h)
+        for ox in range(out_w):
+            sx0 = cx + ox * cw // out_w
+            sx1 = max(sx0 + 1, cx + (ox + 1) * cw // out_w)
+            r = g = b = n = 0
+            for sy in range(sy0, sy1):
+                if sy < 0 or sy >= h:
+                    continue
+                row = sy * w
+                for sx in range(sx0, sx1):
+                    if sx < 0 or sx >= w:
+                        continue
+                    pr, pg, pb = rgb[row + sx]
+                    r += pr
+                    g += pg
+                    b += pb
+                    n += 1
+            out.append((r // n, g // n, b // n) if n else (0, 0, 0))
+    return out
+
 
 def is_skin(rgb):
     r, g, b = rgb
@@ -141,7 +194,10 @@ def main():
     # portrait already owns, so it needs no slot at all.
     accents = A.accent_colors()
     palette = F.median_cut(base_rgb[::4], F.N_COLORS - len(accents)) + accents
-    base = F.build_index_map(A.draw(list(base_rgb), w, h), palette)
+    # Kept in a variable rather than inlined: the camera-view thumbnail is resampled from exactly
+    # these pixels, so that it shows the same render as the full-screen face.
+    base_rgb_acc = A.draw(list(base_rgb), w, h)
+    base = F.build_index_map(base_rgb_acc, palette)
     F.save_state(os.path.join(BUILD, "state.bin"), palette, base, w, h)
 
     quantised, group_mask = {}, {}
@@ -180,6 +236,18 @@ def main():
     for region, (rx, ry, rw, rh) in HAIR_REGIONS:
         print(f"{region} sprite: x={rx} y={ry} {rw}x{rh}")
 
+    # The camera-view thumbnail.  It gets its own palette rather than sharing the base's: averaging
+    # 7 source pixels per output pixel invents intermediate tones that the full-size portrait never
+    # contained, and forcing those onto a palette chosen for the full-size portrait posterises her
+    # face into visible bands.  Nothing composites onto this image, so it owes the base nothing -
+    # and the I4 decoder reloads the palette on every open, so a second one is free at runtime.
+    # The accent is pinned the same way, or median_cut would spend slots on the emitter cyan.
+    thumb_rgb = box_downscale(base_rgb_acc, w, h, THUMB_SRC, THUMB_W, THUMB_H)
+    thumb_palette = F.median_cut(thumb_rgb, F.N_COLORS - len(accents)) + accents
+    thumb = F.build_index_map(thumb_rgb, thumb_palette)
+    print(f"thumb: {THUMB_SRC[2]}x{THUMB_SRC[3]} at "
+          f"({THUMB_SRC[0]},{THUMB_SRC[1]}) -> {THUMB_W}x{THUMB_H}")
+
     total = 0
     previews = {}
     with open(os.path.join(outdir, "face_assets.c"), "w") as fh:
@@ -199,6 +267,7 @@ def main():
                 sym = f"enco_face_{region}_{level_name}"
                 cropped = F.crop(hair_frames[level_name], w, h, rx, ry, rw, rh)
                 total += F.emit_c(fh, sym, cropped, palette, rw, rh)
+        total += F.emit_c(fh, "enco_face_thumb", thumb, thumb_palette, THUMB_W, THUMB_H)
 
     with open(os.path.join(outdir, "face_assets.h"), "w") as fh:
         ex, ey, _, _ = rects["eyes"]
@@ -221,7 +290,12 @@ def main():
                  f"#define ENCO_FACE_BANGS_X {bx}\n#define ENCO_FACE_BANGS_Y {by}\n"
                  f"#define ENCO_FACE_LOCKS_L_X {llx}\n#define ENCO_FACE_LOCKS_L_Y {lly}\n"
                  f"#define ENCO_FACE_LOCKS_R_X {lrx}\n#define ENCO_FACE_LOCKS_R_Y {lry}\n\n"
+                 "// Pre-scaled bust for the camera HUD's side panel. Baked at build time because\n"
+                 "// the streaming I4 decoder cannot be scaled at runtime - see the note in\n"
+                 "// build_face_assets.py.\n"
+                 f"#define ENCO_FACE_THUMB_W {THUMB_W}\n#define ENCO_FACE_THUMB_H {THUMB_H}\n\n"
                  "extern const lv_image_dsc_t enco_face_base;\n"
+                 "extern const lv_image_dsc_t enco_face_thumb;\n"
                  "extern const lv_image_dsc_t enco_face_eyes_half;\n"
                  "extern const lv_image_dsc_t enco_face_eyes_shut;\n"
                  "extern const lv_image_dsc_t enco_face_mouth_small;\n"
@@ -231,6 +305,10 @@ def main():
                  "#ifdef __cplusplus\n}\n#endif\n")
 
     F.write_png_indexed(os.path.join(BUILD, "frame_base.png"), base, palette, w, h)
+    F.write_png_indexed(os.path.join(BUILD, "frame_thumb.png"), thumb, thumb_palette, THUMB_W, THUMB_H)
+    # ...and again at 4x, because 82x86 is too small to judge on a monitor.
+    F.write_png_indexed(os.path.join(BUILD, "frame_thumb_4x.png"), thumb, thumb_palette, THUMB_W, THUMB_H,
+                        scale=4)
     for fname, win, group, name in VARIANTS:
         x, y, cw, ch = rects[group]
         comp = list(base)
