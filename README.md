@@ -62,12 +62,60 @@ card** may be fitted; nothing is stored locally, so this costs nothing.
 
 ```sh
 cp firmware/cam/cam_config.h.example firmware/cam/cam_config.h
-# fill in Wi-Fi credentials and a vision API key
+# fill in Wi-Fi credentials; the vision API key is optional, see below
 pio run -e enco02_cam -t upload
 ```
 
 `cam_config.h` is gitignored. A bare ESP32-CAM needs a USB-serial adapter with
 GPIO 0 pulled to GND while resetting; the ESP32-CAM-MB shield does this for you.
+
+### Where the vision answer comes from
+
+**No API key is needed.** When the main board connects, the server advertises
+its own vision service in the params of the MCP `initialize` call:
+
+```json
+"capabilities":{"vision":{"url":"http://.../vision/explain","token":"<uuid>"}}
+```
+
+The engine parses `initialize` only far enough to build its reply, so this was
+being discarded on every connect. The main board now reads it off the raw text
+frame and forwards it to the cam as `K <url> <token> <mac>`. The MAC is the
+main board's, because the token is issued against that device.
+
+The cam POSTs the JPEG there as `multipart/form-data` with `question` and
+`file` fields — the same shape upstream xiaozhi-esp32 uses, so the server sees
+what it expects. The URL is plain `http`, so this path needs no TLS.
+
+`CAM_VISION_ENDPOINT` / `CAM_VISION_API_KEY` in `cam_config.h` remain as a
+fallback for running the cam without a xiaozhi server; that route base64s the
+frame into an OpenAI-shaped `/chat/completions` request over TLS.
+
+> **Keep the answer short, and mind how.** Measured against the live endpoint,
+> same scene: `这是什么` returned **432 bytes**; adding `一句话，最多20个字`
+> returned **212**; adding `不要描述细节` returned **87**. A word limit on its
+> own is ignored — the negative instruction is what works. The cam appends
+> `（20字以内，直接回答，不要描述细节）` to whatever the assistant asks.
+>
+> Both boards still cap the reply at **320 bytes** and truncate on a UTF-8
+> character boundary. The two sizes must match: an over-long line is dropped
+> whole as a framing error, not truncated, so a mismatch loses the answer
+> silently.
+
+### Bringing it up without wiring anything
+
+The cam has a USB console that accepts the same commands as the link and echoes
+everything it would have sent. So the camera, Wi-Fi, tracker and the whole
+vision round trip can be proven before a single wire is soldered:
+
+```
+S                       status: psram, heap, wifi, ip, tracking, vision route
+A 1 / A 0               tracking on / off, prints "T <dx> <dy> <conf>"
+V [question]            capture and describe
+K <url> <token> <mac>   point vision at a server by hand
+P                       ping
+```
+
 
 ### What it exposes to the assistant
 

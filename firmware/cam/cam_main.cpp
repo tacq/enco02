@@ -12,8 +12,14 @@
 //                  E <msg>              something went wrong
 //
 //   main -> cam    A 1 | A 0            arm / disarm tracking
-//                  V                    capture and describe
+//                  V [question]         capture and describe
+//                  K <url> <token> <mac>  use this vision endpoint
 //                  P                    ping (answered with R)
+//
+// K is how this board gets a vision service without an API key of its own. The
+// xiaozhi server hands the main board a url and a token when it connects; the
+// main board passes them here, along with its own MAC, because the token is
+// issued against that MAC and the server checks the two agree.
 //
 // The cam never commands a servo. It reports where the person is and the main
 // board decides what to do about it - only the main board knows the safe angle
@@ -49,12 +55,60 @@ uint32_t g_last_track_ms = 0;
 int16_t g_last_dx = 0;
 int16_t g_last_dy = 0;
 
-char g_line[96];
+// 240, not 96. A K command is "K " + url + token + a 17 char MAC; the main
+// board sizes its side at 240 from the worst case its buffers allow (227
+// chars), and if these two disagree the longer line is silently dropped here
+// as a framing error. The real message is ~95 bytes. V can also now carry a
+// question, which the assistant writes and may be a full sentence of UTF-8.
+//
+// Stays under 255 because PumpStream's `cap` is a uint8_t.
+char g_line[240];
 uint8_t g_line_len = 0;
+char g_dbg_line[240];
+uint8_t g_dbg_line_len = 0;
 
+// Drop a trailing incomplete UTF-8 sequence, in place.
+//
+// snprintf truncates at a byte boundary. Chinese is three bytes per character
+// here, so a cut lands mid-character two times in three and the tail becomes a
+// replacement glyph on the robot's screen and gibberish to the TTS.
+void TruncateUtf8(char* s) {
+  size_t len = strlen(s);
+  size_t i = len;
+  // Walk back over continuation bytes (10xxxxxx) to the lead byte.
+  while (i > 0 && (static_cast<unsigned char>(s[i - 1]) & 0xC0) == 0x80) {
+    --i;
+  }
+  if (i == 0) {
+    return;
+  }
+  const unsigned char lead = static_cast<unsigned char>(s[i - 1]);
+  size_t need = 1;
+  if ((lead & 0xE0) == 0xC0) {
+    need = 2;
+  } else if ((lead & 0xF0) == 0xE0) {
+    need = 3;
+  } else if ((lead & 0xF8) == 0xF0) {
+    need = 4;
+  }
+  // Only cut if the sequence really is short of its full width - otherwise the
+  // string already ends on a clean boundary.
+  if ((i - 1) + need > len) {
+    s[i - 1] = '\0';
+  }
+}
+
+// Everything sent on the link is echoed to the USB console with a "->" prefix,
+// and anything typed into the USB console is accepted as if it had arrived on
+// the link. UART0 (USB) and UART1 (the link) are separate peripherals, so this
+// works even while the main board is attached - you can sit on the cam's log
+// and watch the conversation. It is also how you bring the board up before any
+// wiring exists.
 void Send(const char* s) {
   Serial1.print(s);
   Serial1.print('\n');
+  Serial.print("-> ");
+  Serial.println(s);
 }
 
 bool InitTrackingCamera() {
@@ -110,7 +164,7 @@ bool InitTrackingCamera() {
   return true;
 }
 
-void HandleCommand(const char* line) {
+void HandleCommand(char* line) {
   switch (line[0]) {
     case 'P': {
       Send("R");
@@ -124,33 +178,91 @@ void HandleCommand(const char* line) {
       Serial.printf("[cam] tracking %s\n", g_tracking ? "on" : "off");
       break;
     }
+    case 'S': {
+      // Bring-up aid: everything you want to know before blaming the wiring.
+      Serial.printf("[cam] psram:%s heap:%u psram_free:%u wifi:%s ip:%s tracking:%d vision:%s\n", psramFound() ? "yes" : "NO",
+                    static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getFreePsram()),
+                    WiFi.status() == WL_CONNECTED ? "up" : "DOWN", WiFi.localIP().toString().c_str(),
+                    static_cast<int>(g_tracking), cam_vision::HasEndpoint() ? "server" : "config-key");
+      break;
+    }
+    case 'K': {
+      // "K <url> <token> <device-id>". Split in place: the caller's buffer is
+      // ours until the next line arrives, and this avoids three String copies
+      // on a path that runs while a camera frame buffer is live.
+      char* p = line + 1;
+      auto next = [&p]() -> const char* {
+        while (*p == ' ') {
+          ++p;
+        }
+        if (*p == '\0') {
+          return "";
+        }
+        const char* start = p;
+        while (*p != '\0' && *p != ' ') {
+          ++p;
+        }
+        if (*p == ' ') {
+          *p++ = '\0';
+        }
+        return start;
+      };
+      const char* url = next();
+      const char* token = next();
+      const char* device_id = next();
+      cam_vision::SetEndpoint(url, token, device_id);
+      break;
+    }
     case 'V': {
       // Blocks for a few seconds. Deliberate: the main board's MCP call is
       // asynchronous and is not waiting on this task.
       const bool was_tracking = g_tracking;
       g_tracking = false;
 
+      // Everything after "V " is the question, which may contain spaces.
+      const char* question = (line[1] == ' ') ? line + 2 : "";
+
+      // Ask for a short answer, in the one phrasing that actually works.
+      //
+      // Measured against this endpoint, same scene, three questions:
+      //
+      //   "这是什么"                                     -> 432 bytes
+      //   "一句话，最多20个字：画面主体是什么"           -> 212 bytes
+      //   "只说画面主体是什么，20字以内，不要描述细节"   ->  87 bytes
+      //
+      // A word limit on its own is ignored - the model happily writes a
+      // paragraph and then stops mid-word when we truncate it. What works is
+      // the negative instruction: tell it not to describe details. Hence the
+      // suffix below rather than the obvious "不超过30个字".
+      char q[224];
+      if (*question != '\0') {
+        snprintf(q, sizeof(q), "%s（20字以内，直接回答，不要描述细节）", question);
+      } else {
+        q[0] = '\0';
+      }
+
       String text;
-      const bool ok = cam_vision::Describe(&text);
+      const bool ok = cam_vision::Describe(q, &text);
 
       // Describe() reconfigured the sensor for JPEG; put it back.
       InitTrackingCamera();
       g_tracking = was_tracking;
 
-      if (ok) {
-        // Newline terminates a message, so a stray one would split the reply.
-        text.replace('\n', ' ');
-        text.replace('\r', ' ');
-        Serial1.print("L ");
-        Serial1.print(text);
-        Serial1.print('\n');
-        Serial.printf("[cam] look -> %s\n", text.c_str());
-      } else {
-        Serial1.print("E ");
-        Serial1.print(text);
-        Serial1.print('\n');
-        Serial.printf("[cam] look failed: %s\n", text.c_str());
+      // Newline terminates a message, so a stray one would split the reply.
+      text.replace('\n', ' ');
+      text.replace('\r', ' ');
+
+      // 320 bytes, matching the main board's receive buffer exactly. At 3 bytes
+      // per Chinese character that is ~105 characters, comfortably more than
+      // the 30 we asked for. If the two sizes ever diverge, the main board
+      // discards the whole line as a framing error and the assistant hears
+      // nothing at all - which is how this size was found.
+      char out[320];
+      const int n = snprintf(out, sizeof(out), "%c %s", ok ? 'L' : 'E', text.c_str());
+      if (n >= static_cast<int>(sizeof(out))) {
+        TruncateUtf8(out);
       }
+      Send(out);
       break;
     }
     default:
@@ -158,26 +270,40 @@ void HandleCommand(const char* line) {
   }
 }
 
-void PollLink() {
-  while (Serial1.available() > 0) {
-    const int c = Serial1.read();
+// One reader, two sources. `buf`/`len` are per-source so a half-typed console
+// command cannot interleave with a link message and corrupt both.
+void PumpStream(Stream& in, char* buf, uint8_t& len, uint8_t cap) {
+  while (in.available() > 0) {
+    const int c = in.read();
     if (c < 0) {
       return;
     }
     if (c == '\n' || c == '\r') {
-      if (g_line_len > 0) {
-        g_line[g_line_len] = '\0';
-        HandleCommand(g_line);
-        g_line_len = 0;
+      if (len > 0) {
+        buf[len] = '\0';
+        HandleCommand(buf);
+        len = 0;
       }
       continue;
     }
-    if (g_line_len < sizeof(g_line) - 1) {
-      g_line[g_line_len++] = static_cast<char>(c);
+    if (len < cap - 1) {
+      buf[len++] = static_cast<char>(c);
     } else {
-      g_line_len = 0;  // overlong: drop it rather than act on a fragment
+      len = 0;  // overlong: drop it rather than act on a fragment
     }
   }
+}
+
+void PollLink() {
+  PumpStream(Serial1, g_line, g_line_len, sizeof(g_line));
+}
+
+// The USB console accepts the same commands as the link. This is the whole
+// bring-up story for this board: flash it, open a serial monitor, type V, and
+// you know whether the camera and the vision API work before a single wire has
+// been soldered to the main board.
+void PollDebugConsole() {
+  PumpStream(Serial, g_dbg_line, g_dbg_line_len, sizeof(g_dbg_line));
 }
 
 void Track() {
@@ -253,10 +379,22 @@ void setup() {
 
   Serial.printf("[cam] free heap %u, free psram %u\n", static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getFreePsram()));
   Send("R");
+  Serial.println("[cam] console ready - type a command and press enter:");
+  Serial.println("        S = status   A 1 / A 0 = tracking on/off");
+  Serial.println("        V [question] = capture and describe   P = ping");
+  Serial.println("        K <url> <token> <mac> = point vision at a server");
+  if (!cam_vision::HasEndpoint()) {
+    // Worth saying plainly. Without either of these the V command returns a
+    // 401 and it looks like the camera is broken when it is not.
+    Serial.println("[cam] vision route: compiled-in key from cam_config.h.");
+    Serial.println("      The main board will send K automatically once it");
+    Serial.println("      connects and the server advertises a vision url.");
+  }
 }
 
 void loop() {
   PollLink();
+  PollDebugConsole();
   Track();
   delay(2);
 }

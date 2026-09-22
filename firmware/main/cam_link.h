@@ -49,10 +49,24 @@ class CamLink {
   // immediately undone by the tracker dragging the head back.
   void NoteManualHeadCommand();
 
+  // Hand the cam a vision service to use.
+  //
+  // The xiaozhi server advertises one in the params of the MCP `initialize`
+  // call. Forwarding it means the camera board needs no API key of its own -
+  // the account already paying for the assistant pays for the picture.
+  //
+  // Stored, because the cam may not be listening yet (or may reboot): the
+  // endpoint is re-sent every time the cam announces itself with R.
+  void SetVisionEndpoint(const char* url, const char* token);
+
   // Asks the cam for a description. Returns false if a request is already in
   // flight or no camera has ever answered. The reply arrives asynchronously via
   // TakeLookResult().
-  bool RequestLook(int64_t mcp_id);
+  //
+  // `question` is forwarded to the vision service so the assistant can ask
+  // something specific rather than always getting a generic description. Pass
+  // nullptr for the cam's default prompt.
+  bool RequestLook(int64_t mcp_id, const char* question);
 
   // Non-blocking. Returns true once per completed (or timed out) request.
   // `text` points at an internal buffer valid until the next Poll().
@@ -66,6 +80,10 @@ class CamLink {
   void HandleLine(const char* line);
   void ApplyTracking(int dx, int dy, int conf);
   void SendCommand(const char* cmd);
+
+  // Pushes vision_url_/vision_token_ plus this board's MAC to the cam as a
+  // single K line. No-op until both a url and a live cam exist.
+  void SendVisionEndpoint();
 
   bool initialised_ = false;
   bool present_ = false;
@@ -85,9 +103,25 @@ class CamLink {
   bool result_ok_ = false;
   int64_t result_id_ = 0;
 
-  uint8_t line_len_ = 0;
-  char line_[192];
-  char result_[192];
+  // 320, and the cam's send buffer is the same.
+  //
+  // This was 192, which was wrong: asked "这是什么" the vision service returned a
+  // 223 byte answer, and Poll() discards an over-long line whole rather than
+  // act on a fragment - so the assistant heard nothing at all. 320 bytes is
+  // ~105 Chinese characters, against the 30 the cam now asks the model for.
+  //
+  // line_len_ is uint16_t because a uint8_t wraps at 255 and would have turned
+  // the bounds check into an infinite write.
+  uint16_t line_len_ = 0;
+  char line_[320];
+  char result_[320];
+
+  // Sized from the real values: "http://api.xiaozhi.me/vision/explain" is 36
+  // chars and the token is a 36-char UUID. Fixed buffers rather than String,
+  // for the same reason as everything else in this class - the heap here has
+  // been logged down to a 2,036 byte largest free block.
+  char vision_url_[128] = {0};
+  char vision_token_[80] = {0};
 };
 
 #endif  // _CAM_LINK_H_

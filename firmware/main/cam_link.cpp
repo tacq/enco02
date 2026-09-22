@@ -4,6 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+// For esp_read_mac(): the vision token is issued against this board's MAC, so
+// the K command has to carry it.
+#include <esp_mac.h>
+
 #include "servo_controller.h"
 
 namespace {
@@ -83,14 +87,72 @@ void CamLink::NoteManualHeadCommand() {
   manual_until_ms_ = millis() + kManualHoldMs;
 }
 
-bool CamLink::RequestLook(int64_t mcp_id) {
+void CamLink::SetVisionEndpoint(const char* url, const char* token) {
+  if (url == nullptr || *url == '\0') {
+    return;
+  }
+  // The server re-advertises the same endpoint on every connect. Only log and
+  // re-send when something actually changed, so a reconnect loop does not spam
+  // the link.
+  if (strncmp(vision_url_, url, sizeof(vision_url_)) == 0 && strncmp(vision_token_, token != nullptr ? token : "", sizeof(vision_token_)) == 0) {
+    return;
+  }
+  snprintf(vision_url_, sizeof(vision_url_), "%s", url);
+  snprintf(vision_token_, sizeof(vision_token_), "%s", token != nullptr ? token : "");
+  printf("cam link: vision endpoint %s\n", vision_url_);
+  SendVisionEndpoint();
+}
+
+void CamLink::SendVisionEndpoint() {
+  if (!initialised_ || vision_url_[0] == '\0') {
+    return;
+  }
+
+  // Our own MAC, because the token the server issued is bound to this board -
+  // not to the camera, which the server has never heard of.
+  uint8_t mac[6] = {0};
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+
+  // 240, from the worst case the compiler works out: "K " + a 127 char url +
+  // a 79 char token + a 17 char MAC + separators = 227. The cam's receive
+  // buffer is the same size for exactly this reason - if these two ever
+  // disagree, the cam silently drops the line as a framing error.
+  char cmd[240];
+  snprintf(cmd, sizeof(cmd), "K %s %s %02x:%02x:%02x:%02x:%02x:%02x", vision_url_, vision_token_, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  SendCommand(cmd);
+}
+
+bool CamLink::RequestLook(int64_t mcp_id, const char* question) {
   if (!initialised_ || !present_ || look_pending_) {
     return false;
   }
   look_id_ = mcp_id;
   look_pending_ = true;
   look_started_ms_ = millis();
-  SendCommand("V");
+
+  if (question == nullptr || *question == '\0') {
+    SendCommand("V");
+    return true;
+  }
+
+  // One line per message, so a newline inside the question would split it in
+  // two and the cam would act on half a sentence. The assistant writes this
+  // text, so it is not hostile, but it is not constrained either.
+  char cmd[192];
+  int n = snprintf(cmd, sizeof(cmd), "V %s", question);
+  if (n < 0) {
+    SendCommand("V");
+    return true;
+  }
+  if (static_cast<size_t>(n) >= sizeof(cmd)) {
+    n = sizeof(cmd) - 1;
+  }
+  for (int i = 0; i < n; ++i) {
+    if (cmd[i] == '\n' || cmd[i] == '\r') {
+      cmd[i] = ' ';
+    }
+  }
+  SendCommand(cmd);
   return true;
 }
 
@@ -192,8 +254,10 @@ void CamLink::HandleLine(const char* line) {
       break;
     }
     case 'R': {
-      // The cam rebooted, so its tracking state is back to the default.
+      // The cam rebooted, so its tracking state is back to the default - and
+      // so is its vision endpoint, which lives in RAM over there.
       tracking_armed_ = false;
+      SendVisionEndpoint();
       break;
     }
     default:

@@ -114,18 +114,21 @@ uint8_t* CaptureJpeg(size_t* out_len) {
   return copy;
 }
 
-// Pull the assistant message out of an OpenAI-shaped response without dragging
-// in a JSON library. We are looking for exactly one field and the shape is
-// fixed, so a scanner is smaller and allocates nothing beyond the result.
+// Pull a named string field out of a JSON response without dragging in a JSON
+// library. We are looking for exactly one field and the shape is fixed, so a
+// scanner is smaller and allocates nothing beyond the result.
 //
 // Handles \\uXXXX because the API escapes CJK depending on the gateway, and a
 // mojibake answer is worse than no answer.
-bool ExtractContent(const String& body, String* out) {
-  int i = body.indexOf("\"content\"");
+//
+// `key` is given with its quotes, e.g. "\"result\"".
+bool ExtractString(const String& body, const char* key, String* out) {
+  const int key_len = static_cast<int>(strlen(key));
+  int i = body.indexOf(key);
   if (i < 0) {
     return false;
   }
-  i = body.indexOf('"', i + 9);  // opening quote of the value
+  i = body.indexOf('"', i + key_len);  // opening quote of the value
   if (i < 0) {
     return false;
   }
@@ -221,31 +224,171 @@ bool ExtractContent(const String& body, String* out) {
   return out->length() > 0;
 }
 
-}  // namespace
+// Runtime endpoint handed over by the main board. Fixed buffers: this module
+// must not allocate at request time on a board that is also holding a camera
+// frame buffer.
+char g_url[128] = {0};
+char g_token[80] = {0};
+char g_device_id[24] = {0};
 
-bool Describe(String* out) {
-  if (WiFi.status() != WL_CONNECTED) {
-    *out = "wifi down";
+constexpr char kBoundary[] = "----ESP32_CAMERA_BOUNDARY";
+
+// Runs one POST, choosing TLS or plaintext from the url scheme.
+//
+// The two client classes cannot share a declaration - NetworkClientSecure has
+// to outlive the request - so the request body lives in a lambda that takes the
+// base class and each branch supplies its own stack object. No heap, no
+// duplicated request code, and no TLS context constructed for a plain http URL.
+//
+// Returns the HTTP status, or a negative HTTPClient error.
+int PostBody(const char* url, const char* content_type, const uint8_t* body, size_t body_len, String* reply) {
+  auto run = [&](NetworkClient& client) -> int {
+    HTTPClient http;
+    http.setTimeout(kHttpTimeoutMs);
+    http.setConnectTimeout(kHttpTimeoutMs);
+    if (!http.begin(client, url)) {
+      return -1000;
+    }
+    http.addHeader("Content-Type", content_type);
+    if (g_device_id[0] != '\0') {
+      // The token is issued against the main board's MAC; the server checks
+      // that this header matches it.
+      http.addHeader("Device-Id", g_device_id);
+    }
+    if (g_token[0] != '\0') {
+      http.addHeader("Authorization", String("Bearer ") + g_token);
+    } else if (g_url[0] == '\0') {
+      // Only the compiled-in OpenAI route uses the baked key.
+      http.addHeader("Authorization", "Bearer " CAM_VISION_API_KEY);
+    }
+
+    const int status = http.POST(const_cast<uint8_t*>(body), body_len);
+    if (status == 200) {
+      *reply = http.getString();
+    }
+    http.end();
+    return status;
+  };
+
+  if (strncmp(url, "https://", 8) == 0) {
+    NetworkClientSecure client;
+    // Validate against the bundled root store rather than setInsecure(). A
+    // bearer token travels in a header on this connection; skipping validation
+    // would hand it to anyone able to MITM the Wi-Fi.
+    client.setCACertBundle(rootca_crt_bundle_start, static_cast<size_t>(rootca_crt_bundle_end - rootca_crt_bundle_start));
+    client.setTimeout(kHttpTimeoutMs / 1000);
+    return run(client);
+  }
+
+  NetworkClient client;
+  client.setTimeout(kHttpTimeoutMs / 1000);
+  return run(client);
+}
+
+// Read whatever the server chose to call the answer.
+//
+// The xiaozhi endpoint returns {"success":true,"result":"..."}; an
+// OpenAI-compatible gateway returns the text under "content". Upstream
+// xiaozhi-esp32 does not parse this at all - it hands the raw body to the LLM
+// and lets it work the shape out. We cannot: the answer has to fit in one UART
+// line and then be spoken aloud.
+bool ExtractAnswer(const String& body, String* out) {
+  return ExtractString(body, "\"result\"", out) || ExtractString(body, "\"content\"", out) ||
+         ExtractString(body, "\"text\"", out);
+}
+
+// POST the frame to the xiaozhi vision service as multipart/form-data.
+//
+// The field names, the boundary and the header set are copied from upstream
+// xiaozhi-esp32 (main/boards/common/esp32_camera.cc, Esp32Camera::Explain) so
+// the server sees exactly what it sees from a first-party device.
+//
+// One deliberate difference: upstream sends Transfer-Encoding: chunked because
+// it streams JPEG chunks out of an encoder queue as they are produced. We
+// already hold the whole frame, so we send a plain Content-Length body, which
+// is both simpler and one less thing for a proxy to mishandle.
+bool DescribeViaEndpoint(const uint8_t* jpeg, size_t jpeg_len, const char* question, String* out) {
+  const size_t q_len = strlen(question);
+  const size_t cap = jpeg_len + q_len + 512;
+
+  // PSRAM: ~35KB of JPEG plus the envelope does not fit in this chip's internal
+  // DRAM alongside an open socket.
+  uint8_t* body = static_cast<uint8_t*>(ps_malloc(cap));
+  if (body == nullptr) {
+    *out = "out of memory";
     return false;
   }
 
-  size_t jpeg_len = 0;
-  uint8_t* jpeg = CaptureJpeg(&jpeg_len);
-  if (jpeg == nullptr || jpeg_len == 0) {
-    free(jpeg);
-    *out = "capture failed";
+  size_t n = 0;
+  n += snprintf(reinterpret_cast<char*>(body + n), cap - n,
+                "--%s\r\n"
+                "Content-Disposition: form-data; name=\"question\"\r\n"
+                "\r\n"
+                "%s\r\n"
+                "--%s\r\n"
+                "Content-Disposition: form-data; name=\"file\"; filename=\"camera.jpg\"\r\n"
+                "Content-Type: image/jpeg\r\n"
+                "\r\n",
+                kBoundary, question, kBoundary);
+  if (n >= cap) {
+    free(body);
+    *out = "body overflow";
     return false;
   }
-  Serial.printf("[vision] captured %u bytes\n", static_cast<unsigned>(jpeg_len));
 
+  memcpy(body + n, jpeg, jpeg_len);
+  n += jpeg_len;
+
+  const int tail = snprintf(reinterpret_cast<char*>(body + n), cap - n, "\r\n--%s--\r\n", kBoundary);
+  if (tail < 0 || n + static_cast<size_t>(tail) >= cap) {
+    free(body);
+    *out = "body overflow";
+    return false;
+  }
+  n += static_cast<size_t>(tail);
+
+  char content_type[80];
+  snprintf(content_type, sizeof(content_type), "multipart/form-data; boundary=%s", kBoundary);
+
+  const uint32_t t0 = millis();
+  String payload;
+  const int status = PostBody(g_url, content_type, body, n, &payload);
+  free(body);
+
+  if (status != 200) {
+    Serial.printf("[vision] http %d after %lums\n", status, static_cast<unsigned long>(millis() - t0));
+    *out = "api error " + String(status);
+    return false;
+  }
+  Serial.printf("[vision] ok in %lums, %u bytes\n", static_cast<unsigned long>(millis() - t0),
+                static_cast<unsigned>(payload.length()));
+
+  if (!ExtractAnswer(payload, out)) {
+    // Unknown shape. Show it rather than swallow it - this is the one place a
+    // server-side change would otherwise fail silently and look like a camera
+    // fault.
+    Serial.printf("[vision] unrecognised reply shape: %s\n", payload.c_str());
+    *out = "unparseable reply";
+    return false;
+  }
+  out->trim();
+  return true;
+}
+
+// The original route: base64 the frame into an OpenAI chat-completions request.
+// Kept as a fallback for anyone running this cam without a xiaozhi server, and
+// it is what CAM_VISION_ENDPOINT / CAM_VISION_API_KEY in cam_config.h drive.
+//
+// Note this route ignores `question` and always sends CAM_VISION_PROMPT. The
+// prompt is concatenated into the JSON as a string literal, so injecting
+// arbitrary text here would need escaping that the xiaozhi route gets for free
+// from multipart framing. Not worth the risk on a path that is now secondary.
+bool DescribeViaOpenAi(const uint8_t* jpeg, size_t jpeg_len, String* out) {
   const size_t b64_cap = ((jpeg_len + 2) / 3) * 4 + 1;
   const size_t body_cap = b64_cap + sizeof(CAM_VISION_PROMPT) + sizeof(CAM_VISION_MODEL) + 256;
 
-  // Both of these live in PSRAM. ~45KB of base64 plus the JSON around it would
-  // not fit in this chip's internal DRAM alongside the TLS session.
   char* body = static_cast<char*>(ps_malloc(body_cap));
   if (body == nullptr) {
-    free(jpeg);
     *out = "out of memory";
     return false;
   }
@@ -257,14 +400,12 @@ bool Describe(String* out) {
                    "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/jpeg;base64,");
   if (n < 0 || static_cast<size_t>(n) >= body_cap) {
     free(body);
-    free(jpeg);
     *out = "body overflow";
     return false;
   }
 
   size_t written = 0;
   const int rc = mbedtls_base64_encode(reinterpret_cast<unsigned char*>(body + n), body_cap - static_cast<size_t>(n), &written, jpeg, jpeg_len);
-  free(jpeg);
   if (rc != 0) {
     free(body);
     *out = "base64 failed";
@@ -279,47 +420,59 @@ bool Describe(String* out) {
   }
   const size_t body_len = static_cast<size_t>(n) + written + static_cast<size_t>(tail);
 
-  NetworkClientSecure client;
-  // Validate against the bundled root store rather than setInsecure(). The API
-  // key travels in a header on this connection; skipping validation would hand
-  // it to anyone able to MITM the Wi-Fi.
-  client.setCACertBundle(rootca_crt_bundle_start, static_cast<size_t>(rootca_crt_bundle_end - rootca_crt_bundle_start));
-  client.setTimeout(kHttpTimeoutMs / 1000);
-
-  HTTPClient http;
-  http.setTimeout(kHttpTimeoutMs);
-  http.setConnectTimeout(kHttpTimeoutMs);
-  if (!http.begin(client, CAM_VISION_ENDPOINT)) {
-    free(body);
-    *out = "http begin failed";
-    return false;
-  }
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Authorization", "Bearer " CAM_VISION_API_KEY);
-
   const uint32_t t0 = millis();
-  const int status = http.POST(reinterpret_cast<uint8_t*>(body), body_len);
+  String payload;
+  const int status = PostBody(CAM_VISION_ENDPOINT, "application/json", reinterpret_cast<uint8_t*>(body), body_len, &payload);
   free(body);
 
   if (status != 200) {
     Serial.printf("[vision] http %d after %lums\n", status, static_cast<unsigned long>(millis() - t0));
-    http.end();
     *out = "api error " + String(status);
     return false;
   }
-
-  const String payload = http.getString();
-  http.end();
   Serial.printf("[vision] ok in %lums\n", static_cast<unsigned long>(millis() - t0));
 
-  String content;
-  if (!ExtractContent(payload, &content)) {
+  if (!ExtractAnswer(payload, out)) {
     *out = "unparseable reply";
     return false;
   }
-  content.trim();
-  *out = content;
+  out->trim();
   return true;
+}
+
+}  // namespace
+
+void SetEndpoint(const char* url, const char* token, const char* device_id) {
+  snprintf(g_url, sizeof(g_url), "%s", url != nullptr ? url : "");
+  snprintf(g_token, sizeof(g_token), "%s", token != nullptr ? token : "");
+  snprintf(g_device_id, sizeof(g_device_id), "%s", device_id != nullptr ? device_id : "");
+  Serial.printf("[vision] endpoint set: %s (token %s, device %s)\n", g_url[0] ? g_url : "(none)",
+                g_token[0] ? "yes" : "no", g_device_id[0] ? g_device_id : "(none)");
+}
+
+bool HasEndpoint() {
+  return g_url[0] != '\0';
+}
+
+bool Describe(const char* question, String* out) {
+  if (WiFi.status() != WL_CONNECTED) {
+    *out = "wifi down";
+    return false;
+  }
+
+  size_t jpeg_len = 0;
+  uint8_t* jpeg = CaptureJpeg(&jpeg_len);
+  if (jpeg == nullptr || jpeg_len == 0) {
+    free(jpeg);
+    *out = "capture failed";
+    return false;
+  }
+  Serial.printf("[vision] captured %u bytes\n", static_cast<unsigned>(jpeg_len));
+
+  const bool ok = HasEndpoint() ? DescribeViaEndpoint(jpeg, jpeg_len, (question != nullptr && *question != '\0') ? question : CAM_VISION_PROMPT, out)
+                                : DescribeViaOpenAi(jpeg, jpeg_len, out);
+  free(jpeg);
+  return ok;
 }
 
 }  // namespace cam_vision

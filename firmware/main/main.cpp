@@ -879,10 +879,76 @@ void InitMcpTools() {
   // turns it into an answer. The image never crosses this board.
   engine.AddMcpTool("self.camera.look",
                     "Look through the robot's eye camera and describe what is in front of it "
-                    "(这是什么/你看到了什么/看一下/帮我看看/前面是什么). Returns a short description.",
-                    {});
+                    "(这是什么/你看到了什么/看一下/帮我看看/前面是什么). Returns a short description. "
+                    "Set question to what you actually want to know about the scene.",
+                    {
+                        {"question", ai_vox::ParamSchema<std::string>{.default_value = ""}},
+                    });
   engine.AddMcpTool("self.camera.track_on", "Make the robot follow the user with its head (看着我/跟着我/别走神).", {});
   engine.AddMcpTool("self.camera.track_off", "Stop following the user with the head (别看我了/不用跟着我/头别动).", {});
+}
+
+// Reads the quoted value of `key` from `text`, searching in [from, limit).
+// Returns false if the key is not there or the value is not a string.
+//
+// A scanner rather than a cJSON parse: this runs against every inbound text
+// frame, and the heap on this board has been logged down to a 2,036 byte
+// largest free block. The two values we want are a URL and a UUID, neither of
+// which can contain an escape, so there is nothing to unescape.
+bool ReadJsonString(const std::string& text, size_t from, size_t limit, const char* key, std::string* out) {
+  const size_t k = text.find(key, from);
+  if (k == std::string::npos || k >= limit) {
+    return false;
+  }
+  size_t i = text.find('"', k + strlen(key));  // opening quote of the value
+  if (i == std::string::npos || i >= limit) {
+    return false;
+  }
+  ++i;
+  const size_t end = text.find('"', i);
+  if (end == std::string::npos) {
+    return false;
+  }
+  out->assign(text, i, end - i);
+  return !out->empty();
+}
+
+// The server tells us where its own vision service is, in the params of the
+// MCP `initialize` call:
+//
+//   {"type":"mcp","payload":{"jsonrpc":"2.0","method":"initialize","params":{
+//      ... "capabilities":{"vision":{"url":"http://.../vision/explain",
+//                                    "token":"<uuid>"}}}}}
+//
+// EngineImpl::OnMcpJsonObj parses `initialize` only far enough to build its
+// reply - it never looks at the incoming params - so this is thrown away on
+// every connect. Picking it up here means the camera board needs no API key of
+// its own: the account that already pays for the assistant pays for the
+// picture too, and the URL is plain http, so the cam needs no TLS either.
+//
+// Read off the raw text frame because main.cpp already receives every one
+// verbatim for logging. That keeps the engine untouched.
+void MaybeAdoptVisionEndpoint(const std::string& text) {
+  // Cheap reject for the tts/stt/llm frames, which are the overwhelming
+  // majority and allocate nothing on this path.
+  if (text.find("\"initialize\"") == std::string::npos) {
+    return;
+  }
+  const size_t v = text.find("\"vision\"");
+  if (v == std::string::npos) {
+    return;
+  }
+  // Bound the search so a "token" belonging to some later capability cannot be
+  // paired with the vision url.
+  const size_t limit = std::min(v + 400, text.size());
+
+  std::string url;
+  if (!ReadJsonString(text, v, limit, "\"url\"", &url)) {
+    return;
+  }
+  std::string token;
+  ReadJsonString(text, v, limit, "\"token\"", &token);  // optional
+  CamLink::GetInstance().SetVisionEndpoint(url.c_str(), token.c_str());
 }
 }  // namespace
 
@@ -1084,6 +1150,7 @@ void loop() {
   for (auto& event : events) {
     if (auto text_received_event = std::get_if<ai_vox::TextReceivedEvent>(&event)) {
       printf("on text received: %s\n", text_received_event->content.c_str());
+      MaybeAdoptVisionEndpoint(text_received_event->content);
     } else if (auto activation_event = std::get_if<ai_vox::ActivationEvent>(&event)) {
       printf("activation code: %s, message: %s\n", activation_event->code.c_str(), activation_event->message.c_str());
       g_display->ShowStatus("激活设备");
@@ -1201,7 +1268,8 @@ void loop() {
         // capture, upload and recognise; the id is parked and redeemed at the
         // top of a later loop() pass. Answering now would mean answering
         // before we know anything.
-        if (!cam.RequestLook(mcp_tool_call_event->id)) {
+        const auto question_ptr = mcp_tool_call_event->param<std::string>("question");
+        if (!cam.RequestLook(mcp_tool_call_event->id, question_ptr != nullptr ? question_ptr->c_str() : nullptr)) {
           engine.SendMcpCallError(mcp_tool_call_event->id,
                                   cam.IsPresent() ? "Camera is already busy" : "Camera not connected");
         } else if (g_display) {
