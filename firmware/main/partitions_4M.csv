@@ -1,6 +1,20 @@
 # Name,   Type, SubType, Offset,  Size, Flags
+#
+# The 896KB spiffs partition that used to sit between app0 and coredump has been
+# removed and its space folded into app0. Nothing ever mounted it - there is no
+# SPIFFS, LittleFS, FFat or esp_vfs_fat call anywhere in firmware/main or src -
+# so it was 917,504 bytes of flash reserved for nothing while the application
+# was at 93.6% of its 3MB slot.
+#
+# There is also only one app slot, so this is not an OTA layout: the sole
+# esp_ota_ call in the tree is esp_ota_get_running_partition() in
+# fetch_config.cpp, which only reads metadata. otadata is kept because it costs
+# 8KB and removing it would invalidate anything already written there.
+#
+# nvs deliberately stays at 0x9000 with the same size. It holds the Wi-Fi
+# credentials and the saved volume, and leaving it untouched means reflashing
+# this table does not make the user set the device up again.
 nvs,      data, nvs,     0x9000,  0x5000,
 otadata,  data, ota,     0xe000,  0x2000,
-app0,     app,  ota_0,   0x10000, 0x300000,
-spiffs,   data, spiffs,  0x310000,0xE0000,
+app0,     app,  ota_0,   0x10000, 0x3E0000,
 coredump, data, coredump,0x3F0000,0x10000,
