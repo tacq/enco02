@@ -39,6 +39,7 @@ class WebWifiConfigurator {
   String ssid_;
   String password_;
   bool configured_ = false;
+  bool running_ = false;
 };
 
 #endif  // _WEB_WIFI_CONFIGURATOR_H_

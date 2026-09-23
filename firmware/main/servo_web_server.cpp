@@ -467,8 +467,10 @@ void ServoWebServer::Stop() {
   if (!running_) {
     return;
   }
+  MDNS.end();
   if (server_) {
     server_->stop();
+    server_->close();
     server_.reset();
   }
   running_ = false;

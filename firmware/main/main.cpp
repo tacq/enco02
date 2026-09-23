@@ -373,13 +373,15 @@ void ConfigureWifi() {
   printf("wifi config start with hardcoded wifi: %s, %s\n", WIFI_SSID, WIFI_PASSWORD);
   wifi_configurator->Start(WIFI_SSID, WIFI_PASSWORD);
 #else
-  Preferences prefs;
-  prefs.begin("WiFiConnector", false);
   String saved_ssid = "";
-  if (prefs.isKey("ssid")) {
-    saved_ssid = prefs.getString("ssid");
+  {
+    Preferences prefs;
+    prefs.begin("WiFiConnector", true);
+    if (prefs.isKey("ssid")) {
+      saved_ssid = prefs.getString("ssid");
+    }
+    prefs.end();
   }
-  prefs.end();
 
   if (saved_ssid.length() > 0) {
     printf("wifi config start with saved wifi: %s\n", saved_ssid.c_str());
@@ -387,27 +389,31 @@ void ConfigureWifi() {
     char msg[128];
     snprintf(msg, sizeof(msg), "正在连接已保存网络:\n%s", saved_ssid.c_str());
     g_display->SetChatMessage(Display::Role::kSystem, msg);
+    saved_ssid = String();
     wifi_configurator->Start();
   } else {
-    // Start SoftAP Web Config Mode (xiaozhi-xxxx)
-    WebWifiConfigurator web_config;
-    String ap_name = web_config.StartApAndServer();
+    {
+      // Start SoftAP Web Config Mode (xiaozhi-xxxx) and fully destroy the
+      // WebServer + SoftAP before starting STA connection.
+      WebWifiConfigurator web_config;
+      String ap_name = web_config.StartApAndServer();
 
-    g_display->ShowStatus("热点配网模式");
-    PlayMp3(kNetworkConfigModeMp3, sizeof(kNetworkConfigModeMp3));
+      g_display->ShowStatus("热点配网模式");
+      PlayMp3(kNetworkConfigModeMp3, sizeof(kNetworkConfigModeMp3));
 
-    char msg[160];
-    snprintf(msg, sizeof(msg), "【Wi-Fi 配网模式】\n1. 连接手机热点:\n   %s\n2. 浏览器打开:\n   192.168.4.1", ap_name.c_str());
-    g_display->SetChatMessage(Display::Role::kSystem, msg);
+      char msg[160];
+      snprintf(msg, sizeof(msg), "【Wi-Fi 配网模式】\n1. 连接手机热点:\n   %s\n2. 浏览器打开:\n   192.168.4.1", ap_name.c_str());
+      g_display->SetChatMessage(Display::Role::kSystem, msg);
 
-    while (!web_config.IsConfigured()) {
-      web_config.HandleClient();
-      delay(2);
+      while (!web_config.IsConfigured()) {
+        web_config.HandleClient();
+        delay(2);
+      }
+
+      g_display->ShowStatus("保存成功，连接中");
+      g_display->SetChatMessage(Display::Role::kSystem, "Wi-Fi设置成功！\n正在连接网络，请稍候...");
+      web_config.Stop();
     }
-
-    g_display->ShowStatus("保存成功，连接中");
-    g_display->SetChatMessage(Display::Role::kSystem, "Wi-Fi设置成功！\n正在连接网络，请稍候...");
-    web_config.Stop();
     delay(200);
 
     wifi_configurator->Start();
@@ -427,6 +433,11 @@ void ConfigureWifi() {
       break;
     }
   }
+  // Free SmartConfig event handlers, queue, event group, and any scan cache
+  // immediately once Wi-Fi has connected.
+  wifi_configurator.reset();
+  WiFi.scanDelete();
+  WiFi.mode(WIFI_STA);
 
   printf("wifi connected\n");
   printf("- mac address: %s\n", WiFi.macAddress().c_str());
@@ -1115,6 +1126,7 @@ bool OpenCameraView(bool transient, const char** why = nullptr) {
     }
     return true;
   }
+  ServoWebServer::GetInstance().Stop();
   if (!g_display->EnterCameraView()) {
     printf("camera view: display refused (free heap %u)\n", static_cast<unsigned>(esp_get_free_heap_size()));
     if (why) *why = "Not enough memory for the camera view";

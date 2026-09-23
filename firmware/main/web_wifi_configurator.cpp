@@ -99,16 +99,30 @@ String WebWifiConfigurator::StartApAndServer() {
 
   printf("[WebWifi] HTTP server started on port 80\n");
   configured_ = false;
+  running_ = true;
   return ap_ssid_;
 }
 
 void WebWifiConfigurator::HandleClient() {
-  server_.handleClient();
+  if (running_) {
+    server_.handleClient();
+  }
 }
 
 void WebWifiConfigurator::Stop() {
+  if (!running_) {
+    return;
+  }
+  running_ = false;
   server_.stop();
+  server_.close();
+  WiFi.scanDelete();
   WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  ap_ssid_ = String();
+  ssid_ = String();
+  password_ = String();
+  printf("[WebWifi] Provisioning server and SoftAP stopped\n");
 }
 
 void WebWifiConfigurator::HandleRoot() {
@@ -125,6 +139,7 @@ void WebWifiConfigurator::HandleRoot() {
       }
     }
   }
+  WiFi.scanDelete();
 
   page += FPSTR(kIndexHtmlFooter);
   server_.send(200, "text/html", page);
