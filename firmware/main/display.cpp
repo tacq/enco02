@@ -835,35 +835,81 @@ void Display::ShowAlert(const char* title, const char* body, const uint32_t dura
       return;
     }
 
-    // Compact floating top-toast banner: auto-height (LV_SIZE_CONTENT) and positioned right below
-    // the status bar so it never blocks the character's eyes/mouth with a fixed oversized box.
+    // Right-hand square-ish sci-fi HUD alert box (144x148 at x=92, y=40) with a protruding
+    // top-left amber folder tab, horizontal telemetry rules, and a bottom warning badge.
     alert_card_ = lv_obj_create(lv_screen_active());
-    lv_obj_set_pos(alert_card_, 12, 28);
-    lv_obj_set_size(alert_card_, 216, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(alert_card_, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(alert_card_, 2, 0);
-    lv_obj_set_style_pad_top(alert_card_, 6, 0);
-    lv_obj_set_style_pad_bottom(alert_card_, 6, 0);
-    lv_obj_set_style_pad_left(alert_card_, 10, 0);
-    lv_obj_set_style_pad_right(alert_card_, 10, 0);
-    lv_obj_set_style_radius(alert_card_, 8, 0);
-    lv_obj_set_style_bg_color(alert_card_, lv_color_hex(0x1a1206), 0);
-    lv_obj_set_style_bg_opa(alert_card_, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(alert_card_, 1, 0);
-    lv_obj_set_style_border_color(alert_card_, current_theme_.jarvis_gold, 0);
+    lv_obj_set_pos(alert_card_, 92, 40);
+    lv_obj_set_size(alert_card_, 144, 148);
+    lv_obj_set_style_pad_all(alert_card_, 0, 0);
+    lv_obj_set_style_bg_opa(alert_card_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(alert_card_, 0, 0);
     lv_obj_clear_flag(alert_card_, LV_OBJ_FLAG_SCROLLABLE);
 
-    alert_title_ = lv_label_create(alert_card_);
-    lv_obj_set_width(alert_title_, 194);
-    lv_obj_set_style_text_font(alert_title_, &font_puhui_16_4, 0);
-    lv_obj_set_style_text_color(alert_title_, current_theme_.jarvis_gold, 0);
-    lv_label_set_long_mode(alert_title_, LV_LABEL_LONG_WRAP);
+    // Protruding top-left solid orange sci-fi tab (matching reference HUD)
+    lv_obj_t* tab = lv_label_create(alert_card_);
+    lv_obj_set_pos(tab, 0, 0);
+    lv_obj_set_size(tab, 78, 15);
+    lv_obj_set_style_radius(tab, 2, 0);
+    lv_obj_set_style_bg_color(tab, lv_color_hex(0xF59E0B), 0);
+    lv_obj_set_style_bg_opa(tab, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_left(tab, 5, 0);
+    lv_obj_set_style_pad_top(tab, 0, 0);
+    lv_obj_set_style_text_font(tab, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(tab, lv_color_hex(0x180E02), 0);
+    lv_label_set_text(tab, "[+] ALERT");
 
-    alert_body_ = lv_label_create(alert_card_);
-    lv_obj_set_width(alert_body_, 194);
+    // Main square-ish dark amber holographic frame (144x135 below the tab)
+    lv_obj_t* frame = lv_obj_create(alert_card_);
+    lv_obj_set_pos(frame, 0, 13);
+    lv_obj_set_size(frame, 144, 135);
+    lv_obj_set_style_radius(frame, 2, 0);
+    lv_obj_set_style_pad_all(frame, 0, 0);
+    lv_obj_set_style_bg_color(frame, lv_color_hex(0x231405), 0);
+    lv_obj_set_style_bg_opa(frame, 235, 0);
+    lv_obj_set_style_border_width(frame, 2, 0);
+    lv_obj_set_style_border_color(frame, lv_color_hex(0xF59E0B), 0);
+    lv_obj_set_style_shadow_width(frame, 8, 0);
+    lv_obj_set_style_shadow_color(frame, lv_color_hex(0xF59E0B), 0);
+    lv_obj_set_style_shadow_opa(frame, LV_OPA_30, 0);
+    lv_obj_clear_flag(frame, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Header title with bottom amber divider rule
+    alert_title_ = lv_label_create(frame);
+    lv_obj_set_pos(alert_title_, 7, 5);
+    lv_obj_set_size(alert_title_, 126, 23);
+    lv_obj_set_style_text_font(alert_title_, &font_puhui_16_4, 0);
+    lv_obj_set_style_text_color(alert_title_, lv_color_hex(0xFFB830), 0);
+    lv_obj_set_style_border_side(alert_title_, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_width(alert_title_, 1, 0);
+    lv_obj_set_style_border_color(alert_title_, lv_color_hex(0x9A5B0A), 0);
+    lv_label_set_long_mode(alert_title_, LV_LABEL_LONG_DOT);
+
+    // Body text area (up to 3 wrapped lines) with bottom telemetry divider rule
+    alert_body_ = lv_label_create(frame);
+    lv_obj_set_pos(alert_body_, 7, 32);
+    lv_obj_set_size(alert_body_, 126, 72);
     lv_obj_set_style_text_font(alert_body_, &font_puhui_16_4, 0);
-    lv_obj_set_style_text_color(alert_body_, current_theme_.assistant_text, 0);
+    lv_obj_set_style_text_color(alert_body_, lv_color_hex(0xFFF0D4), 0);
+    lv_obj_set_style_border_side(alert_body_, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_width(alert_body_, 1, 0);
+    lv_obj_set_style_border_color(alert_body_, lv_color_hex(0x6B3E07), 0);
     lv_label_set_long_mode(alert_body_, LV_LABEL_LONG_WRAP);
+
+    // Bottom sci-fi warning badge + telemetry readout
+    lv_obj_t* footer = lv_label_create(frame);
+    lv_obj_set_pos(footer, 7, 109);
+    lv_obj_set_size(footer, 126, 18);
+    lv_obj_set_style_radius(footer, 2, 0);
+    lv_obj_set_style_bg_color(footer, lv_color_hex(0x3A2006), 0);
+    lv_obj_set_style_bg_opa(footer, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_side(footer, LV_BORDER_SIDE_LEFT, 0);
+    lv_obj_set_style_border_width(footer, 18, 0);
+    lv_obj_set_style_border_color(footer, lv_color_hex(0xF59E0B), 0);
+    lv_obj_set_style_pad_left(footer, 6, 0);
+    lv_obj_set_style_pad_top(footer, 1, 0);
+    lv_obj_set_style_text_font(footer, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(footer, lv_color_hex(0xFFB830), 0);
+    lv_label_set_text(footer, "!  SYS // DATA");
   }
 
   // A second alert rewrites the card and resets its opacity and auto-dismiss timer rather than
