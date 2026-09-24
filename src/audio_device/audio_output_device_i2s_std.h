@@ -143,7 +143,7 @@ class AudioOutputDeviceI2sStd : public AudioOutputDevice {
   const gpio_num_t pin_bclk_ = I2S_GPIO_UNUSED;
   const gpio_num_t pin_ws_ = I2S_GPIO_UNUSED;
   const gpio_num_t pin_dout_ = I2S_GPIO_UNUSED;
-  std::atomic<uint16_t> volume_ = 70;
+  std::atomic<uint16_t> volume_ = 20;
   std::atomic<int32_t> volume_factor_ = pow(double(volume_) / 100.0, 2) * 65536;
   uint32_t sample_rate_ = 0;
 };

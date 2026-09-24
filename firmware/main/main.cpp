@@ -499,25 +499,12 @@ uint16_t AdjustVolume(const int delta) {
 }
 
 void LoadSavedVolume() {
-  Preferences prefs;
-  if (!prefs.begin(kVolumePrefsNamespace, true)) {
-    g_audio_output_device->set_volume(80);
-    if (g_display) {
-      g_display->ShowVolume(80);
-    }
-    return;
-  }
-  uint16_t saved = prefs.getUShort(kVolumePrefsKey, 80);
-  prefs.end();
-  if (saved < 40) {
-    saved = 80;
-  }
-  g_audio_output_device->set_volume(std::min<uint16_t>(saved, ai_vox::AudioOutputDevice::kMaxVolume));
-  // Not via SetVolume(): the value just came *out* of NVS, so there is nothing to write back.
+  constexpr uint16_t kDefaultInitialVolume = 20;
+  g_audio_output_device->set_volume(kDefaultInitialVolume);
   if (g_display) {
     g_display->ShowVolume(g_audio_output_device->volume());
   }
-  printf("[volume] restored to %u\n", static_cast<unsigned>(g_audio_output_device->volume()));
+  printf("[volume] initialized to %u%%\n", static_cast<unsigned>(g_audio_output_device->volume()));
 }
 
 void FlushVolumeToNvs() {
@@ -871,15 +858,15 @@ constexpr uint32_t kAwakeIdleTimeoutMs = 120000;  // Return to Standby Companion
 
 bool g_awake_session = false;
 uint32_t g_last_active_turn_ms = 0;
-uint8_t g_saved_wake_volume = 80;
+uint8_t g_saved_wake_volume = 20;
 bool g_standby_muted = false;
 uint32_t g_next_idle_head_ms = 0;
 uint32_t g_next_idle_face_ms = 0;
 
 void RestoreWakeVolume() {
   if (g_audio_output_device) {
-    const uint16_t target = (g_saved_wake_volume >= 40) ? g_saved_wake_volume : 80;
-    if (g_standby_muted || g_audio_output_device->volume() < 40) {
+    const uint16_t target = (g_saved_wake_volume > 0) ? g_saved_wake_volume : 20;
+    if (g_standby_muted || g_audio_output_device->volume() == 0) {
       g_audio_output_device->set_volume(target);
       if (g_display) {
         g_display->ShowVolume(target);
@@ -893,7 +880,7 @@ void RestoreWakeVolume() {
 void MuteForStandby() {
   if (g_audio_output_device) {
     const uint8_t cur = g_audio_output_device->volume();
-    if (cur >= 40) {
+    if (cur > 0) {
       g_saved_wake_volume = cur;
     }
     g_audio_output_device->set_volume(0);
