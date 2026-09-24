@@ -1236,14 +1236,14 @@ bool CheckAndExecuteTimerFallback(const std::string& query) {
 void InitMcpTools() {
   auto& engine = ai_vox::Engine::GetInstance();
 
-  engine.AddMcpTool("self.head.look_up", "Make robot look up (抬头/仰头/往上看/向上看/看天花板).", {});
-  engine.AddMcpTool("self.head.look_down", "Make robot look down (低头/俯视/往下看/向下看/看地面).", {});
-  engine.AddMcpTool("self.head.tilt_left", "Tilt robot head left (向左歪头/左偏头/左倾).", {});
-  engine.AddMcpTool("self.head.tilt_right", "Tilt robot head right (向右歪头/右偏头/右倾).", {});
-  engine.AddMcpTool("self.head.turn_left", "Turn robot head left (向左转头/往左看/左转).", {});
-  engine.AddMcpTool("self.head.turn_right", "Turn robot head right (向右转头/往右看/右转).", {});
-  engine.AddMcpTool("self.head.bobble", "Cute head bobble and shake (摇头/摇摇头/摇头晃脑/不要/卖萌).", {});
-  engine.AddMcpTool("self.head.center", "Reset head to look straight forward (头摆正/正视/头复位/向前看).", {});
+  engine.AddMcpTool("self.head.look_up", "Look up (抬头/往上看).", {});
+  engine.AddMcpTool("self.head.look_down", "Look down (低头/往下看).", {});
+  engine.AddMcpTool("self.head.tilt_left", "Tilt head left (向左歪头).", {});
+  engine.AddMcpTool("self.head.tilt_right", "Tilt head right (向右歪头).", {});
+  engine.AddMcpTool("self.head.turn_left", "Turn head left (向左转头/往左看).", {});
+  engine.AddMcpTool("self.head.turn_right", "Turn head right (向右转头/往右看).", {});
+  engine.AddMcpTool("self.head.bobble", "Head bobble and shake (摇头/摇头晃脑/不要).", {});
+  engine.AddMcpTool("self.head.center", "Head straight forward (头摆正/向前看).", {});
 
   engine.AddMcpTool("self.audio_speaker.set_volume", "Set speaker volume 0-100 (调整音量).", {
     {"volume", ai_vox::ParamSchema<int64_t>{.default_value = std::nullopt, .min = 0, .max = 100}},
@@ -1260,6 +1260,15 @@ void InitMcpTools() {
     {"mode", ai_vox::ParamSchema<std::string>{.default_value = "face"}},
   });
   engine.AddMcpTool("self.screen.toggle_mode", "Toggle screen mode between face and chat (切换屏幕显示模式).", {});
+
+  // Facial expressions drawn into the character art (tools/face_assets). One tool, one string
+  // param, terse text: every tool adds to the tools/list payload sent at session start.
+  engine.AddMcpTool("self.face.expression",
+                    "Make a facial expression (做表情). name: happy开心 sad难过 wink眨眼 pout嘟嘴卖萌 "
+                    "surprised惊讶 angry生气 shy害羞 thinking思考 neutral恢复",
+                    {
+                        {"name", ai_vox::ParamSchema<std::string>{.default_value = "happy"}},
+                    });
 
   // The countdown lives on the device, so these have to be tools rather than something the model
   // keeps in its head - the session does not outlive the turn that created it.
@@ -1320,35 +1329,26 @@ void InitMcpTools() {
   // sentence. That sentence becomes this tool's result, and the model upstream
   // turns it into an answer. The image never crosses this board.
   engine.AddMcpTool("self.camera.look",
-                    "Look through the robot's eye camera and describe what is in front of it or in the user's hand "
-                    "(这是什么/我手里拿的是什么/看看我手里是什么/你看到了什么/看一下/帮我看看/前面是什么/what is in my hand). "
-                    "Returns a short description. Set question to what you actually want to know about the scene.",
+                    "Look through the camera; describe what is ahead or in the user's hand "
+                    "(这是什么/看看我手里/你看到了什么). question: what to find out.",
                     {
                         {"question", ai_vox::ParamSchema<std::string>{.default_value = ""}},
                     });
   // Tracking is OFF at boot and after every restart. These two are the only way
   // to turn it on by voice; the other way is to hold up one finger, which the
   // cam spots by itself and reports as a G line.
-  engine.AddMcpTool("self.camera.track_on",
-                    "Start following the user's head with the robot's head, using the camera "
-                    "(开启跟踪/开始跟踪/打开跟踪/跟踪模式/看着我/跟着我/别走神/start tracking/follow me). "
-                    "The head turns, nods and tilts to match the user until tracking is stopped.",
-                    {});
-  engine.AddMcpTool("self.camera.track_off",
-                    "Stop following the user and hold the head still "
-                    "(关闭跟踪/停止跟踪/结束跟踪/不要跟踪了/别看我了/不用跟着我/头别动/stop tracking).",
-                    {});
+  //
+  // These descriptions used to list half a dozen synonyms each. The model maps
+  // intent perfectly well from two, and the tool list has to fit its 5120-byte
+  // reservation (ai_vox_mcp_tool_manager.h) - past that it doubles to 10KB of
+  // heap for the rest of the session.
+  engine.AddMcpTool("self.camera.track_on", "Head follows the user via camera (开启跟踪/看着我/跟着我).", {});
+  engine.AddMcpTool("self.camera.track_off", "Stop head tracking (停止跟踪/别看我了).", {});
   // The viewfinder. Separate from look: this one shows the user what the robot
   // sees and leaves it on screen, rather than taking a single picture and going
   // away again. It replaces the character on the display while it is up.
-  engine.AddMcpTool("self.camera.view_on",
-                    "Show the live camera picture on the robot's screen "
-                    "(打开摄像头/开摄像头/显示摄像头/看看摄像头画面/我想看看你看到什么/show the camera).",
-                    {});
-  engine.AddMcpTool("self.camera.view_off",
-                    "Close the camera picture and go back to the robot's face "
-                    "(关闭摄像头/关掉摄像头/退出摄像头/不看了/close the camera).",
-                    {});
+  engine.AddMcpTool("self.camera.view_on", "Show the live camera picture on screen (打开摄像头).", {});
+  engine.AddMcpTool("self.camera.view_off", "Close the camera picture, back to the face (关闭摄像头/不看了).", {});
 }
 
 // Reads the quoted value of `key` from `text`, searching in [from, limit).
@@ -2280,6 +2280,22 @@ void loop() {
           ServoController::GetInstance().MoveAngleSmooth(static_cast<int>(*pin_ptr), static_cast<float>(*angle_ptr));
         } else {
           engine.SendMcpCallError(mcp_tool_call_event->id, "Missing pin or angle");
+        }
+      } else if (matches("self.face.expression", "expression")) {
+        std::string name = "happy";
+        if (const auto p = mcp_tool_call_event->param<std::string>("name")) name = *p;
+        // Showing a face on a hidden face is no answer: bring the character back from chat mode.
+        // The camera view is left alone - the user opened it on purpose.
+        if (g_display->GetUiMode() == Display::UiMode::kChatText) {
+          g_display->SetUiMode(Display::UiMode::kRobotFace);
+        }
+        const bool ok = g_display->ShowExpression(name, 4000, true);
+        printf("on mcp tool call: face.expression %s -> %s\n", name.c_str(), ok ? "ok" : "unknown");
+        if (ok) {
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        } else {
+          engine.SendMcpCallError(mcp_tool_call_event->id,
+                                  "unknown name; use happy sad wink pout surprised angry shy thinking neutral");
         }
       } else if (matches("self.screen.set_mode", "set_mode")) {
         if (g_display && g_display->InCameraView()) {

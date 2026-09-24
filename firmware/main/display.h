@@ -92,6 +92,15 @@ class Display {
   UiMode GetUiMode() const { return ui_mode_; }
   void ToggleUiMode();
   void UpdateRobotFaceEmotion(const std::string& emotion);
+  // Puts a named facial expression on the character - one of enco_face_exprs[] (happy, sad, wink,
+  // pout, surprised, angry, shy, thinking) - and holds it for `hold_ms` of *quiet* time: the clock
+  // only runs while she is not speaking, so an expression asked for by voice is still on screen
+  // after the spoken acknowledgement. While she speaks the lips still move; the expression's own
+  // mouth shows between syllables. "neutral"/"none" clears it. Returns false for unknown names.
+  //
+  // `pinned` marks an explicit request (the MCP tool). The assistant's own per-reply emotion then
+  // cannot replace it until it has run its course.
+  bool ShowExpression(const std::string& name, uint32_t hold_ms, bool pinned);
   void LookDirection(const char* dir);
   // Creates the handful of LVGL objects that make up the bitmap character. Safe to call more than
   // once; the pixels themselves live in flash, so this costs well under 2KB of heap.
@@ -199,6 +208,15 @@ class Display {
   uint32_t next_blink_tick_ = 0;  // when the next blink starts
   uint8_t blink_frame_ = 0;       // 0 = eyes open, otherwise a step in the blink sequence
   bool mouth_open_ = false;       // true while PCM is actually reaching the speaker
+  // Active expression: index into enco_face_exprs[], or -1. The hold counts down in face ticks,
+  // and only while the speaker is quiet - see ShowExpression().
+  int8_t expr_index_ = -1;
+  bool expr_pinned_ = false;
+  uint16_t expr_quiet_ticks_ = 0;
+  // What the eye and mouth overlays currently show (nullptr = hidden). ApplyMouthFrame() runs every
+  // tick; setting an unchanged source would still invalidate and repaint the whole sprite.
+  const void* eyes_src_ = nullptr;
+  const void* mouth_src_ = nullptr;
   uint32_t next_hair_tick_ = 0;   // when the next random hair breeze starts
   uint8_t hair_step_ = 0;         // 0 = hair at rest, otherwise 1-based step in the breeze sequence
   uint8_t hair_pattern_ = 0;      // which breeze pattern is playing

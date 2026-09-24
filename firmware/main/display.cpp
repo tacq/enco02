@@ -12,7 +12,6 @@
 #include "esp_lvgl_port.h"
 #include "face_assets.h"
 #include "font_awesome_symbols.h"
-#include "lv_i4_decoder.h"
 #include "core/audio_playback_signal.h"
 #include "display.h"
 #include "video_sink.h"
@@ -108,16 +107,16 @@ Display::Display(esp_lcd_panel_io_handle_t panel_io,
 
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
   lv_init();
-  // The character portrait is a 16-colour image; LVGL's own decoder would expand it to 307KB of
-  // ARGB8888 in RAM, so register the streaming one before anything can try to draw it.
-  enco_i4_decoder_init();
+  // The character portrait and its sprites are RGB565 C arrays. LVGL's built-in decoder hands
+  // those to the renderer in place, straight out of flash, so no custom decoder is needed.
 
   lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
   port_cfg.task_priority = 2;
   port_cfg.timer_period_ms = 20;
-  // Left at the vendor default of 7168. Trimming this to 6144 was measured on-device to leave only
-  // 836 bytes of margin once the chat UI was busy (peak usage 5,308), which is not worth 1KB.
-  port_cfg.task_stack = 7168;
+  // Measured on-device with the RGB565 portrait: peak 7,312 bytes while talking (LVGL's built-in
+  // image decoder path runs deeper than the old streaming I4 one, and the vendor default of 7168
+  // overflowed at boot). 8704 leaves ~1.4KB of margin.
+  port_cfg.task_stack = 8704;
   lvgl_port_init(&port_cfg);
 
   const lvgl_port_display_cfg_t display_cfg = {
@@ -303,12 +302,12 @@ void Display::Start() {
   lvgl_port_unlock();
 }
 
-// Builds the bitmap character. The picture itself is a 240x320 16-colour image that is streamed
-// straight out of flash by the decoder in lv_i4_decoder.c, so the only heap cost here is the
-// handful of LVGL widget structs. Caller must already hold the LVGL lock.
+// Builds the bitmap character. The picture itself is a 240x320 RGB565 image that LVGL reads
+// straight out of flash, so the only heap cost here is the handful of LVGL widget structs.
+// Caller must already hold the LVGL lock.
 //
 // Animation is deliberately done by swapping small sprites over the eyes and mouth rather than by
-// redrawing the whole portrait: a blink only dirties a 120x59 rectangle, which is about 3% of the
+// redrawing the whole portrait: a blink only dirties a ~116x30 rectangle, a few percent of the
 // pixels a full refresh would push over the SPI bus.
 void Display::BuildRobotFace() {
   if (face_built_) {
@@ -322,7 +321,8 @@ void Display::BuildRobotFace() {
   lv_obj_set_flex_grow(face_container_, 1);
   lv_obj_set_style_pad_all(face_container_, 0, 0);
   lv_obj_set_style_border_width(face_container_, 0, 0);
-  // Matches palette entry 0 of the portrait, so the strip below the image is seamless with it.
+  // Matches the portrait's backdrop (the builder snaps it to this exact colour), so the strip below
+  // the image is seamless with it.
   lv_obj_set_style_bg_color(face_container_, lv_color_hex(0x0c1121), 0);
   lv_obj_set_style_bg_opa(face_container_, LV_OPA_COVER, 0);
   lv_obj_set_scrollbar_mode(face_container_, LV_SCROLLBAR_MODE_OFF);
@@ -338,8 +338,9 @@ void Display::BuildRobotFace() {
   lv_image_set_src(face_image_, &enco_face_base);
   lv_obj_set_pos(face_image_, 0, 0);
 
-  // All overlays are opaque crops sharing the base portrait's 16-colour palette, so they composite
-  // over the base with no seam. Hidden means "use whatever the base already shows there". Hair is
+  // All overlays are opaque crops of frames that are bit-identical to the base outside the changed
+  // feature, so they composite over it with no seam. Hidden means "use whatever the base already
+  // shows there". Hair is
   // created before the eyes and mouth so blinking and speaking always sit above it in z-order.
   bangs_overlay_ = lv_image_create(face_container_);
   lv_image_set_src(bangs_overlay_, &enco_face_bangs_lhalf);
@@ -1101,6 +1102,28 @@ void Display::SetEmotion(const std::string& emotion) {
   }
 
   UpdateRobotFaceEmotion(emotion);
+
+  // The same emotion on her face. The server's 21 moods fold onto the 8 drawn expressions; the
+  // understated ones (neutral, relaxed, confident, sleepy) leave the face alone, and a mood that
+  // arrives while an expression is showing replaces it. Held for 2.5s once she stops talking.
+  struct EmotionFace {
+    const char* emotion;
+    const char* face;
+  };
+  static constexpr EmotionFace kFaces[] = {
+      {"happy", "happy"},         {"laughing", "happy"},      {"funny", "happy"},
+      {"delicious", "happy"},     {"sad", "sad"},             {"crying", "sad"},
+      {"winking", "wink"},        {"silly", "wink"},          {"cool", "wink"},
+      {"kissy", "pout"},          {"loving", "pout"},         {"surprised", "surprised"},
+      {"shocked", "surprised"},   {"angry", "angry"},         {"embarrassed", "shy"},
+      {"thinking", "thinking"},   {"confused", "thinking"},
+  };
+  for (const auto& entry : kFaces) {
+    if (emotion == entry.emotion) {
+      ShowExpression(entry.face, 2500, false);
+      break;
+    }
+  }
   lvgl_port_unlock();
 }
 
@@ -1328,12 +1351,9 @@ void Display::BuildCameraView() {
   // the panel acted as a window onto the middle of her face and cut off the top
   // of her head and her chin.
   //
-  // It cannot be fixed with lv_image_set_scale(). Scaling runs through LVGL's
-  // transform path, which needs the whole bitmap at once, and this portrait is
-  // drawn by the streaming I4 decoder in lv_i4_decoder.c - it leaves
-  // dsc->decoded NULL and hands back one row per call, so lv_draw_sw_img.c
-  // would take src_w/src_h from a 1-pixel-tall slice and apply the transform to
-  // each row independently. The shrink is baked at build time instead; see
+  // It is shrunk at build time rather than with lv_image_set_scale(): scaling
+  // at runtime goes through LVGL's transform path, which needs scratch buffers
+  // this heap cannot spare while the camera is streaming. See
   // tools/face_assets/build_face_assets.py.
   auto* avatar_box = lv_obj_create(cam_container_);
   lv_obj_set_pos(avatar_box, 152, kBottomY);
@@ -1505,9 +1525,45 @@ void Display::UpdateRobotFaceEmotion(const std::string& emotion) {
   lvgl_port_unlock();
 }
 
+bool Display::ShowExpression(const std::string& name, uint32_t hold_ms, bool pinned) {
+  int8_t index = -1;
+  const bool clear = name.empty() || name == "neutral" || name == "none";
+  if (!clear) {
+    for (int8_t i = 0; i < ENCO_FACE_EXPR_COUNT; i++) {
+      if (name == enco_face_exprs[i].name) {
+        index = i;
+        break;
+      }
+    }
+    if (index < 0) {
+      return false;
+    }
+  }
+
+  lvgl_port_lock(0);
+  if (!pinned && expr_pinned_ && expr_index_ >= 0) {
+    lvgl_port_unlock();
+    return true;  // An explicit request is still showing; the assistant's mood can wait.
+  }
+  expr_index_ = index;
+  expr_pinned_ = pinned && index >= 0;
+  const uint32_t ticks = hold_ms / kFaceTickMs;
+  expr_quiet_ticks_ = static_cast<uint16_t>(ticks > 0xFFFF ? 0xFFFF : ticks);
+  if (current_emotion_ != "sleepy") {
+    blink_frame_ = 0;  // Never leave a half-finished blink over the new eyes.
+  }
+  if (index < 0) {
+    next_blink_tick_ = face_tick_ + kBlinkMinTicks;
+  }
+  ApplyBlinkFrame();
+  ApplyMouthFrame();
+  lvgl_port_unlock();
+  return true;
+}
+
 void Display::LookDirection(const char* dir) {
   (void)dir;
-  // Keep the 240x240 I4 base portrait and its cropped overlays (eyes, bangs, mouth) strictly at
+  // Keep the base portrait and its cropped overlays (eyes, bangs, mouth) strictly at
   // (0, 0). Shifting the base portrait by +/-4px causes partial-redraw misalignment between
   // eyes_overlay_ and face_image_ on the ST7789 panel; physical head motion is handled by the
   // 3-DOF servos instead.
@@ -1544,37 +1600,51 @@ void Display::ApplyHeadOffset(int dx, int dy) {
   }
 }
 
+// Points an overlay at `dsc`, or hides it for nullptr, but only if that is not already what it
+// shows: LVGL invalidates an image on every lv_image_set_src(), even to the same source.
+static void SetSprite(lv_obj_t* obj, const lv_image_dsc_t* dsc, const void** shown) {
+  if (*shown == dsc) {
+    return;
+  }
+  *shown = dsc;
+  if (dsc == nullptr) {
+    lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  lv_image_set_src(obj, dsc);
+  lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
+}
+
 void Display::ApplyBlinkFrame() {
   if (eyes_overlay_ == nullptr) {
     return;
   }
-  if (blink_frame_ == 0) {
-    lv_obj_add_flag(eyes_overlay_, LV_OBJ_FLAG_HIDDEN);  // Base portrait already has open eyes.
-    return;
+  const lv_image_dsc_t* dsc = nullptr;  // Base portrait already has open eyes.
+  if (blink_frame_ != 0) {
+    dsc = blink_frame_ == kBlinkFrameShut ? &enco_face_eyes_shut : &enco_face_eyes_half;
+  } else if (expr_index_ >= 0) {
+    dsc = enco_face_exprs[expr_index_].eyes;
   }
-  lv_image_set_src(eyes_overlay_,
-                   blink_frame_ == kBlinkFrameShut ? &enco_face_eyes_shut : &enco_face_eyes_half);
-  lv_obj_clear_flag(eyes_overlay_, LV_OBJ_FLAG_HIDDEN);
+  SetSprite(eyes_overlay_, dsc, &eyes_src_);
 }
 
 void Display::ApplyMouthFrame() {
   if (mouth_overlay_ == nullptr) {
     return;
   }
+  // Between syllables, and whenever she is quiet, the mouth rests: on the base portrait's soft
+  // smile, or on the active expression's mouth.
+  const lv_image_dsc_t* rest = expr_index_ >= 0 ? enco_face_exprs[expr_index_].mouth : nullptr;
   if (!mouth_open_) {
-    lv_obj_add_flag(mouth_overlay_, LV_OBJ_FLAG_HIDDEN);  // Back to the base portrait's soft smile.
+    SetSprite(mouth_overlay_, rest, &mouth_src_);
     return;
   }
   // A closed / small / wide cycle reads as speech without needing to know anything about the audio.
   // The irregular pattern stops it looking like a metronome.
   static const uint8_t kMouthCycle[] = {1, 2, 1, 0, 2, 1, 2, 0};
   const uint8_t frame = kMouthCycle[(face_tick_ / 2) % (sizeof(kMouthCycle) / sizeof(kMouthCycle[0]))];
-  if (frame == 0) {
-    lv_obj_add_flag(mouth_overlay_, LV_OBJ_FLAG_HIDDEN);
-    return;
-  }
-  lv_image_set_src(mouth_overlay_, frame == 2 ? &enco_face_mouth_wide : &enco_face_mouth_small);
-  lv_obj_clear_flag(mouth_overlay_, LV_OBJ_FLAG_HIDDEN);
+  const lv_image_dsc_t* dsc = frame == 0 ? rest : (frame == 2 ? &enco_face_mouth_wide : &enco_face_mouth_small);
+  SetSprite(mouth_overlay_, dsc, &mouth_src_);
 }
 
 void Display::ApplyHairFrame() {
@@ -1687,8 +1757,9 @@ void Display::OnFaceTimer(lv_timer_t* timer) {
 
   // --- Blink -------------------------------------------------------------------------------
   // Runs open -> half -> shut -> shut -> half -> open, i.e. about 240ms lid-down, then waits a
-  // randomised few seconds so it never looks mechanical.
-  if (self->current_emotion_ != "sleepy") {
+  // randomised few seconds so it never looks mechanical. An expression owns the eyes while it is
+  // up (a blink would briefly swap in the neutral lids), so blinking pauses until it clears.
+  if (self->current_emotion_ != "sleepy" && self->expr_index_ < 0) {
     if (self->blink_frame_ != 0) {
       const uint8_t next = self->blink_frame_ + 1;
       self->blink_frame_ = next > kBlinkFrameLast ? 0 : next;
@@ -1724,6 +1795,20 @@ void Display::OnFaceTimer(lv_timer_t* timer) {
   // keeps the lips in step with the speaker when a servo command is answered in the same turn.
   self->mouth_open_ = audio_playback_signal::IsPlaying(kMouthHoldMs);
   self->ApplyMouthFrame();
+
+  // --- Expression hold ---------------------------------------------------------------------
+  // Counts only quiet ticks, so a spoken reply never eats the time the expression was asked for.
+  if (self->expr_index_ >= 0 && !self->mouth_open_) {
+    if (self->expr_quiet_ticks_ > 0) {
+      self->expr_quiet_ticks_--;
+    } else {
+      self->expr_index_ = -1;
+      self->expr_pinned_ = false;
+      self->next_blink_tick_ = self->face_tick_ + kBlinkMinTicks;
+      self->ApplyBlinkFrame();
+      self->ApplyMouthFrame();
+    }
+  }
 
   // No automatic idle sway. Shifting the portrait repositions every overlay and invalidates the
   // whole 240x240 screen at once, which on this panel reads as the character twitching sideways

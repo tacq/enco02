@@ -277,3 +277,43 @@ def emit_c(fh, name, indices, palette, w, h):
     fh.write(f"    .data = {name}_map,\n")
     fh.write("};\n")
     return len(body)
+
+
+def to565(c):
+    r, g, b = c
+    return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+
+
+def from565(v):
+    """What the panel actually shows for a 565 value, expanded back to 8 bits per channel."""
+    r5, g6, b5 = v >> 11, (v >> 5) & 0x3F, v & 0x1F
+    return ((r5 << 3) | (r5 >> 2), (g6 << 2) | (g6 >> 4), (b5 << 3) | (b5 >> 2))
+
+
+def emit_c_rgb565(fh, name, rgb, w, h):
+    """Emit `rgb` (flat list of (r,g,b)) as a native little-endian RGB565 lv_image_dsc_t.
+
+    LVGL's built-in bin decoder hands a variable RGB565 image straight to the renderer - the
+    pixels are read from flash in place, nothing is copied into RAM.
+    """
+    body = bytearray()
+    for c in rgb:
+        v = to565(c)
+        body += bytes((v & 0xFF, v >> 8))
+    fh.write(f"\n// {name}: {w}x{h} RGB565, {len(body)} bytes\n")
+    fh.write(f"static const LV_ATTRIBUTE_LARGE_CONST uint8_t {name}_map[] "
+             "__attribute__((aligned(4))) = {\n")
+    for i in range(0, len(body), 16):
+        fh.write("    " + "".join(f"0x{b:02x}," for b in body[i:i + 16]) + "\n")
+    fh.write("};\n\n")
+    fh.write(f"const lv_image_dsc_t {name} = {{\n")
+    fh.write("    .header.magic = LV_IMAGE_HEADER_MAGIC,\n")
+    fh.write("    .header.cf = LV_COLOR_FORMAT_RGB565,\n")
+    fh.write("    .header.flags = 0,\n")
+    fh.write(f"    .header.w = {w},\n")
+    fh.write(f"    .header.h = {h},\n")
+    fh.write(f"    .header.stride = {w * 2},\n")
+    fh.write(f"    .data_size = sizeof({name}_map),\n")
+    fh.write(f"    .data = {name}_map,\n")
+    fh.write("};\n")
+    return len(body)

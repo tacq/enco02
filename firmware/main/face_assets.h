@@ -11,29 +11,46 @@ extern "C" {
 #define ENCO_FACE_H 320
 
 // Overlay sprites are positioned at these offsets inside the base image.
-#define ENCO_FACE_EYES_X 64
-#define ENCO_FACE_EYES_Y 114
-#define ENCO_FACE_MOUTH_X 96
-#define ENCO_FACE_MOUTH_Y 163
-#define ENCO_FACE_BANGS_X 70
-#define ENCO_FACE_BANGS_Y 66
-#define ENCO_FACE_LOCKS_L_X 10
+#define ENCO_FACE_EYES_X 62
+#define ENCO_FACE_EYES_Y 100
+#define ENCO_FACE_MOUTH_X 68
+#define ENCO_FACE_MOUTH_Y 158
+#define ENCO_FACE_BANGS_X 64
+#define ENCO_FACE_BANGS_Y 58
+#define ENCO_FACE_LOCKS_L_X 8
 #define ENCO_FACE_LOCKS_L_Y 104
-#define ENCO_FACE_LOCKS_R_X 156
+#define ENCO_FACE_LOCKS_R_X 152
 #define ENCO_FACE_LOCKS_R_Y 104
 
-// Pre-scaled bust for the camera HUD's side panel. Baked at build time because
-// the streaming I4 decoder cannot be scaled at runtime - see the note in
-// build_face_assets.py.
+// Pre-scaled bust for the camera HUD's side panel, baked at build time.
 #define ENCO_FACE_THUMB_W 82
 #define ENCO_FACE_THUMB_H 86
 
 extern const lv_image_dsc_t enco_face_base;
 extern const lv_image_dsc_t enco_face_thumb;
+
+// Blink, lip-sync and expression sprites. Eye sprites sit at ENCO_FACE_EYES_*,
+// mouth sprites at ENCO_FACE_MOUTH_*.
 extern const lv_image_dsc_t enco_face_eyes_half;
 extern const lv_image_dsc_t enco_face_eyes_shut;
 extern const lv_image_dsc_t enco_face_mouth_small;
 extern const lv_image_dsc_t enco_face_mouth_wide;
+extern const lv_image_dsc_t enco_face_expr_happy_eyes;
+extern const lv_image_dsc_t enco_face_expr_happy_mouth;
+extern const lv_image_dsc_t enco_face_expr_sad_eyes;
+extern const lv_image_dsc_t enco_face_expr_sad_mouth;
+extern const lv_image_dsc_t enco_face_expr_wink_eyes;
+extern const lv_image_dsc_t enco_face_expr_wink_mouth;
+extern const lv_image_dsc_t enco_face_expr_pout_eyes;
+extern const lv_image_dsc_t enco_face_expr_pout_mouth;
+extern const lv_image_dsc_t enco_face_expr_surprised_eyes;
+extern const lv_image_dsc_t enco_face_expr_surprised_mouth;
+extern const lv_image_dsc_t enco_face_expr_angry_eyes;
+extern const lv_image_dsc_t enco_face_expr_angry_mouth;
+extern const lv_image_dsc_t enco_face_expr_shy_eyes;
+extern const lv_image_dsc_t enco_face_expr_shy_mouth;
+extern const lv_image_dsc_t enco_face_expr_thinking_eyes;
+extern const lv_image_dsc_t enco_face_expr_thinking_mouth;
 
 // Hair sway frames, ordered from full-left to full-right.
 extern const lv_image_dsc_t enco_face_bangs_left;
@@ -48,6 +65,16 @@ extern const lv_image_dsc_t enco_face_locks_r_left;
 extern const lv_image_dsc_t enco_face_locks_r_lhalf;
 extern const lv_image_dsc_t enco_face_locks_r_rhalf;
 extern const lv_image_dsc_t enco_face_locks_r_right;
+
+// Named facial expressions: an eyes sprite and a mouth sprite each.
+typedef struct {
+  const char* name;
+  const lv_image_dsc_t* eyes;
+  const lv_image_dsc_t* mouth;
+} enco_face_expr_t;
+
+#define ENCO_FACE_EXPR_COUNT 8
+extern const enco_face_expr_t enco_face_exprs[ENCO_FACE_EXPR_COUNT];
 
 #ifdef __cplusplus
 }

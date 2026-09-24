@@ -668,6 +668,10 @@ void EngineImpl::OnMcpJsonObj(cJSON *root_json_obj) {
     response += ",\"result\":{\"tools\":[";
     response += tools_body;
     response += "]}}}";
+    // Tool additions are checked against this: the body lives in a 5120-byte reservation (see
+    // ai_vox_mcp_tool_manager.h), and outgrowing it doubles the allocation.
+    printf("[mcp] tools/list %u bytes (body %u of %u reserved)\n", static_cast<unsigned>(response.size()),
+           static_cast<unsigned>(tools_body.size()), static_cast<unsigned>(tools_body.capacity()));
     SendTextInternal(std::move(response));
   } else if (*method == "tools/call") {
     auto params_json_obj = cJSON_GetObjectItem(root_json_obj, "params");
