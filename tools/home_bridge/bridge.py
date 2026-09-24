@@ -189,19 +189,31 @@ def summarize(status: dict[str, Any]) -> tuple[str, str]:
     pool_sp = _num(get("pool_set").get("target_temperature"))
     spa_sp = _num(get("spa_set").get("target_temperature"))
     pool_pump, spa_pump = on("pool_pump"), on("spa_pump")
+    panel_f = str(get("pool_set").get("unit") or get("spa_set").get("unit") or "F").upper() == "F"
+
+    def c(t: int) -> str:
+        """Panel value -> '22.8°C' (whole numbers drop the decimal)."""
+        v = round((t - 32) * 5 / 9, 1) if panel_f else float(t)
+        return f"{v:g}°C"
+
+    def c_short(t: int | None) -> str:
+        if t is None:
+            return "--"
+        return f"{round((t - 32) * 5 / 9) if panel_f else t}°"
 
     def water(t: int | None, pump: bool | None) -> str:
         if t is not None:
-            return f"{t}°F"
+            return c(t)
         return "暂无读数(水泵未运行)" if pump is False else "暂无读数"
 
     def setpoint(sp: int | None) -> str:
         if sp is None:
             return "设定温度未知"
-        return "未设定温度" if sp <= SETPOINT_OFF_F else f"设定{sp}°F"
+        off_threshold = SETPOINT_OFF_F if panel_f else round((SETPOINT_OFF_F - 32) * 5 / 9)
+        return "未设定温度" if sp <= off_threshold else f"设定{c(sp)}"
 
     speech_parts = [
-        f"气温{air}°F" if air is not None else "气温暂无读数",
+        f"气温{c(air)}" if air is not None else "气温暂无读数",
         f"泳池水温{water(pool_t, pool_pump)}",
         f"SPA水温{water(spa_t, spa_pump)}",
         f"泳池水泵{onoff('pool_pump')}",
@@ -212,15 +224,12 @@ def summarize(status: dict[str, Any]) -> tuple[str, str]:
         f"SPA灯{onoff('spa_light')}",
         f"清洁机{onoff('cleaner')}",
     ]
-    speech = "泳池状态：" + "；".join(speech_parts) + "。"
-
-    def short(t: int | None) -> str:
-        return f"{t}°" if t is not None else "--"
+    speech = "泳池状态(摄氏度)：" + "；".join(speech_parts) + "。"
 
     any_heat = any(heater(h) != "关" for h in ("pool_heater", "spa_heater"))
     toast = "\n".join([
-        f"气温 {short(air)}F",
-        f"池 {short(pool_t)} SPA {short(spa_t)}",
+        f"气温 {c_short(air)}C",
+        f"池 {c_short(pool_t)} SPA {c_short(spa_t)}",
         f"泵{'开' if (pool_pump or spa_pump) else '关'} 热{'开' if any_heat else '关'}",
     ])
     return toast, speech
