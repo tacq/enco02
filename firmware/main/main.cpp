@@ -739,6 +739,24 @@ void NotificationTick() {
   }
 }
 
+// Pool toasts are held until the spoken answer ends. Painting the card while TTS streams in took
+// the largest free block to ~2KB and WiFi (which wants 2308-byte buffers) stalled mid-sentence.
+std::string g_pool_toast_title;
+std::string g_pool_toast_body;
+
+void QueuePoolToast(const char* title, const std::string& body) {
+  if (body.empty()) return;
+  g_pool_toast_title = title;
+  g_pool_toast_body = body;
+}
+
+void FlushPoolToast() {
+  if (g_pool_toast_body.empty()) return;
+  ShowNotification(g_pool_toast_title.c_str(), g_pool_toast_body.c_str(), 8000);
+  std::string().swap(g_pool_toast_title);
+  std::string().swap(g_pool_toast_body);
+}
+
 // "5分钟" / "1小时30分钟". Only ever spoken, never displayed.
 std::string DescribeDuration(const uint32_t total_seconds) {
   const unsigned hours = static_cast<unsigned>(total_seconds / 3600);
@@ -1274,15 +1292,14 @@ void InitMcpTools() {
   // home_config.h is present, so boards without a bridge don't pay the tool-list heap. The model
   // only ever sees this name and the summary text; the iAqualink credentials never leave the LAN.
   if (home_bridge::Configured()) {
-    engine.AddMcpTool("self.home.pool_status", "Pool/spa status: water+air temp, pumps, heaters, lights (泳池/SPA状态/水温).", {});
-    // Control goes through the bridge's allow-list; values are °F. Kept terse for heap (see above).
-    engine.AddMcpTool("self.home.pool_set",
-                      "Control pool/spa. target: pool_pump(filter pump)|spa_pump(spa mode)|pool_heater|spa_heater|"
-                      "pool_light|spa_light|cleaner (action on/off); pool_set|spa_set (action set, value in F).",
+    // One tool, one string param: the per-tool/per-param JSON in the session tool list is what
+    // costs heap. A two-tool, four-param version pushed the list to 5479 bytes; its send then
+    // failed on a busy heap, with WiFi then starved during the spoken answer.
+    engine.AddMcpTool("self.home.pool",
+                      "泳池/SPA. cmd: status | <dev> on|off | pool_set|spa_set <F>. dev: pool_pump(filter) "
+                      "spa_pump(spa mode) pool_heater spa_heater pool_light spa_light cleaner",
                       {
-                          {"target", ai_vox::ParamSchema<std::string>{.default_value = std::nullopt}},
-                          {"action", ai_vox::ParamSchema<std::string>{.default_value = std::nullopt}},
-                          {"value", ai_vox::ParamSchema<int64_t>{.default_value = 0, .min = 0, .max = 104}},
+                          {"cmd", ai_vox::ParamSchema<std::string>{.default_value = "status"}},
                       });
   }
 
@@ -1897,6 +1914,7 @@ void loop() {
             g_display->ShowStatus("待命 · 叫 \"安可\" 唤醒");
           }
           LogHeap("listening");
+          FlushPoolToast();
           break;
         }
         case ai_vox::ChatState::kSpeaking: {
@@ -2302,65 +2320,80 @@ void loop() {
         ClearNotification();
         printf("on mcp tool call: screen.notify_clear (was visible: %d)\n", static_cast<int>(was_visible));
         engine.SendMcpCallResponse(mcp_tool_call_event->id, was_visible);
-      } else if (matches("self.home.pool_status", "pool_status")) {
+      } else if (matches("self.home.pool", "pool")) {
         // Blocking LAN call (bounded by timeouts in home_bridge_client). Audio and LVGL run on
         // their own tasks, so only event processing waits - and the assistant is waiting for this
         // result anyway.
-        std::string toast;
-        std::string speech;
-        const bool ok = home_bridge::FetchPoolSummary(toast, speech);
-        printf("on mcp tool call: home.pool_status -> %s\n", ok ? "ok" : speech.c_str());
-        if (ok) {
-          if (!toast.empty()) {
-            ShowNotification("泳池状态", toast.c_str(), 8000);
-          }
-          engine.SendMcpCallResponse(mcp_tool_call_event->id, speech);
-        } else {
-          engine.SendMcpCallError(mcp_tool_call_event->id, speech.c_str());
-        }
-      } else if (matches("self.home.pool_set", "pool_set")) {
-        const auto target_ptr = mcp_tool_call_event->param<std::string>("target");
-        const auto action_ptr = mcp_tool_call_event->param<std::string>("action");
-        const auto value_ptr = mcp_tool_call_event->param<int64_t>("value");
-        const std::string target = target_ptr != nullptr ? *target_ptr : std::string();
-        const std::string action = action_ptr != nullptr ? *action_ptr : std::string();
-        const int value = value_ptr != nullptr ? static_cast<int>(*value_ptr) : 0;
-        std::string err;
-        if (!home_bridge::ValidatePoolSet(target, action, value, err)) {
-          printf("on mcp tool call: home.pool_set rejected: %s\n", err.c_str());
-          engine.SendMcpCallError(mcp_tool_call_event->id, err.c_str());
-        } else {
-          // Turning a heater on burns gas/electricity for hours, so it needs an explicit yes in a
-          // later user turn. The first call parks the request; the model asks; a repeat of the same
-          // call after the user answered executes it. Everything else runs straight away.
-          const bool needs_confirm = action == "on" && target.find("_heater") != std::string::npos;
-          const std::string key = target + "|" + action + "|" + std::to_string(value);
-          const bool confirmed = needs_confirm && g_pool_pending_key == key &&
-                                 millis() - g_pool_pending_ms < 60000 &&
-                                 g_user_turn_seq != g_pool_pending_turn && !IsNegativeReply(user_said);
-          if (needs_confirm && !confirmed) {
-            g_pool_pending_key = key;
-            g_pool_pending_ms = millis();
-            g_pool_pending_turn = g_user_turn_seq;
-            printf("on mcp tool call: home.pool_set %s awaiting confirmation\n", key.c_str());
-            engine.SendMcpCallResponse(
-                mcp_tool_call_event->id,
-                std::string("NOT DONE yet. Ask the user: 确认打开") + home_bridge::PoolTargetNameZh(target) +
-                    "吗？ Only if they agree, call pool_set again with the same arguments.");
-          } else {
-            g_pool_pending_key.clear();
-            if (g_display) g_display->ShowStatus("泳池控制中...");
-            std::string toast;
-            std::string speech;
-            const bool ok = home_bridge::PoolSet(target, action, value, toast, speech);
-            printf("on mcp tool call: home.pool_set %s -> %s\n", key.c_str(), ok ? "ok" : speech.c_str());
-            if (!toast.empty()) {
-              ShowNotification("泳池控制", toast.c_str(), 8000);
+        //
+        // cmd: "status" | "<target> on|off" | "pool_set|spa_set <F>". One string instead of three
+        // schema entries keeps the session tool list small (see the heap note at registration).
+        std::string cmd;
+        if (const auto p = mcp_tool_call_event->param<std::string>("cmd")) cmd = *p;
+        std::string target;
+        std::string action;
+        int value = 0;
+        {
+          size_t a = cmd.find_first_not_of(' ');
+          size_t b = a == std::string::npos ? a : cmd.find(' ', a);
+          if (a != std::string::npos) target = cmd.substr(a, b == std::string::npos ? b : b - a);
+          if (b != std::string::npos) {
+            a = cmd.find_first_not_of(' ', b);
+            if (a != std::string::npos) {
+              action = cmd.substr(a, cmd.find(' ', a) == std::string::npos ? std::string::npos : cmd.find(' ', a) - a);
             }
-            if (ok) {
-              engine.SendMcpCallResponse(mcp_tool_call_event->id, speech);
+          }
+          if (!action.empty() && isdigit(static_cast<unsigned char>(action[0]))) {
+            value = atoi(action.c_str());
+            action = "set";
+          }
+        }
+        if (target.empty() || target == "status") {
+          std::string toast;
+          std::string speech;
+          const bool ok = home_bridge::FetchPoolSummary(toast, speech);
+          printf("on mcp tool call: home.pool status -> %s\n", ok ? "ok" : speech.c_str());
+          if (ok) {
+            QueuePoolToast("泳池状态", toast);
+            engine.SendMcpCallResponse(mcp_tool_call_event->id, speech);
+          } else {
+            engine.SendMcpCallError(mcp_tool_call_event->id, speech.c_str());
+          }
+        } else {
+          std::string err;
+          if (!home_bridge::ValidatePoolSet(target, action, value, err)) {
+            printf("on mcp tool call: home.pool '%s' rejected: %s\n", cmd.c_str(), err.c_str());
+            engine.SendMcpCallError(mcp_tool_call_event->id, err.c_str());
+          } else {
+            // Turning a heater on burns gas/electricity for hours, so it needs an explicit yes in a
+            // later user turn. The first call parks the request; the model asks; a repeat of the same
+            // call after the user answered executes it. Everything else runs straight away.
+            const bool needs_confirm = action == "on" && target.find("_heater") != std::string::npos;
+            const std::string key = target + "|" + action + "|" + std::to_string(value);
+            const bool confirmed = needs_confirm && g_pool_pending_key == key &&
+                                   millis() - g_pool_pending_ms < 60000 &&
+                                   g_user_turn_seq != g_pool_pending_turn && !IsNegativeReply(user_said);
+            if (needs_confirm && !confirmed) {
+              g_pool_pending_key = key;
+              g_pool_pending_ms = millis();
+              g_pool_pending_turn = g_user_turn_seq;
+              printf("on mcp tool call: home.pool %s awaiting confirmation\n", key.c_str());
+              engine.SendMcpCallResponse(
+                  mcp_tool_call_event->id,
+                  std::string("NOT DONE yet. Ask the user: 确认打开") + home_bridge::PoolTargetNameZh(target) +
+                      "吗？ Only if they agree, call again with the same cmd.");
             } else {
-              engine.SendMcpCallError(mcp_tool_call_event->id, speech.c_str());
+              g_pool_pending_key.clear();
+              if (g_display) g_display->ShowStatus("泳池控制中...");
+              std::string toast;
+              std::string speech;
+              const bool ok = home_bridge::PoolSet(target, action, value, toast, speech);
+              printf("on mcp tool call: home.pool %s -> %s\n", key.c_str(), ok ? "ok" : speech.c_str());
+              QueuePoolToast("泳池控制", toast);
+              if (ok) {
+                engine.SendMcpCallResponse(mcp_tool_call_event->id, speech);
+              } else {
+                engine.SendMcpCallError(mcp_tool_call_event->id, speech.c_str());
+              }
             }
           }
         }
