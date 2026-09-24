@@ -93,7 +93,9 @@ class AudioOutputDeviceI2sStd : public AudioOutputDevice {
     // Everything audible goes through here - TTS replies and the boot / notification clips alike -
     // which makes it the one honest answer to "is the speaker making a sound right now". The UI
     // reads this to drive the character's mouth; see core/audio_playback_signal.h.
-    audio_playback_signal::NotifyPcmWritten();
+    if (volume_factor_ > 0) {
+      audio_playback_signal::NotifyPcmWritten();
+    }
 
     // This runs ~17-50 times a second for the whole duration of every reply. The previous
     // implementation allocated a std::vector<int32_t> of `samples` entries per call (5.7KB for a

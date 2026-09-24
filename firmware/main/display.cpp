@@ -46,7 +46,8 @@ static constexpr uint32_t kHairGapSpreadTicks = 40;  // up to a further 3.2s
 // room to explain it. Both routes named here are real: WakeNet runs continuously (see
 // EngineImpl::OnWakeUp), and the boot button is wired to Engine::Advance(), which starts a session
 // from standby and interrupts her while she is talking.
-static constexpr const char* kIdleCaption = "待命中\n按键或唤醒词开始对话";
+static constexpr const char* kIdleCaption = "待命中 · 说 \"Hi 安可\" 唤醒";
+static bool s_has_active_chat_subtitle = false;
 
 // Sci-Fi HUD Jarvis Theme Color Definitions
 #define SCI_FI_BG_COLOR lv_color_hex(0x060c14)             // Deep space holographic dark
@@ -414,6 +415,11 @@ void Display::SetChatMessage(const Role role, const std::string& content) {
   // one small buffer, not two new widgets; it is not what puts the board under pressure.
   if (subtitle_label_ != nullptr) {
     lvgl_port_lock(0);
+    s_has_active_chat_subtitle = true;
+    if (subtitle_box_ != nullptr) {
+      lv_obj_clear_flag(subtitle_box_, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_clear_flag(subtitle_label_, LV_OBJ_FLAG_HIDDEN);
     if (role == Role::kUser) {
       lv_label_set_text(subtitle_label_, ("你: " + content).c_str());
     } else if (role == Role::kAssistant) {
@@ -619,9 +625,12 @@ void Display::ShowStatus(const char* status) {
 
   if (subtitle_label_ != nullptr) {
     if (s == "聆听中") {
-      lv_label_set_text(subtitle_label_, "正在聆听你的指令...");
+      if (!s_has_active_chat_subtitle) {
+        lv_label_set_text(subtitle_label_, "正在聆听你的指令...");
+      }
       UpdateRobotFaceEmotion("neutral");
-    } else if (s == "待命") {
+    } else if (s.find("待命") == 0) {
+      s_has_active_chat_subtitle = false;
       lv_label_set_text(subtitle_label_, kIdleCaption);
       UpdateRobotFaceEmotion("neutral");
     } else if (s == "连接中...") {

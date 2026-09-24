@@ -501,10 +501,17 @@ uint16_t AdjustVolume(const int delta) {
 void LoadSavedVolume() {
   Preferences prefs;
   if (!prefs.begin(kVolumePrefsNamespace, true)) {
-    return;  // Namespace does not exist yet: first boot, keep the device's built-in default.
+    g_audio_output_device->set_volume(80);
+    if (g_display) {
+      g_display->ShowVolume(80);
+    }
+    return;
   }
-  const uint16_t saved = prefs.getUShort(kVolumePrefsKey, g_audio_output_device->volume());
+  uint16_t saved = prefs.getUShort(kVolumePrefsKey, 80);
   prefs.end();
+  if (saved < 40) {
+    saved = 80;
+  }
   g_audio_output_device->set_volume(std::min<uint16_t>(saved, ai_vox::AudioOutputDevice::kMaxVolume));
   // Not via SetVolume(): the value just came *out* of NVS, so there is nothing to write back.
   if (g_display) {
@@ -514,14 +521,19 @@ void LoadSavedVolume() {
 }
 
 void FlushVolumeToNvs() {
+  const uint16_t vol = g_audio_output_device ? g_audio_output_device->volume() : 0;
+  if (vol == 0) {
+    g_volume_dirty = false;
+    return;
+  }
   Preferences prefs;
   if (!prefs.begin(kVolumePrefsNamespace, false)) {
     return;
   }
-  prefs.putUShort(kVolumePrefsKey, g_audio_output_device->volume());
+  prefs.putUShort(kVolumePrefsKey, vol);
   prefs.end();
   g_volume_dirty = false;
-  printf("[volume] saved %u\n", static_cast<unsigned>(g_audio_output_device->volume()));
+  printf("[volume] saved %u\n", static_cast<unsigned>(vol));
 }
 
 // The cloud model decides for itself whether to emit an MCP tool call, and for a bare "大声点" it
@@ -866,8 +878,13 @@ uint32_t g_next_idle_face_ms = 0;
 
 void RestoreWakeVolume() {
   if (g_audio_output_device) {
-    if (g_standby_muted || g_audio_output_device->volume() == 0) {
-      g_audio_output_device->set_volume(g_saved_wake_volume > 0 ? g_saved_wake_volume : 80);
+    const uint16_t target = (g_saved_wake_volume >= 40) ? g_saved_wake_volume : 80;
+    if (g_standby_muted || g_audio_output_device->volume() < 40) {
+      g_audio_output_device->set_volume(target);
+      if (g_display) {
+        g_display->ShowVolume(target);
+      }
+      printf("[wake] speaker volume restored to %u\n", static_cast<unsigned>(target));
     }
     g_standby_muted = false;
   }
@@ -876,7 +893,7 @@ void RestoreWakeVolume() {
 void MuteForStandby() {
   if (g_audio_output_device) {
     const uint8_t cur = g_audio_output_device->volume();
-    if (cur > 0) {
+    if (cur >= 40) {
       g_saved_wake_volume = cur;
     }
     g_audio_output_device->set_volume(0);
@@ -1821,13 +1838,12 @@ void loop() {
         }
         case ai_vox::ChatState::kSpeaking: {
           printf("Speaking...\n");
-          if (g_awake_session) {
+          if (!g_awake_session) {
+            WakeUpSession("聆听中");
+          } else {
             g_last_active_turn_ms = millis();
             RestoreWakeVolume();
-            g_display->ShowStatus("说话中");
-          } else {
-            MuteForStandby();
-            g_display->ShowStatus("待命 · 叫 \"安可\" 唤醒");
+            g_display->ShowStatus("聆听中");
           }
           break;
         }
@@ -1845,7 +1861,10 @@ void loop() {
         case ai_vox::ChatRole::kAssistant: {
           printf("role: assistant, content: %s\n", chat_message_event->content.c_str());
           if (!g_awake_session) {
-            break;
+            WakeUpSession("聆听中");
+          } else {
+            RestoreWakeVolume();
+            g_display->ShowStatus("聆听中");
           }
           g_last_active_turn_ms = millis();
           g_display->SetChatMessage(Display::Role::kAssistant, chat_message_event->content);
@@ -1866,17 +1885,17 @@ void loop() {
         case ai_vox::ChatRole::kUser: {
           printf("role: user, content: %s\n", chat_message_event->content.c_str());
           if (!g_awake_session) {
-            if (IsWakeWordOrDirectCommand(chat_message_event->content)) {
-              printf("[wake] Wake word or direct command confirmed ('%s') -> entering active listening mode!\n",
+            if (IsWakeWordOrDirectCommand(chat_message_event->content) || !chat_message_event->content.empty()) {
+              printf("[wake] User speech detected ('%s') -> entering active listening mode!\n",
                      chat_message_event->content.c_str());
               WakeUpSession("聆听中");
             } else {
-              printf("[wake] Ignored non-wake utterance in standby ('%s')\n",
-                     chat_message_event->content.c_str());
               break;
             }
           } else {
             g_last_active_turn_ms = millis();
+            RestoreWakeVolume();
+            g_display->ShowStatus("聆听中");
           }
           g_display->SetChatMessage(Display::Role::kUser, chat_message_event->content);
           g_last_user_query = chat_message_event->content;
