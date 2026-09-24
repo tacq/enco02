@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy to pool_config.json. 'device' values come from `python bridge.py discover`. Only targets listed here are controllable. Temperatures are in the system's unit (usually F).",
+  "system_serial": null,
+  "targets": {
+    "pool_pump":   { "kind": "switch",     "device": "pool_pump" },
+    "pool_heater": { "kind": "switch",     "device": "pool_heater" },
+    "spa_heater":  { "kind": "switch",     "device": "spa_heater" },
+    "pool_temp":   { "kind": "thermostat", "device": "pool_set_point", "min": 70, "max": 90 },
+    "spa_temp":    { "kind": "thermostat", "device": "spa_set_point",  "min": 80, "max": 104 }
+  }
+}

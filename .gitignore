@@ -10,3 +10,8 @@ tools/face_assets/build/
 # Wi-Fi password and vision API key for the camera board.
 # Copy firmware/cam/cam_config.h.example and fill it in.
 firmware/cam/cam_config.h
+
+# Smart-home bridge: credentials, device map (contains serials) and venv stay local only.
+tools/home_bridge/.env
+tools/home_bridge/pool_config.json
+tools/home_bridge/.venv/
