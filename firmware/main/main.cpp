@@ -1111,15 +1111,6 @@ void TimerTick() {
         g_display->ShowTimerFinished();
         g_display->UpdateRobotFaceEmotion("surprised");
       }
-      // Show the sci-fi HUD alert card on the right side of the screen, including the specific
-      // event the user asked to be reminded of (e.g. "5秒时间到\n事项：喝水").
-      std::string body = DescribeDuration(g_timer_total_seconds) + "时间到";
-      if (!g_timer_event_note.empty()) {
-        body += "\n提醒：" + g_timer_event_note;
-      } else {
-        body += "\n定时已结束";
-      }
-      ShowNotification("定时提醒 // 触发", body.c_str(), 10000);
     } else {
       // Round up, so a five minute timer reads 05:00 for its first second rather than 04:59.
       const int32_t remaining = (remaining_ms + 999) / 1000;
@@ -1385,6 +1376,19 @@ bool g_cam_view_frozen = false;
 uint32_t g_cam_view_deadline_ms = 0;
 uint32_t g_cam_view_stat_ms = 0;
 uint16_t g_cam_view_last_frames = 0;
+// The viewfinder was frozen by the heap guard, not by a look or by the user. Only the guard may
+// thaw it again, and only once there is memory to spare.
+bool g_cam_view_low_heap_hold = false;
+uint32_t g_cam_view_heap_check_ms = 0;
+
+// Measured on this board with the viewfinder up: the JPEG pool (4KB) plus the camera HUD (2.4KB)
+// plus the UART ring leave the WiFi/mbedTLS stack short of the ~1.4KB blocks it needs for a TLS
+// record, so esp_websocket_client dies with sock_errno 12 (ENOMEM) mid-session and every spoken
+// command after that goes nowhere. Freeze the stream before it gets that far.
+constexpr size_t kCamFreezeFreeHeap = 24000;
+constexpr size_t kCamFreezeLargestBlock = 9000;
+constexpr size_t kCamThawFreeHeap = 46000;
+constexpr size_t kCamThawLargestBlock = 15000;
 
 // How long the live picture is shown before the shutter. Enough for a few
 // frames to land so the user can see what is in shot and move their hand if it
@@ -1436,8 +1440,13 @@ bool OpenCameraView(bool transient, const char** why = nullptr) {
   }
   g_cam_view_transient = transient;
   g_cam_view_frozen = false;
+  g_cam_view_low_heap_hold = false;
   g_cam_view_deadline_ms = 0;
   g_cam_view_stat_ms = 0;
+  // Give the stream a moment to settle before the guard starts judging it: EnterCameraView() has
+  // just taken the HUD and the pool, so the heap is at its lowest right now and would otherwise
+  // trip the freeze on the very first check.
+  g_cam_view_heap_check_ms = millis() + 800;
   g_cam_view_last_frames = 0;
   return true;
 }
@@ -1454,6 +1463,7 @@ void CloseCameraView() {
   CamLink::GetInstance().EndVideo();
   g_cam_view_transient = false;
   g_cam_view_frozen = false;
+  g_cam_view_low_heap_hold = false;
   g_cam_view_deadline_ms = 0;
   LogHeap("camera view closed");
 }
@@ -1724,6 +1734,42 @@ void loop() {
   if (g_display && g_display->InCameraView()) {
     const uint32_t now_ms = millis();
 
+    // Heap guard. Checked four times a second, which is roughly one video frame at 115200.
+    //
+    // Without this the viewfinder and the voice session fight over the same internal DRAM and the
+    // voice session always loses: the log shows free heap pinned at ~3.3KB with the largest block
+    // at 1,332 bytes, thousands of failed 1,347-byte WiFi allocations, WEBSOCKET_EVENT_ERROR with
+    // sock_errno 12, and the 4,892-byte tools/list frame failing to send - after which the device
+    // silently ignores everything the user says while the picture carries on happily.
+    if (static_cast<int32_t>(now_ms - g_cam_view_heap_check_ms) >= 250) {
+      g_cam_view_heap_check_ms = now_ms;
+      const size_t free_heap = esp_get_free_heap_size();
+      const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+      if (!g_cam_view_frozen) {
+        // kConnecting is the single most expensive moment on this board - the mbedTLS handshake
+        // wants tens of KB - so the stream always stands aside for it.
+        const bool handshaking = (g_chat_state == ai_vox::ChatState::kConnecting ||
+                                  g_chat_state == ai_vox::ChatState::kLoading);
+        if (handshaking || free_heap < kCamFreezeFreeHeap || largest < kCamFreezeLargestBlock) {
+          printf("camera view: freezing stream to protect the voice session (free %u, largest %u)\n",
+                 static_cast<unsigned>(free_heap), static_cast<unsigned>(largest));
+          FreezeCameraView();
+          g_cam_view_low_heap_hold = true;
+          g_display->SetCameraHint("语音优先 · 画面暂停");
+        }
+      } else if (g_cam_view_low_heap_hold && g_cam_view_deadline_ms == 0 && !g_pending_look.active) {
+        // Hysteresis, and never while she is mid-reply: re-taking the 4KB pool during TTS is what
+        // the deferred thaw below already exists to avoid.
+        if (g_chat_state != ai_vox::ChatState::kSpeaking && g_chat_state != ai_vox::ChatState::kConnecting &&
+            free_heap >= kCamThawFreeHeap && largest >= kCamThawLargestBlock) {
+          printf("camera view: heap recovered (free %u, largest %u), resuming stream\n",
+                 static_cast<unsigned>(free_heap), static_cast<unsigned>(largest));
+          g_cam_view_low_heap_hold = false;
+          ThawCameraView();
+        }
+      }
+    }
+
     // Keep the stream alive as long as the camera view is open. Never close the
     // camera view automatically; it only closes when the user says "关闭摄像头".
     if (!cam.video_active() && !g_cam_view_frozen) {
@@ -1735,7 +1781,7 @@ void loop() {
       // times in that second.
       g_cam_view_stat_ms = now_ms;
       if (g_cam_view_frozen) {
-        g_display->SetCameraTelemetry("HOLD");
+        g_display->SetCameraTelemetry(g_cam_view_low_heap_hold ? "VOICE" : "HOLD");
       } else {
         const uint16_t frames = cam.video_frames();
         char line[32];
@@ -1855,6 +1901,15 @@ void loop() {
           }
           g_last_active_turn_ms = millis();
           g_display->SetChatMessage(Display::Role::kAssistant, chat_message_event->content);
+          // If a timer just finished and the cloud assistant spoke the reminder directly without
+          // calling self.screen.notify, show the single event toast now so there is always exactly
+          // one toast (never two).
+          if (g_timer_finished && !g_alert_visible &&
+              !chat_message_event->content.empty() &&
+              chat_message_event->content.rfind("%", 0) != 0) {
+            const char* toast_title = !g_timer_event_note.empty() ? g_timer_event_note.c_str() : "提醒";
+            ShowNotification(toast_title, chat_message_event->content.c_str(), 8000);
+          }
           // If MCP tool was not called for this query, trigger speech fallback motion
           if (!g_last_user_query.empty()) {
             // Timer first, then volume, and only on what the user actually said. Each of these is
@@ -2187,17 +2242,29 @@ void loop() {
         if (body == nullptr || body->empty()) {
           engine.SendMcpCallError(mcp_tool_call_event->id, "Missing valid argument: body");
         } else {
-          const auto title_ptr = mcp_tool_call_event->param<std::string>("title");
-          // hold_seconds is deliberately not in the schema (see InitMcpTools) but is still honoured
-          // if the model sends it anyway. Clamped, not rejected: a nonsensical value should land on
-          // a sane hold rather than lose the notification.
-          const auto hold_ptr = mcp_tool_call_event->param<int64_t>("hold_seconds");
-          uint32_t hold_ms = kAlertDefaultHoldMs;
-          if (hold_ptr != nullptr && *hold_ptr > 0) {
-            hold_ms = static_cast<uint32_t>(std::min<int64_t>(*hold_ptr, kAlertMaxHoldMs / 1000)) * 1000;
+          if (g_timer_running && (millis() - g_last_timer_exec_time < 4000)) {
+            if (g_timer_event_note.empty()) {
+              g_timer_event_note = *body;
+            }
+            printf("[timer] suppressed premature screen.notify during countdown start (saved note: '%s')\n",
+                   g_timer_event_note.c_str());
+            engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+          } else {
+            const auto title_ptr = mcp_tool_call_event->param<std::string>("title");
+            const auto hold_ptr = mcp_tool_call_event->param<int64_t>("hold_seconds");
+            uint32_t hold_ms = kAlertDefaultHoldMs;
+            if (hold_ptr != nullptr && *hold_ptr > 0) {
+              hold_ms = static_cast<uint32_t>(std::min<int64_t>(*hold_ptr, kAlertMaxHoldMs / 1000)) * 1000;
+            }
+            const char* resolved_title = "提醒";
+            if (title_ptr != nullptr && !title_ptr->empty() && title_ptr->find("定时提醒") == std::string::npos) {
+              resolved_title = title_ptr->c_str();
+            } else if (!g_timer_event_note.empty()) {
+              resolved_title = g_timer_event_note.c_str();
+            }
+            ShowNotification(resolved_title, body->c_str(), hold_ms);
+            engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
           }
-          ShowNotification(title_ptr != nullptr && !title_ptr->empty() ? title_ptr->c_str() : "提醒", body->c_str(), hold_ms);
-          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
         }
       } else if (matches("self.screen.notify_clear", "notify_clear") || matches("self.screen.alert_clear", "alert_clear")) {
         const bool was_visible = g_alert_visible;
