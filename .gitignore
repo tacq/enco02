@@ -28,3 +28,6 @@ tools/home_bridge/.venv/
 *credentials*
 *.pem
 *.key
+
+# Board-side LAN key for tools/home_bridge (copy home_config.h.example).
+**/home_config.h

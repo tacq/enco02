@@ -8,7 +8,7 @@ staged=$(git diff --cached --name-only --diff-filter=ACMR)
 for f in $staged; do
   case "$f" in
     *.env.example|*.example|*.example.json) ;;
-    .env|*/.env|*.env|*/cam_config.h|*/pool_config.json|*secrets*|*credentials*|*.pem|*.key)
+    .env|*/.env|*.env|*/cam_config.h|*/home_config.h|*/pool_config.json|*secrets*|*credentials*|*.pem|*.key)
       echo "pre-commit: refusing to commit secret file: $f"
       fail=1 ;;
   esac
@@ -17,8 +17,8 @@ done
 # Content check on staged additions: real-looking passwords/keys/tokens.
 if git diff --cached -U0 --diff-filter=ACMR -- . ':(exclude).githooks/*' |
    grep -E '^\+' |
-   grep -Ei '(IAQUALINK_PASSWORD|IAQUALINK_USERNAME|BRIDGE_HMAC_KEY|WIFI_PASSWORD|CAM_WIFI_PASSWORD|CAM_VISION_API_KEY)[[:space:]]*[=[:space:]]+"?[^"[:space:]]{6,}' |
-   grep -viE 'your[-_]|sk-\.\.\.|os\.environ|require_env|getenv' >/dev/null; then
+   grep -Ei '(IAQUALINK_PASSWORD|IAQUALINK_USERNAME|BRIDGE_HMAC_KEY|WIFI_PASSWORD|CAM_WIFI_PASSWORD|CAM_VISION_API_KEY|HOME_BRIDGE_KEY)[[:space:]]*[=[:space:]]+"?[^"[:space:]]{6,}' |
+   grep -viE 'your[-_]|paste-|sk-\.\.\.|os\.environ|require_env|getenv' >/dev/null; then
   echo "pre-commit: staged change looks like it contains a credential value."
   fail=1
 fi

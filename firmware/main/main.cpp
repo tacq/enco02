@@ -31,6 +31,7 @@
 #include "display.h"
 #include "volume_command.h"
 #include "timer_command.h"
+#include "home_bridge_client.h"
 #include "network_config_mode_mp3.h"
 #include "network_connected_mp3.h"
 #include "notification_0_mp3.h"
@@ -1256,6 +1257,13 @@ void InitMcpTools() {
                     });
   engine.AddMcpTool("self.screen.notify_clear", "Remove the note from the screen (知道了/取消提醒).", {});
 
+  // Read-only pool/spa status from the local home bridge (tools/home_bridge). Only registered when
+  // home_config.h is present, so boards without a bridge don't pay the tool-list heap. The model
+  // only ever sees this name and the summary text; the iAqualink credentials never leave the LAN.
+  if (home_bridge::Configured()) {
+    engine.AddMcpTool("self.home.pool_status", "Pool/spa status: water+air temp, pumps, heaters, lights (泳池/SPA状态/水温).", {});
+  }
+
 
 
   // The camera is a second board. This device cannot hold a JPEG - with the
@@ -2271,6 +2279,22 @@ void loop() {
         ClearNotification();
         printf("on mcp tool call: screen.notify_clear (was visible: %d)\n", static_cast<int>(was_visible));
         engine.SendMcpCallResponse(mcp_tool_call_event->id, was_visible);
+      } else if (matches("self.home.pool_status", "pool_status")) {
+        // Blocking LAN call (bounded by timeouts in home_bridge_client). Audio and LVGL run on
+        // their own tasks, so only event processing waits - and the assistant is waiting for this
+        // result anyway.
+        std::string toast;
+        std::string speech;
+        const bool ok = home_bridge::FetchPoolSummary(toast, speech);
+        printf("on mcp tool call: home.pool_status -> %s\n", ok ? "ok" : speech.c_str());
+        if (ok) {
+          if (!toast.empty()) {
+            ShowNotification("泳池状态", toast.c_str(), 8000);
+          }
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, speech);
+        } else {
+          engine.SendMcpCallError(mcp_tool_call_event->id, speech.c_str());
+        }
       }
     }
   }

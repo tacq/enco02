@@ -2,16 +2,23 @@
 
 The iAqualink account password and session tokens live here, on a machine on the home LAN, and
 nowhere else. ENCO (the ESP32) never sees them, and neither does the XiaoZhi cloud: the device only
-sends this bridge a tiny HMAC-signed request such as {"target": "pool_heater", "action": "on"}.
+sends this bridge tiny HMAC-signed requests and gets back a short human-readable summary.
 
 Subcommands:
   discover   Log in and print every system/device on the account (read-only). Use this once to
              learn the device keys, then write pool_config.json.
-  status     Print the current state of the devices listed in pool_config.json (read-only).
-  serve      Run the LAN HTTP API that ENCO calls.
+  status     Print the raw state of the devices listed in pool_config.json (read-only).
+  summary    Print the text ENCO would receive for "pool status" (read-only).
+  serve      Run the LAN HTTP API that ENCO calls. Read-only unless --allow-control is given.
 
 Secrets are read from tools/home_bridge/.env (git-ignored, must be chmod 600):
   IAQUALINK_USERNAME, IAQUALINK_PASSWORD, BRIDGE_HMAC_KEY
+
+Request authentication (ESP32 has no wall clock, so a challenge nonce replaces a timestamp):
+  1. GET /nonce                       -> 32 hex chars, single use, valid NONCE_TTL_S seconds
+  2. <METHOD> <path> with headers
+       X-Enco-Nonce: <nonce>
+       X-Enco-Sig:   hex(HMAC-SHA256(BRIDGE_HMAC_KEY, nonce + "\\n" + METHOD + "\\n" + path + "\\n" + body))
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import stat
 import sys
 import threading
@@ -41,9 +49,12 @@ CONFIG_PATH = HERE / "pool_config.json"
 LOG = logging.getLogger("home_bridge")
 
 MAX_BODY_BYTES = 512
-SIG_MAX_SKEW_S = 30
-RATE_LIMIT_PER_MIN = 12
+NONCE_TTL_S = 30
+MAX_OUTSTANDING_NONCES = 64
+RATE_LIMIT_PER_MIN = 20  # a status query costs two requests (nonce + summary)
 STATUS_CACHE_S = 10
+# Set points at or below this are the panel's "off" value (the app shows 34°F when unset).
+SETPOINT_OFF_F = 40
 
 
 # --------------------------------------------------------------------------------------- secrets
@@ -137,6 +148,84 @@ async def cmd_discover() -> None:
                 print(f"  {key:<28} {d['label']!r:<28} {extra}")
 
 
+# --------------------------------------------------------------------------------------- summary
+def _num(v: Any) -> int | None:
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def summarize(status: dict[str, Any]) -> tuple[str, str]:
+    """Turns raw status into (toast, speech).
+
+    toast:  3 short lines for the 126px-wide alert card.
+    speech: one Chinese paragraph handed to the assistant as the tool result, so she can answer
+            naturally. Kept short: it travels to the ESP32 and then up the WebSocket.
+    """
+    def get(name: str) -> dict[str, Any]:
+        return status.get(name) or {}
+
+    def on(name: str) -> bool | None:
+        d = get(name)
+        return None if not d or "error" in d else bool(d.get("is_on"))
+
+    def onoff(name: str) -> str:
+        v = on(name)
+        return "未知" if v is None else ("开" if v else "关")
+
+    def heater(name: str) -> str:
+        d = get(name)
+        state = str(d.get("state", ""))
+        if state == "1":
+            return "加热中"
+        if state == "3":
+            return "已开启(待加热)"
+        return "关" if d else "未知"
+
+    air = _num(get("air_temp").get("state"))
+    pool_t = _num(get("pool_temp").get("state"))
+    spa_t = _num(get("spa_temp").get("state"))
+    pool_sp = _num(get("pool_set").get("target_temperature"))
+    spa_sp = _num(get("spa_set").get("target_temperature"))
+    pool_pump, spa_pump = on("pool_pump"), on("spa_pump")
+
+    def water(t: int | None, pump: bool | None) -> str:
+        if t is not None:
+            return f"{t}°F"
+        return "暂无读数(水泵未运行)" if pump is False else "暂无读数"
+
+    def setpoint(sp: int | None) -> str:
+        if sp is None:
+            return "设定温度未知"
+        return "未设定温度" if sp <= SETPOINT_OFF_F else f"设定{sp}°F"
+
+    speech_parts = [
+        f"气温{air}°F" if air is not None else "气温暂无读数",
+        f"泳池水温{water(pool_t, pool_pump)}",
+        f"SPA水温{water(spa_t, spa_pump)}",
+        f"泳池水泵{onoff('pool_pump')}",
+        f"SPA水泵{onoff('spa_pump')}",
+        f"泳池加热{heater('pool_heater')}，{setpoint(pool_sp)}",
+        f"SPA加热{heater('spa_heater')}，{setpoint(spa_sp)}",
+        f"泳池灯{onoff('pool_light')}",
+        f"SPA灯{onoff('spa_light')}",
+        f"清洁机{onoff('cleaner')}",
+    ]
+    speech = "泳池状态：" + "；".join(speech_parts) + "。"
+
+    def short(t: int | None) -> str:
+        return f"{t}°" if t is not None else "--"
+
+    any_heat = any(heater(h) != "关" for h in ("pool_heater", "spa_heater"))
+    toast = "\n".join([
+        f"气温 {short(air)}F",
+        f"池 {short(pool_t)} SPA {short(spa_t)}",
+        f"泵{'开' if (pool_pump or spa_pump) else '关'} 热{'开' if any_heat else '关'}",
+    ])
+    return toast, speech
+
+
 # --------------------------------------------------------------------------------------- controller
 class PoolController:
     """Owns the single iAqualink session on a private asyncio loop thread."""
@@ -182,7 +271,12 @@ class PoolController:
             now = time.monotonic()
             if self._status_cache and now - self._status_cache[0] < STATUS_CACHE_S:
                 return self._status_cache[1]
-            result = self.run(self._status())
+            try:
+                result = self.run(self._status())
+            except Exception:
+                # Drop the session so the next call logs in fresh (expired tokens, network blips).
+                self.client, self.system = None, None
+                raise
             self._status_cache = (now, result)
             return result
 
@@ -239,30 +333,42 @@ class RateLimiter:
             return True
 
 
-class ReplayGuard:
+class NonceStore:
+    """Single-use challenge nonces. Consuming one removes it, which is the replay protection."""
+
     def __init__(self) -> None:
-        self.seen: dict[str, float] = {}
+        self.nonces: dict[str, float] = {}
         self.lock = threading.Lock()
 
-    def fresh(self, sig: str) -> bool:
-        now = time.time()
+    def _prune(self, now: float) -> None:
+        for k in [k for k, t in self.nonces.items() if now - t > NONCE_TTL_S]:
+            del self.nonces[k]
+
+    def issue(self) -> str | None:
+        now = time.monotonic()
         with self.lock:
-            for k in [k for k, t in self.seen.items() if now - t > 2 * SIG_MAX_SKEW_S]:
-                del self.seen[k]
-            if sig in self.seen:
-                return False
-            self.seen[sig] = now
-            return True
+            self._prune(now)
+            if len(self.nonces) >= MAX_OUTSTANDING_NONCES:
+                return None
+            n = secrets.token_hex(16)
+            self.nonces[n] = now
+            return n
+
+    def consume(self, n: str) -> bool:
+        now = time.monotonic()
+        with self.lock:
+            self._prune(now)
+            return self.nonces.pop(n, None) is not None
 
 
-def expected_signature(key: bytes, ts: str, method: str, path: str, body: bytes) -> str:
-    msg = f"{ts}\n{method}\n{path}\n".encode() + body
+def expected_signature(key: bytes, nonce: str, method: str, path: str, body: bytes) -> str:
+    msg = f"{nonce}\n{method}\n{path}\n".encode() + body
     return hmac.new(key, msg, hashlib.sha256).hexdigest()
 
 
-def make_handler(ctrl: PoolController, key: bytes) -> type[BaseHTTPRequestHandler]:
+def make_handler(ctrl: PoolController, key: bytes, allow_control: bool) -> type[BaseHTTPRequestHandler]:
     limiter = RateLimiter(RATE_LIMIT_PER_MIN)
-    replay = ReplayGuard()
+    nonces = NonceStore()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "enco-bridge"
@@ -271,27 +377,32 @@ def make_handler(ctrl: PoolController, key: bytes) -> type[BaseHTTPRequestHandle
         def log_message(self, fmt: str, *args: Any) -> None:  # no bodies/headers in logs
             LOG.info("%s %s", self.client_address[0], fmt % args)
 
-        def _send(self, code: int, payload: dict[str, Any]) -> None:
-            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        def _send_bytes(self, code: int, data: bytes, ctype: str) -> None:
             self.send_response(code)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(data)
 
+        def _send(self, code: int, payload: dict[str, Any]) -> None:
+            self._send_bytes(code, json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                             "application/json; charset=utf-8")
+
+        def _send_text(self, code: int, text: str) -> None:
+            self._send_bytes(code, text.encode("utf-8"), "text/plain; charset=utf-8")
+
         def _authenticate(self, body: bytes) -> bool:
-            ts = self.headers.get("X-Enco-Ts", "")
+            nonce = self.headers.get("X-Enco-Nonce", "")
             sig = self.headers.get("X-Enco-Sig", "")
-            if not ts.isdigit() or len(sig) != 64:
+            if len(nonce) != 32 or len(sig) != 64:
                 return False
-            if abs(time.time() - int(ts)) > SIG_MAX_SKEW_S:
+            want = expected_signature(key, nonce, self.command, self.path, body)
+            if not hmac.compare_digest(want, sig.lower()):
                 return False
-            want = expected_signature(key, ts, self.command, self.path, body)
-            if not hmac.compare_digest(want, sig):
-                return False
-            return replay.fresh(sig)
+            return nonces.consume(nonce)
 
         def _read_body(self) -> bytes | None:
             try:
@@ -310,6 +421,8 @@ def make_handler(ctrl: PoolController, key: bytes) -> type[BaseHTTPRequestHandle
             if body is None:
                 self._send(413, {"ok": False, "error": "bad body"})
                 return None
+            if self.path == "/nonce" and self.command == "GET":
+                return body  # the challenge itself is unauthenticated (it grants nothing)
             if not self._authenticate(body):
                 self._send(401, {"ok": False, "error": "unauthorized"})
                 return None
@@ -318,18 +431,35 @@ def make_handler(ctrl: PoolController, key: bytes) -> type[BaseHTTPRequestHandle
         def do_GET(self) -> None:  # noqa: N802
             if self._guard() is None:
                 return
-            if self.path != "/pool/status":
+            if self.path == "/nonce":
+                n = nonces.issue()
+                if n is None:
+                    self._send_text(503, "busy")
+                else:
+                    self._send_text(200, n)
+                return
+            if self.path not in ("/pool/summary", "/pool/status"):
                 self._send(404, {"ok": False, "error": "not found"})
                 return
             try:
-                self._send(200, {"ok": True, "status": ctrl.status()})
+                status = ctrl.status()
             except Exception:  # noqa: BLE001
                 LOG.exception("status failed")
-                self._send(502, {"ok": False, "error": "pool service unavailable"})
+                self._send_text(502, "泳池系统暂时无法连接")
+                return
+            if self.path == "/pool/status":
+                self._send(200, {"ok": True, "status": status})
+                return
+            toast, speech = summarize(status)
+            # Plain text, no JSON: the ESP32 splits on the "---" line instead of parsing.
+            self._send_text(200, f"{toast}\n---\n{speech}")
 
         def do_POST(self) -> None:  # noqa: N802
             body = self._guard()
             if body is None:
+                return
+            if not allow_control:
+                self._send(403, {"ok": False, "error": "bridge is read-only"})
                 return
             if self.path != "/pool/set":
                 self._send(404, {"ok": False, "error": "not found"})
@@ -363,16 +493,17 @@ def make_handler(ctrl: PoolController, key: bytes) -> type[BaseHTTPRequestHandle
     return Handler
 
 
-def cmd_serve(host: str, port: int) -> None:
+def cmd_serve(host: str, port: int, allow_control: bool) -> None:
     key = require_env("BRIDGE_HMAC_KEY").encode()
     if len(key) < 32:
         sys.exit("BRIDGE_HMAC_KEY must be at least 32 characters (use `python3 -c "
                  "'import secrets; print(secrets.token_hex(32))'`)")
     cfg = load_config()
     ctrl = PoolController(cfg)
-    server = ThreadingHTTPServer((host, port), make_handler(ctrl, key))
-    LOG.info("listening on http://%s:%d (targets: %s)", host, port, ", ".join(cfg["targets"]))
-    # TODO(security): plain HTTP on the LAN; requests are HMAC-signed and replay-protected, but
+    server = ThreadingHTTPServer((host, port), make_handler(ctrl, key, allow_control))
+    LOG.info("listening on http://%s:%d  mode=%s", host, port,
+             "CONTROL" if allow_control else "read-only")
+    # TODO(security): plain HTTP on the LAN; requests are HMAC-signed with single-use nonces, but
     # responses (pool state) are not encrypted. Acceptable on a trusted home LAN; do NOT expose
     # this port to the internet.
     server.serve_forever()
@@ -388,20 +519,28 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("discover")
     sub.add_parser("status")
+    sub.add_parser("summary")
     s = sub.add_parser("serve")
     # Localhost by default; pass --host <this machine's LAN IP> once ENCO needs to reach it.
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8787)
+    s.add_argument("--allow-control", action="store_true",
+                   help="enable POST /pool/set (off by default: read-only)")
     args = p.parse_args()
 
     load_env()
     if args.cmd == "discover":
         asyncio.run(cmd_discover())
-    elif args.cmd == "status":
+    elif args.cmd in ("status", "summary"):
         ctrl = PoolController(load_config())
-        print(json.dumps(ctrl.status(), ensure_ascii=False, indent=2))
+        status = ctrl.status()
+        if args.cmd == "status":
+            print(json.dumps(status, ensure_ascii=False, indent=2))
+        else:
+            toast, speech = summarize(status)
+            print(f"{toast}\n---\n{speech}")
     else:
-        cmd_serve(args.host, args.port)
+        cmd_serve(args.host, args.port, args.allow_control)
 
 
 if __name__ == "__main__":

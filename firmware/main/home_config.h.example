@@ -1,0 +1,8 @@
+// Copy to home_config.h (git-ignored) to enable smart-home status via tools/home_bridge.
+// HOME_BRIDGE_KEY must equal BRIDGE_HMAC_KEY in tools/home_bridge/.env. It is a LAN-only key: it
+// grants nothing outside your network and is NOT an iAqualink/Google credential.
+#pragma once
+
+#define HOME_BRIDGE_HOST "192.168.1.10"  // LAN IP of the machine running `bridge.py serve`
+#define HOME_BRIDGE_PORT 8787
+#define HOME_BRIDGE_KEY "paste-BRIDGE_HMAC_KEY-here"
