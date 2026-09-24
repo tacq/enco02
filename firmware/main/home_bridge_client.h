@@ -14,4 +14,12 @@ bool Configured();
 // returns false and puts a short reason in `speech`.
 bool FetchPoolSummary(std::string& toast, std::string& speech);
 
+// Local allow-list check (same targets/ranges as the bridge). `value` is °F, used for pool_set/spa_set.
+bool ValidatePoolSet(const std::string& target, const std::string& action, int value, std::string& error);
+const char* PoolTargetNameZh(const std::string& target);
+
+// Blocking (up to ~15 s: the bridge waits for the panel to confirm). Same toast/speech contract.
+bool PoolSet(const std::string& target, const std::string& action, int value, std::string& toast,
+             std::string& speech);
+
 }  // namespace home_bridge

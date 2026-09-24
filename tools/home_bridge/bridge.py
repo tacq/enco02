@@ -189,31 +189,19 @@ def summarize(status: dict[str, Any]) -> tuple[str, str]:
     pool_sp = _num(get("pool_set").get("target_temperature"))
     spa_sp = _num(get("spa_set").get("target_temperature"))
     pool_pump, spa_pump = on("pool_pump"), on("spa_pump")
-    panel_f = str(get("pool_set").get("unit") or get("spa_set").get("unit") or "F").upper() == "F"
-
-    def c(t: int) -> str:
-        """Panel value -> '22.8°C' (whole numbers drop the decimal)."""
-        v = round((t - 32) * 5 / 9, 1) if panel_f else float(t)
-        return f"{v:g}°C"
-
-    def c_short(t: int | None) -> str:
-        if t is None:
-            return "--"
-        return f"{round((t - 32) * 5 / 9) if panel_f else t}°"
 
     def water(t: int | None, pump: bool | None) -> str:
         if t is not None:
-            return c(t)
+            return f"{t}°F"
         return "暂无读数(水泵未运行)" if pump is False else "暂无读数"
 
     def setpoint(sp: int | None) -> str:
         if sp is None:
             return "设定温度未知"
-        off_threshold = SETPOINT_OFF_F if panel_f else round((SETPOINT_OFF_F - 32) * 5 / 9)
-        return "未设定温度" if sp <= off_threshold else f"设定{c(sp)}"
+        return "未设定温度" if sp <= SETPOINT_OFF_F else f"设定{sp}°F"
 
     speech_parts = [
-        f"气温{c(air)}" if air is not None else "气温暂无读数",
+        f"气温{air}°F" if air is not None else "气温暂无读数",
         f"泳池水温{water(pool_t, pool_pump)}",
         f"SPA水温{water(spa_t, spa_pump)}",
         f"泳池水泵{onoff('pool_pump')}",
@@ -224,12 +212,15 @@ def summarize(status: dict[str, Any]) -> tuple[str, str]:
         f"SPA灯{onoff('spa_light')}",
         f"清洁机{onoff('cleaner')}",
     ]
-    speech = "泳池状态(摄氏度)：" + "；".join(speech_parts) + "。"
+    speech = "泳池状态(华氏度)：" + "；".join(speech_parts) + "。"
+
+    def short(t: int | None) -> str:
+        return f"{t}°" if t is not None else "--"
 
     any_heat = any(heater(h) != "关" for h in ("pool_heater", "spa_heater"))
     toast = "\n".join([
-        f"气温 {c_short(air)}C",
-        f"池 {c_short(pool_t)} SPA {c_short(spa_t)}",
+        f"气温 {short(air)}F",
+        f"池 {short(pool_t)} SPA {short(spa_t)}",
         f"泵{'开' if (pool_pump or spa_pump) else '关'} 热{'开' if any_heat else '关'}",
     ])
     return toast, speech
@@ -321,6 +312,47 @@ class PoolController:
         with self._lock:
             self._status_cache = None
             return self.run(self._apply(target, action, value))
+
+    def apply_and_confirm(self, target: str, action: str, value: Any) -> tuple[str, str]:
+        """Apply a change, then poll the panel (<= ~6 s) until it reports it. Returns (toast, speech)."""
+        self.apply(target, action, value)
+        name = TARGET_NAMES_ZH.get(target, target)
+        state: dict[str, Any] = {}
+        confirmed = False
+        for _ in range(3):
+            time.sleep(2)
+            with self._lock:
+                self._status_cache = None
+            try:
+                state = self.status().get(target, {})
+            except Exception:  # noqa: BLE001
+                continue
+            if action == "set":
+                confirmed = _num(state.get("target_temperature")) == value
+            else:
+                confirmed = bool(state.get("is_on")) == (action == "on")
+            if confirmed:
+                break
+        if action == "set":
+            toast = f"{name} {value}°F"
+            speech = f"{name}已设定为{value}华氏度"
+        else:
+            verb = "开启" if action == "on" else "关闭"
+            toast = f"{name} 已{verb}"
+            speech = f"{name}已{verb}"
+            if action == "on" and target.endswith("_heater") and str(state.get("state")) == "3":
+                speech += "(已启用，等待加热)"
+        if not confirmed:
+            toast = f"{name} 已发送"
+            speech = f"{name}指令已发送，面板尚未确认，请稍后查询泳池状态"
+        return toast, speech
+
+
+TARGET_NAMES_ZH = {
+    "pool_pump": "泳池水泵", "spa_pump": "SPA模式", "pool_heater": "泳池加热",
+    "spa_heater": "SPA加热", "pool_light": "泳池灯", "spa_light": "SPA灯",
+    "cleaner": "清洁机", "pool_set": "泳池温度", "spa_set": "SPA温度",
+}
 
 
 # --------------------------------------------------------------------------------------- HTTP API
@@ -467,31 +499,40 @@ def make_handler(ctrl: PoolController, key: bytes, allow_control: bool) -> type[
             body = self._guard()
             if body is None:
                 return
+            # Replies are plain text "toast\n---\nspeech" so the board can show/speak them directly.
+            def fail(code: int, msg: str) -> None:
+                self._send_text(code, f"泳池控制失败\n---\n泳池控制失败：{msg}")
+
             if not allow_control:
-                self._send(403, {"ok": False, "error": "bridge is read-only"})
+                fail(403, "桥接服务为只读模式")
                 return
             if self.path != "/pool/set":
-                self._send(404, {"ok": False, "error": "not found"})
+                fail(404, "not found")
                 return
             try:
                 req = json.loads(body.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
-                self._send(400, {"ok": False, "error": "invalid json"})
+                fail(400, "invalid json")
+                return
+            if not isinstance(req, dict):
+                fail(400, "invalid json")
                 return
             target, action, value = req.get("target"), req.get("action"), req.get("value")
             if not isinstance(target, str) or target not in ctrl.cfg["targets"]:
-                self._send(400, {"ok": False, "error": "unknown target"})
+                fail(400, "未知设备")
                 return
             if action not in ("on", "off", "set"):
-                self._send(400, {"ok": False, "error": "invalid action"})
+                fail(400, "无效操作")
                 return
+            LOG.info("control: %s %s %s", target, action, value if action == "set" else "")
             try:
-                self._send(200, {"ok": True, "result": ctrl.apply(target, action, value)})
+                toast, speech = ctrl.apply_and_confirm(target, action, value)
+                self._send_text(200, f"{toast}\n---\n{speech}")
             except ValueError as e:
-                self._send(400, {"ok": False, "error": str(e)})
+                fail(400, str(e))
             except Exception:  # noqa: BLE001
                 LOG.exception("apply failed")
-                self._send(502, {"ok": False, "error": "pool service unavailable"})
+                fail(502, "泳池服务暂不可用")
 
         # Allow-list of methods: everything else is rejected.
         def _reject(self) -> None:
@@ -558,13 +599,10 @@ def main() -> None:
             sys.exit(f"unknown target {args.target!r}; allowed: {', '.join(cfg['targets'])}")
         ctrl = PoolController(cfg)
         try:
-            print("result:", ctrl.apply(args.target, args.action, args.value))
+            toast, speech = ctrl.apply_and_confirm(args.target, args.action, args.value)
         except ValueError as e:
             sys.exit(f"rejected: {e}")
-        time.sleep(4)  # the panel takes a moment to report the new state back to the cloud
-        after = ctrl.status().get(args.target, {})
-        print("now:", {k: after.get(k) for k in ("label", "state", "is_on", "target_temperature")
-                       if k in after})
+        print(f"{toast}\n---\n{speech}")
     else:
         cmd_serve(args.host, args.port, args.allow_control)
 

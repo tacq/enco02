@@ -17,6 +17,62 @@
 
 namespace home_bridge {
 
+namespace {
+struct PoolTarget {
+  const char* id;
+  const char* name_zh;
+  bool thermostat;
+  int min_f;
+  int max_f;
+};
+// Mirrors the allow-list in tools/home_bridge/pool_config.json (the bridge re-validates).
+constexpr PoolTarget kPoolTargets[] = {
+    {"pool_pump", "泳池水泵", false, 0, 0},  {"spa_pump", "SPA模式", false, 0, 0},
+    {"pool_heater", "泳池加热", false, 0, 0}, {"spa_heater", "SPA加热", false, 0, 0},
+    {"pool_light", "泳池灯", false, 0, 0},    {"spa_light", "SPA灯", false, 0, 0},
+    {"cleaner", "清洁机", false, 0, 0},       {"pool_set", "泳池温度", true, 70, 90},
+    {"spa_set", "SPA温度", true, 80, 104},
+};
+
+const PoolTarget* FindTarget(const std::string& id) {
+  for (const auto& t : kPoolTargets) {
+    if (id == t.id) return &t;
+  }
+  return nullptr;
+}
+}  // namespace
+
+bool ValidatePoolSet(const std::string& target, const std::string& action, int value,
+                     std::string& error) {
+  const PoolTarget* t = FindTarget(target);
+  if (t == nullptr) {
+    error = "unknown target; use pool_pump|spa_pump|pool_heater|spa_heater|pool_light|spa_light|cleaner|pool_set|spa_set";
+    return false;
+  }
+  if (t->thermostat) {
+    if (action != "set") {
+      error = "pool_set/spa_set need action=set with value in F";
+      return false;
+    }
+    if (value < t->min_f || value > t->max_f) {
+      error = std::string(t->name_zh) + " range " + std::to_string(t->min_f) + "-" +
+              std::to_string(t->max_f) + "F";
+      return false;
+    }
+    return true;
+  }
+  if (action != "on" && action != "off") {
+    error = "switch targets need action=on|off";
+    return false;
+  }
+  return true;
+}
+
+const char* PoolTargetNameZh(const std::string& target) {
+  const PoolTarget* t = FindTarget(target);
+  return t == nullptr ? "泳池设备" : t->name_zh;
+}
+
 #if HOME_BRIDGE_ENABLED
 namespace {
 
@@ -24,24 +80,33 @@ constexpr int32_t kConnectTimeoutMs = 1500;
 constexpr uint32_t kNonceReadTimeoutMs = 2000;
 // The bridge may need a fresh round trip to the iAqualink cloud for the summary.
 constexpr uint32_t kSummaryReadTimeoutMs = 6000;
+// A change is applied, then the bridge polls the panel for up to ~6 s to confirm it.
+constexpr uint32_t kSetReadTimeoutMs = 15000;
 // Responses are a few hundred bytes; anything bigger is not ours.
 constexpr size_t kMaxResponseBytes = 1536;
 
 // Plain HTTP/1.1 over a LAN socket. No TLS: the request is authenticated by an HMAC over a
 // single-use nonce, and nothing secret travels in either direction. Deliberately not HTTPClient:
 // that pulls in a much larger buffer footprint than a two-line request needs on this heap.
-bool HttpGet(const char* path, const std::string& extra_headers, uint32_t read_timeout_ms,
-             int& status, std::string& body) {
+bool HttpRequest(const char* method, const char* path, const std::string& extra_headers,
+                 const std::string& req_body, uint32_t read_timeout_ms, int& status,
+                 std::string& body) {
   WiFiClient client;
   if (!client.connect(HOME_BRIDGE_HOST, HOME_BRIDGE_PORT, kConnectTimeoutMs)) {
     printf("[home] connect %s:%d failed\n", HOME_BRIDGE_HOST, HOME_BRIDGE_PORT);
     return false;
   }
-  std::string req = "GET ";
+  std::string req = method;
+  req += " ";
   req += path;
   req += " HTTP/1.1\r\nHost: " HOME_BRIDGE_HOST "\r\nConnection: close\r\n";
   req += extra_headers;
+  if (!req_body.empty()) {
+    req += "Content-Type: application/json\r\nContent-Length: " + std::to_string(req_body.size()) +
+           "\r\n";
+  }
   req += "\r\n";
+  req += req_body;
   client.write(reinterpret_cast<const uint8_t*>(req.data()), req.size());
 
   std::string raw;
@@ -102,11 +167,9 @@ void Trim(std::string& s) {
   s.erase(0, i);
 }
 
-}  // namespace
-
-bool Configured() { return true; }
-
-bool FetchPoolSummary(std::string& toast, std::string& speech) {
+// Nonce + HMAC-signed request; the reply body is "toast\n---\nspeech". Returns true on HTTP 200.
+bool SignedTextRequest(const char* method, const char* path, const std::string& req_body,
+                       uint32_t read_timeout_ms, std::string& toast, std::string& speech) {
   toast.clear();
   speech.clear();
   if (WiFi.status() != WL_CONNECTED) {
@@ -116,7 +179,8 @@ bool FetchPoolSummary(std::string& toast, std::string& speech) {
 
   int status = 0;
   std::string nonce;
-  if (!HttpGet("/nonce", std::string(), kNonceReadTimeoutMs, status, nonce) || status != 200) {
+  if (!HttpRequest("GET", "/nonce", std::string(), std::string(), kNonceReadTimeoutMs, status, nonce) ||
+      status != 200) {
     speech = "连接不上家庭网关";
     return false;
   }
@@ -126,8 +190,7 @@ bool FetchPoolSummary(std::string& toast, std::string& speech) {
     return false;
   }
 
-  static const char kPath[] = "/pool/summary";
-  const std::string sig = HmacHex(nonce + "\nGET\n" + kPath + "\n");
+  const std::string sig = HmacHex(nonce + "\n" + method + "\n" + path + "\n" + req_body);
   if (sig.empty()) {
     speech = "签名失败";
     return false;
@@ -135,27 +198,54 @@ bool FetchPoolSummary(std::string& toast, std::string& speech) {
   std::string headers = "X-Enco-Nonce: " + nonce + "\r\nX-Enco-Sig: " + sig + "\r\n";
 
   std::string body;
-  if (!HttpGet(kPath, headers, kSummaryReadTimeoutMs, status, body)) {
+  if (!HttpRequest(method, path, headers, req_body, read_timeout_ms, status, body)) {
     speech = "家庭网关超时";
-    return false;
-  }
-  if (status != 200) {
-    printf("[home] summary HTTP %d\n", status);
-    speech = status == 401 ? "家庭网关拒绝了请求" : "泳池系统暂时无法连接";
     return false;
   }
 
   const size_t sep = body.find("\n---\n");
-  if (sep == std::string::npos) {
-    speech = body;
-  } else {
+  if (sep != std::string::npos) {
     toast = body.substr(0, sep);
     speech = body.substr(sep + 5);
   }
   Trim(toast);
   Trim(speech);
-  printf("[home] pool summary ok (%u bytes)\n", static_cast<unsigned>(body.size()));
+  if (status != 200) {
+    printf("[home] %s %s HTTP %d\n", method, path, status);
+    if (status == 401) {
+      speech = "家庭网关拒绝了请求";
+    } else if (speech.empty()) {
+      speech = "泳池系统暂时无法连接";
+    }
+    return false;
+  }
+  printf("[home] %s %s ok (%u bytes)\n", method, path, static_cast<unsigned>(body.size()));
   return !speech.empty();
+}
+
+}  // namespace
+
+bool Configured() { return true; }
+
+bool FetchPoolSummary(std::string& toast, std::string& speech) {
+  return SignedTextRequest("GET", "/pool/summary", std::string(), kSummaryReadTimeoutMs, toast, speech);
+}
+
+bool PoolSet(const std::string& target, const std::string& action, int value, std::string& toast,
+             std::string& speech) {
+  std::string err;
+  if (!ValidatePoolSet(target, action, value, err)) {
+    toast.clear();
+    speech = err;
+    return false;
+  }
+  // target/action are allow-listed above, so no JSON escaping is needed.
+  std::string body = "{\"target\":\"" + target + "\",\"action\":\"" + action + "\"";
+  if (action == "set") {
+    body += ",\"value\":" + std::to_string(value);
+  }
+  body += "}";
+  return SignedTextRequest("POST", "/pool/set", body, kSetReadTimeoutMs, toast, speech);
 }
 
 #else  // !HOME_BRIDGE_ENABLED
@@ -163,6 +253,12 @@ bool FetchPoolSummary(std::string& toast, std::string& speech) {
 bool Configured() { return false; }
 
 bool FetchPoolSummary(std::string& toast, std::string& speech) {
+  toast.clear();
+  speech = "未配置家庭网关";
+  return false;
+}
+
+bool PoolSet(const std::string&, const std::string&, int, std::string& toast, std::string& speech) {
   toast.clear();
   speech = "未配置家庭网关";
   return false;
