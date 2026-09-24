@@ -44,6 +44,7 @@ class EngineImpl : public Engine {
   void AddMcpTool(std::string name, std::string description, std::map<std::string, ParamSchemaVariant> attributes) override;
   void Start(std::shared_ptr<AudioInputDevice> audio_input_device, std::shared_ptr<AudioOutputDevice> audio_output_device) override;
   void Advance() override;
+  void Disconnect() override;
   // void Process() override;
   void SendText(std::string text) override;
   bool SendWakeText(std::string text) override;

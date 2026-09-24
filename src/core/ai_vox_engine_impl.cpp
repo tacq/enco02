@@ -204,6 +204,17 @@ void EngineImpl::Advance() {
   task_queue_.Enqueue([this]() { AdvanceInternal(); });
 }
 
+void EngineImpl::Disconnect() {
+  std::lock_guard lock(mutex_);
+  if (state_ == State::kIdle || state_ == State::kStandby) {
+    return;
+  }
+  task_queue_.Enqueue([this]() {
+    DisconnectWebSocket();
+    ChangeState(State::kStandby);
+  });
+}
+
 // void EngineImpl::Process() {
 //   std::lock_guard lock(mutex_);
 //   if (state_ == State::kIdle) {
@@ -486,6 +497,8 @@ void EngineImpl::OnJsonData(FlexArray<uint8_t> &&data) {
         return;
       }
     }
+    DisconnectWebSocket();
+    ChangeState(State::kStandby);
   } else if (*type == "tts") {
     const auto tts_state = cjson_util::GetString(root_json_obj.get(), "state");
     if (!tts_state) {

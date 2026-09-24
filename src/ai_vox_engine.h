@@ -26,6 +26,7 @@ class Engine {
   virtual void AddMcpTool(std::string name, std::string description, std::map<std::string, ParamSchemaVariant> attributes) = 0;
   virtual void Start(std::shared_ptr<AudioInputDevice> audio_input_device, std::shared_ptr<AudioOutputDevice> audio_output_device) = 0;
   virtual void Advance() = 0;
+  virtual void Disconnect() = 0;
   // virtual void Process() = 0;
   virtual void SendText(std::string text) = 0;
   // Injects `text` as though the user had just spoken it, so the assistant answers out loud.

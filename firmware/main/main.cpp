@@ -78,8 +78,6 @@ constexpr gpio_num_t kSpeakerPinSck = GPIO_NUM_33;  // SCK (BCK, BCLK): Serial-D
 constexpr gpio_num_t kSpeakerPinWs = GPIO_NUM_32;   // WS (WR, WCLK): Serial Data-Word Select for I²S Interface
 constexpr gpio_num_t kSpeakerPinSd = GPIO_NUM_23;   // SD (DIN，DOUT, DI, DO, DATA): Serial-Data Output for I²S Interface
 
-constexpr gpio_num_t kButtonBoot = GPIO_NUM_34;
-
 constexpr gpio_num_t kLedPin = GPIO_NUM_2;
 
 // Display pin configurations for SWIFT-LCD-20 (ST7789 2.0" 240x320)
@@ -101,7 +99,7 @@ constexpr auto kDisplayRgbElementOrder = LCD_RGB_ELEMENT_ORDER_RGB;
 
 auto g_observer = std::make_shared<ai_vox::Observer>();
 auto g_audio_output_device = std::make_shared<ai_vox::AudioOutputDeviceI2sStd>(kSpeakerPinSck, kSpeakerPinWs, kSpeakerPinSd);
-button_handle_t g_button_boot_handle = nullptr;
+std::shared_ptr<ai_vox::AudioInputDevice> g_audio_input_device;
 
 // Every boot stage is traced so we can see exactly where the internal RAM goes. The mbedTLS
 // handshake to api.tenclass.net needs roughly 40KB free with a >16KB contiguous block; if the log
@@ -793,6 +791,210 @@ uint32_t TimerRemainingSeconds() {
   return static_cast<uint32_t>((remaining_ms + 999) / 1000);
 }
 
+// =========================================================================
+// Standby Companion Mode & "Hi ENCO" / "安可" Wake-Word Verification
+// =========================================================================
+bool g_awake_session = false;
+bool g_wake_verify_pending = false;
+uint32_t g_wake_verify_started_ms = 0;
+uint8_t g_saved_wake_volume = 80;
+bool g_standby_mic_open = false;
+uint32_t g_standby_noise_floor = 180;
+uint8_t g_standby_speech_frames = 0;
+uint32_t g_standby_cooldown_until_ms = 0;
+uint32_t g_next_idle_head_ms = 0;
+uint32_t g_next_idle_face_ms = 0;
+
+void CloseStandbyMic() {
+  if (g_standby_mic_open && g_audio_input_device) {
+    g_audio_input_device->CloseInput();
+    g_standby_mic_open = false;
+  }
+}
+
+void RestoreWakeVolume() {
+  if (g_wake_verify_pending && g_audio_output_device) {
+    g_audio_output_device->set_volume(g_saved_wake_volume);
+  }
+}
+
+void MuteForWakeVerify() {
+  if (g_audio_output_device) {
+    const uint8_t cur = g_audio_output_device->volume();
+    if (cur > 0) {
+      g_saved_wake_volume = cur;
+    }
+    g_audio_output_device->set_volume(0);
+  }
+}
+
+bool IsWakeWordUtterance(const std::string& text) {
+  if (text.empty()) return false;
+  std::string lower;
+  lower.reserve(text.size());
+  for (unsigned char c : text) {
+    lower.push_back(static_cast<char>(std::tolower(c)));
+  }
+  // English / Pinyin variations for "Hi ENCO" / "Anke"
+  if (lower.find("enco") != std::string::npos ||
+      lower.find("en co") != std::string::npos ||
+      lower.find("anko") != std::string::npos ||
+      lower.find("anke") != std::string::npos ||
+      lower.find("an ke") != std::string::npos ||
+      lower.find("uncle") != std::string::npos ||
+      lower.find("echo") != std::string::npos ||
+      lower.find("hi an") != std::string::npos ||
+      lower.find("hey an") != std::string::npos) {
+    return true;
+  }
+  // Mandarin variations & common ASR homophones for "安可" / "Hi ENCO"
+  if (text.find("安可") != std::string::npos ||
+      text.find("安科") != std::string::npos ||
+      text.find("恩可") != std::string::npos ||
+      text.find("恩科") != std::string::npos ||
+      text.find("安克") != std::string::npos ||
+      text.find("恩克") != std::string::npos ||
+      text.find("俺可") != std::string::npos ||
+      text.find("按可") != std::string::npos ||
+      text.find("安客") != std::string::npos ||
+      text.find("小智") != std::string::npos) {
+    return true;
+  }
+  return false;
+}
+
+void IdleCompanionTick(ai_vox::Engine& engine) {
+  const uint32_t now_ms = millis();
+
+  // If we connected temporarily to verify whether the user said "Hi ENCO" / "安可"
+  // and no wake word was recognized within 8.5s, disconnect silently back to Standby.
+  if (g_wake_verify_pending) {
+    if (static_cast<int32_t>(now_ms - g_wake_verify_started_ms) >= 8500) {
+      printf("[wake] wake-word verification timed out -> returning to standby\n");
+      RestoreWakeVolume();
+      g_wake_verify_pending = false;
+      g_awake_session = false;
+      g_standby_cooldown_until_ms = now_ms + 1500;
+      engine.Disconnect();
+    }
+    return;
+  }
+
+  // Only run idle companion animations & local I2S VAD when in kStandby.
+  if (g_chat_state != ai_vox::ChatState::kStandby) {
+    CloseStandbyMic();
+    return;
+  }
+
+  // 1. Random virtual character facial emoji & gaze changes (every 4.5s - 9.5s)
+  if (g_next_idle_face_ms == 0) {
+    g_next_idle_face_ms = now_ms + 3000;
+  } else if (static_cast<int32_t>(now_ms - g_next_idle_face_ms) >= 0) {
+    static const char* const kIdleEmotions[] = {
+        "neutral", "happy", "wink", "cool", "thinking", "surprised", "loving", "sleepy"
+    };
+    static const char* const kIdleLookDirs[] = {
+        "center", "left", "right", "up", "down", "center"
+    };
+    const size_t idx = esp_random() % (sizeof(kIdleEmotions) / sizeof(kIdleEmotions[0]));
+    const size_t dir_idx = esp_random() % (sizeof(kIdleLookDirs) / sizeof(kIdleLookDirs[0]));
+    if (g_display) {
+      g_display->UpdateRobotFaceEmotion(kIdleEmotions[idx]);
+      g_display->LookDirection(kIdleLookDirs[dir_idx]);
+    }
+    g_next_idle_face_ms = now_ms + 4500 + (esp_random() % 5000);
+  }
+
+  // 2. Random gentle head movements via ServoController (every 7s - 14s)
+  if (g_next_idle_head_ms == 0) {
+    g_next_idle_head_ms = now_ms + 5000;
+  } else if (static_cast<int32_t>(now_ms - g_next_idle_head_ms) >= 0) {
+    auto& servo = ServoController::GetInstance();
+    if (!servo.IsAnimating()) {
+      const uint32_t action = esp_random() % 5;
+      switch (action) {
+        case 0:
+          servo.MoveAngleSmooth(ServoController::kPinServo2, 56.0f + static_cast<float>(esp_random() % 12));
+          break;
+        case 1:
+          servo.MoveAngleSmooth(ServoController::kPinServo2, 74.0f + static_cast<float>(esp_random() % 12));
+          break;
+        case 2:
+          servo.MoveAngleSmooth(ServoController::kPinServo0, 82.0f + static_cast<float>(esp_random() % 16));
+          break;
+        case 3:
+          if ((esp_random() & 1) == 0) {
+            servo.TiltLeft(8.0f);
+          } else {
+            servo.TiltRight(8.0f);
+          }
+          break;
+        default:
+          servo.CenterAll();
+          break;
+      }
+    }
+    g_next_idle_head_ms = now_ms + 7000 + (esp_random() % 7000);
+  }
+
+  // 3. Local I2S microphone speech cadence detector in Standby (no WebSocket open)
+  if (static_cast<int32_t>(now_ms - g_standby_cooldown_until_ms) < 0) {
+    return;
+  }
+  if (!g_audio_input_device) {
+    return;
+  }
+  if (!g_standby_mic_open) {
+    g_audio_input_device->OpenInput(16000);
+    g_standby_mic_open = true;
+    g_standby_speech_frames = 0;
+  }
+
+  int16_t pcm[80];  // 5ms frame at 16kHz on stack (zero heap allocation)
+  const size_t n = g_audio_input_device->Read(pcm, sizeof(pcm) / sizeof(pcm[0]));
+  if (n == 0) {
+    return;
+  }
+
+  uint32_t sum_abs = 0;
+  for (size_t i = 0; i < n; ++i) {
+    const int32_t s = pcm[i];
+    sum_abs += static_cast<uint32_t>(s < 0 ? -s : s);
+  }
+  const uint32_t avg_abs = sum_abs / n;
+
+  if (avg_abs < g_standby_noise_floor * 2) {
+    g_standby_noise_floor = (g_standby_noise_floor * 15 + avg_abs) / 16;
+    if (g_standby_noise_floor < 100) g_standby_noise_floor = 100;
+    if (g_standby_noise_floor > 900) g_standby_noise_floor = 900;
+  }
+
+  const uint32_t threshold = std::max<uint32_t>(g_standby_noise_floor * 3, 420);
+  if (avg_abs > threshold) {
+    ++g_standby_speech_frames;
+    // ~110ms of clear voice cadence ("Hi ENCO" / "安可")
+    if (g_standby_speech_frames >= 22) {
+      printf("[wake] voice cadence detected (energy=%u, floor=%u) -> verifying 'Hi ENCO / 安可'\n",
+             static_cast<unsigned>(avg_abs), static_cast<unsigned>(g_standby_noise_floor));
+      g_standby_speech_frames = 0;
+      CloseStandbyMic();  // Must close I2S before AudioInputEngine opens it!
+
+      g_wake_verify_pending = true;
+      g_wake_verify_started_ms = now_ms;
+      MuteForWakeVerify();
+
+      if (g_display) {
+        g_display->ShowStatus("识别唤醒词...");
+        g_display->UpdateRobotFaceEmotion("surprised");
+        g_display->LookDirection("center");
+      }
+      engine.Advance();
+    }
+  } else if (g_standby_speech_frames > 0) {
+    --g_standby_speech_frames;
+  }
+}
+
 // Driven from loop(). Deliberately not from the display's own LVGL timer: that one early-returns
 // unless the character view is on screen, so a countdown hung off it would freeze in chat mode.
 void TimerTick() {
@@ -856,6 +1058,10 @@ void TimerTick() {
       if (Utf8Length(text) > kTimerAnnounceMaxChars) {
         text = "定时时间到";  // Very long durations; drop the duration rather than be rejected.
       }
+      CloseStandbyMic();
+      RestoreWakeVolume();
+      g_wake_verify_pending = false;
+      g_awake_session = true;
       if (ai_vox::Engine::GetInstance().SendWakeText(text)) {
         printf("[timer] announcing: %s\n", text.c_str());
         g_timer_announced = true;
@@ -1225,22 +1431,6 @@ void setup() {
   pinMode(kLedPin, OUTPUT);
   digitalWrite(kLedPin, LOW);
 
-  printf("init button\n");
-  const button_config_t btn_cfg = {
-      .long_press_time = 1000,
-      .short_press_time = 50,
-  };
-
-  const button_gpio_config_t gpio_cfg = {
-      .gpio_num = kButtonBoot,
-      .active_level = 0,
-      .enable_power_save = false,
-      .disable_pull = false,
-  };
-
-  ESP_ERROR_CHECK(iot_button_new_gpio_device(&btn_cfg, &gpio_cfg, &g_button_boot_handle));
-  LogHeap("after button");
-
   InitDisplay();
   LogHeap("after display+lvgl");
   g_display->ShowStatus("初始化");
@@ -1270,6 +1460,7 @@ void setup() {
 #elif AUDIO_INPUT_DEVICE_TYPE == AUDIO_INPUT_DEVICE_TYPE_PDM
   auto audio_input_device = std::make_shared<ai_vox::PdmAudioInputDevice>(kMicPinSck, kMicPinSd);
 #endif
+  g_audio_input_device = audio_input_device;
   auto& ai_vox_engine = ai_vox::Engine::GetInstance();
   ai_vox_engine.SetObserver(g_observer);
   ai_vox_engine.SetOtaUrl("https://api.tenclass.net/xiaozhi/ota/");
@@ -1285,39 +1476,6 @@ void setup() {
 
   printf("engine started\n");
   LogHeap("after engine start");
-
-  ESP_ERROR_CHECK(iot_button_register_cb(
-      g_button_boot_handle,
-      BUTTON_PRESS_DOWN,
-      nullptr,
-      [](void* button_handle, void* usr_data) {
-        printf("boot button pressed\n");
-        ClearNotification();
-        ai_vox::Engine::GetInstance().Advance();
-      },
-      nullptr));
-
-  ESP_ERROR_CHECK(iot_button_register_cb(
-      g_button_boot_handle,
-      BUTTON_DOUBLE_CLICK,
-      nullptr,
-      [](void* button_handle, void* usr_data) {
-        printf("boot button double clicked: toggle UI mode\n");
-        if (g_display) {
-          g_display->ToggleUiMode();
-        }
-      },
-      nullptr));
-
-  ESP_ERROR_CHECK(iot_button_register_cb(
-      g_button_boot_handle,
-      BUTTON_LONG_PRESS_START,
-      nullptr,
-      [](void* button_handle, void* usr_data) {
-        printf("boot button long pressed: starting debug console\n");
-        EnsureDebugServerStarted();
-      },
-      nullptr));
 
   g_display->ShowStatus("AI引擎已启动");
 }
@@ -1399,6 +1557,7 @@ void loop() {
   // the engine state is still whatever the last event left it as.
   TimerTick();
   NotificationTick();
+  IdleCompanionTick(engine);
 
   // Drains at most a few bytes of UART and, at most once per 60ms, nudges a
   // servo. Nothing here allocates.
@@ -1548,21 +1707,27 @@ void loop() {
           break;
         }
         case ai_vox::ChatState::kStandby: {
-          printf("Standby -> auto advance to connect & listen\n");
-          g_display->ShowStatus("待命");
+          printf("Standby -> idle companion mode (say 'Hi ENCO' or '安可' to wake)\n");
+          RestoreWakeVolume();
+          g_wake_verify_pending = false;
+          g_awake_session = false;
+          g_standby_speech_frames = 0;
+          g_next_idle_face_ms = millis() + 2000;
+          g_next_idle_head_ms = millis() + 3500;
+          g_display->ShowStatus("叫 \"Hi ENCO / 安可\" 唤醒");
           LogHeap("standby");
-          // Automatically advance to connect and start listening without requiring button press
-          engine.Advance();
           break;
         }
         case ai_vox::ChatState::kConnecting: {
           printf("Connecting...\n");
-          g_display->ShowStatus("连接中...");
+          CloseStandbyMic();
+          g_display->ShowStatus(g_wake_verify_pending ? "识别唤醒词..." : "连接中...");
           break;
         }
         case ai_vox::ChatState::kListening: {
           printf("Listening...\n");
-          g_display->ShowStatus("聆听中");
+          CloseStandbyMic();
+          g_display->ShowStatus(g_wake_verify_pending ? "识别唤醒词..." : "聆听中");
           LogHeap("listening");
           break;
         }
@@ -1599,8 +1764,42 @@ void loop() {
         }
         case ai_vox::ChatRole::kUser: {
           printf("role: user, content: %s\n", chat_message_event->content.c_str());
+          if (g_wake_verify_pending && !g_awake_session) {
+            if (IsWakeWordUtterance(chat_message_event->content)) {
+              printf("[wake] Wake word confirmed ('%s') -> entering active listening mode!\n",
+                     chat_message_event->content.c_str());
+              RestoreWakeVolume();
+              g_wake_verify_pending = false;
+              g_awake_session = true;
+              ClearNotification();
+              ServoController::GetInstance().CenterAll();
+              if (g_display) {
+                g_display->ShowStatus("聆听中");
+                g_display->UpdateRobotFaceEmotion("happy");
+                g_display->LookDirection("center");
+              }
+            } else {
+              printf("[wake] Ignored non-wake utterance ('%s') -> returning to standby\n",
+                     chat_message_event->content.c_str());
+              RestoreWakeVolume();
+              g_wake_verify_pending = false;
+              g_awake_session = false;
+              g_standby_cooldown_until_ms = millis() + 1200;
+              engine.Disconnect();
+              break;
+            }
+          }
           g_display->SetChatMessage(Display::Role::kUser, chat_message_event->content);
           g_last_user_query = chat_message_event->content;
+          if (chat_message_event->content.find("退下") != std::string::npos ||
+              chat_message_event->content.find("去休息") != std::string::npos ||
+              chat_message_event->content.find("待命") != std::string::npos) {
+            printf("[wake] User asked robot to rest -> disconnecting to standby companion mode\n");
+            g_awake_session = false;
+            g_wake_verify_pending = false;
+            engine.Disconnect();
+            break;
+          }
           if (chat_message_event->content.find("关闭摄像头") != std::string::npos ||
               chat_message_event->content.find("关掉摄像头") != std::string::npos ||
               chat_message_event->content.find("退出摄像头") != std::string::npos ||
