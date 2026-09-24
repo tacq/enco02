@@ -272,7 +272,8 @@ inline TimerCommand ClassifyTimerCommand(const std::string& query) {
   //我就回来" would start a timer the user never asked for - the same false-positive trap the
   // volume fallback has to avoid.
   const bool about_timer = has("定时") || has("倒计时") || has("计时") || has("闹钟") || has("闹铃") ||
-                           has("提醒") || has("叫我") || has("喊我") || has("timer") || has("alarm") ||
+                           has("提醒") || has("叫我") || has("喊我") || has("秒后") || has("分钟后") ||
+                           has("分后") || has("小时后") || has("钟头后") || has("timer") || has("alarm") ||
                            has("countdown") || has("remind");
   if (!about_timer) {
     return result;
