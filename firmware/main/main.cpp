@@ -740,22 +740,30 @@ void NotificationTick() {
   }
 }
 
-// Pool toasts are held until the spoken answer ends. Painting the card while TTS streams in took
-// the largest free block to ~2KB and WiFi (which wants 2308-byte buffers) stalled mid-sentence.
-std::string g_pool_toast_title;
-std::string g_pool_toast_body;
+// Pool cards go up as soon as the result is in, so the user can read along while it is spoken,
+// and stay until the spoken report ends (plus a short beat), not for a fixed time.
+//
+// This used to be deferred until after the reply: painting the card during TTS once took the
+// largest free block to ~2KB and stalled WiFi. Two later fixes bought that headroom back - the
+// merged single pool tool (smaller session tool list) and playback no longer allocating a 2.9KB
+// decode buffer per reply - so it is shown straight away again.
+constexpr uint32_t kPoolCardSafetyHoldMs = 45000;  // in case the reply never reaches "listening"
+constexpr uint32_t kPoolCardAfterSpeechMs = 2500;
+bool g_pool_card_until_speech_end = false;
 
 void QueuePoolToast(const char* title, const std::string& body) {
   if (body.empty()) return;
-  g_pool_toast_title = title;
-  g_pool_toast_body = body;
+  ShowNotification(title, body.c_str(), kPoolCardSafetyHoldMs);
+  g_pool_card_until_speech_end = true;
 }
 
+// Called when the assistant stops speaking.
 void FlushPoolToast() {
-  if (g_pool_toast_body.empty()) return;
-  ShowNotification(g_pool_toast_title.c_str(), g_pool_toast_body.c_str(), 8000);
-  std::string().swap(g_pool_toast_title);
-  std::string().swap(g_pool_toast_body);
+  if (!g_pool_card_until_speech_end) return;
+  g_pool_card_until_speech_end = false;
+  if (g_alert_visible) {
+    g_alert_expires_at = millis() + kPoolCardAfterSpeechMs;
+  }
 }
 
 // "5分钟" / "1小时30分钟". Only ever spoken, never displayed.
