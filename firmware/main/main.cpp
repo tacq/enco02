@@ -794,25 +794,14 @@ uint32_t TimerRemainingSeconds() {
 // =========================================================================
 // Standby Companion Mode & "Hi ENCO" / "安可" Wake-Word Verification
 // =========================================================================
-constexpr uint32_t kAwakeIdleTimeoutMs = 30000;  // Return to Standby Companion Mode after 30s of inactivity
+constexpr uint32_t kAwakeIdleTimeoutMs = 120000;  // Return to Standby Companion Mode after 120s of inactivity
 
 bool g_awake_session = false;
 uint32_t g_last_active_turn_ms = 0;
 uint8_t g_saved_wake_volume = 80;
 bool g_standby_muted = false;
-bool g_standby_mic_open = false;
-uint32_t g_standby_noise_floor = 180;
-uint8_t g_standby_speech_frames = 0;
-uint32_t g_standby_cooldown_until_ms = 0;
 uint32_t g_next_idle_head_ms = 0;
 uint32_t g_next_idle_face_ms = 0;
-
-void CloseStandbyMic() {
-  if (g_standby_mic_open && g_audio_input_device) {
-    g_audio_input_device->CloseInput();
-    g_standby_mic_open = false;
-  }
-}
 
 void RestoreWakeVolume() {
   if (g_audio_output_device) {
@@ -837,15 +826,14 @@ void MuteForStandby() {
 void EnterStandbyCompanionMode() {
   g_awake_session = false;
   MuteForStandby();
-  g_next_idle_face_ms = millis() + 1500;
-  g_next_idle_head_ms = millis() + 3000;
+  g_next_idle_face_ms = millis() + 2000;
+  g_next_idle_head_ms = millis() + 4000;
   if (g_display) {
     g_display->ShowStatus("待命 · 叫 \"安可\" 唤醒");
   }
 }
 
 void WakeUpSession(const char* status_text = "聆听中") {
-  CloseStandbyMic();
   g_awake_session = true;
   g_last_active_turn_ms = millis();
   RestoreWakeVolume();
@@ -858,8 +846,12 @@ void WakeUpSession(const char* status_text = "聆听中") {
   }
 }
 
-bool IsWakeWordUtterance(const std::string& text) {
+bool IsWakeWordOrDirectCommand(const std::string& text) {
   if (text.empty()) return false;
+  // Any valid timer command ("提醒我5秒后喝水", "定个5分钟闹钟", etc.) wakes immediately
+  if (ClassifyTimerCommand(text).kind != TimerCommandKind::kNone) {
+    return true;
+  }
   std::string lower;
   lower.reserve(text.size());
   for (unsigned char c : text) {
@@ -873,12 +865,12 @@ bool IsWakeWordUtterance(const std::string& text) {
       lower.find("an ke") != std::string::npos ||
       lower.find("uncle") != std::string::npos ||
       lower.find("echo") != std::string::npos ||
-      lower.find("hi ") != std::string::npos ||
-      lower.find("hey ") != std::string::npos ||
+      lower.find("hi") != std::string::npos ||
+      lower.find("hey") != std::string::npos ||
       lower.find("hello") != std::string::npos) {
     return true;
   }
-  // Mandarin variations & common ASR homophones for "Hi 安可" / "安可" / "ENCO"
+  // Mandarin variations & common ASR homophones for "Hi 安可" / "安可" / "ENCO" + direct commands
   if (text.find("安可") != std::string::npos ||
       text.find("安科") != std::string::npos ||
       text.find("恩可") != std::string::npos ||
@@ -892,7 +884,12 @@ bool IsWakeWordUtterance(const std::string& text) {
       text.find("小安") != std::string::npos ||
       text.find("小智") != std::string::npos ||
       text.find("你好") != std::string::npos ||
-      text.find("嗨") != std::string::npos) {
+      text.find("嗨") != std::string::npos ||
+      text.find("提醒") != std::string::npos ||
+      text.find("定时") != std::string::npos ||
+      text.find("倒计时") != std::string::npos ||
+      text.find("闹钟") != std::string::npos ||
+      text.find("摄像头") != std::string::npos) {
     return true;
   }
   return false;
@@ -901,15 +898,14 @@ bool IsWakeWordUtterance(const std::string& text) {
 void IdleCompanionTick(ai_vox::Engine& engine) {
   const uint32_t now_ms = millis();
 
-  // If currently awake, check if the conversation has been idle in kListening for 30s.
+  // If currently awake, check if the conversation has been idle in kListening for 120s.
   if (g_awake_session) {
-    CloseStandbyMic();
     if (g_chat_state == ai_vox::ChatState::kSpeaking) {
       g_last_active_turn_ms = now_ms;
     } else if (g_chat_state == ai_vox::ChatState::kListening &&
                g_last_active_turn_ms != 0 &&
                static_cast<int32_t>(now_ms - g_last_active_turn_ms) >= static_cast<int32_t>(kAwakeIdleTimeoutMs)) {
-      printf("[wake] 30s conversation inactivity -> returning to Standby Companion Mode\n");
+      printf("[wake] 120s conversation inactivity -> returning to Standby Companion Mode\n");
       EnterStandbyCompanionMode();
     }
     return;
@@ -920,9 +916,9 @@ void IdleCompanionTick(ai_vox::Engine& engine) {
     MuteForStandby();
   }
 
-  // 1. Random virtual character facial emoji & gaze changes (every 4.0s - 8.5s)
+  // 1. Random virtual character facial emoji & gaze changes (every 4.5s - 9.0s)
   if (g_next_idle_face_ms == 0) {
-    g_next_idle_face_ms = now_ms + 2500;
+    g_next_idle_face_ms = now_ms + 3000;
   } else if (static_cast<int32_t>(now_ms - g_next_idle_face_ms) >= 0) {
     static const char* const kIdleEmotions[] = {
         "neutral", "happy", "wink", "cool", "thinking", "surprised", "loving", "sleepy"
@@ -936,106 +932,36 @@ void IdleCompanionTick(ai_vox::Engine& engine) {
       g_display->UpdateRobotFaceEmotion(kIdleEmotions[idx]);
       g_display->LookDirection(kIdleLookDirs[dir_idx]);
     }
-    g_next_idle_face_ms = now_ms + 4000 + (esp_random() % 4500);
+    g_next_idle_face_ms = now_ms + 4500 + (esp_random() % 4500);
   }
 
-  // 2. Random gentle head movements via ServoController (every 6.5s - 13.5s)
+  // 2. Random gentle head movements via ServoController (every 7.0s - 14.0s)
+  // Using non-blocking SetAngle with small gentle steps or TriggerHeadBobble so loopTask never blocks!
   if (g_next_idle_head_ms == 0) {
-    g_next_idle_head_ms = now_ms + 4000;
+    g_next_idle_head_ms = now_ms + 4500;
   } else if (static_cast<int32_t>(now_ms - g_next_idle_head_ms) >= 0) {
     auto& servo = ServoController::GetInstance();
     if (!servo.IsAnimating()) {
       const uint32_t action = esp_random() % 5;
       switch (action) {
         case 0:
-          servo.MoveAngleSmooth(ServoController::kPinServo2, 56.0f + static_cast<float>(esp_random() % 12));
+          servo.SetAngle(ServoController::kPinServo2, 62.0f + static_cast<float>(esp_random() % 8));
           break;
         case 1:
-          servo.MoveAngleSmooth(ServoController::kPinServo2, 74.0f + static_cast<float>(esp_random() % 12));
+          servo.SetAngle(ServoController::kPinServo2, 72.0f + static_cast<float>(esp_random() % 8));
           break;
         case 2:
-          servo.MoveAngleSmooth(ServoController::kPinServo0, 82.0f + static_cast<float>(esp_random() % 16));
+          servo.SetAngle(ServoController::kPinServo0, 85.0f + static_cast<float>(esp_random() % 10));
           break;
         case 3:
-          if ((esp_random() & 1) == 0) {
-            servo.TiltLeft(8.0f);
-          } else {
-            servo.TiltRight(8.0f);
-          }
+          servo.SetAngle(ServoController::kPinServo1, 84.0f + static_cast<float>(esp_random() % 12));
           break;
         default:
           servo.CenterAll();
           break;
       }
     }
-    g_next_idle_head_ms = now_ms + 6500 + (esp_random() % 7000);
-  }
-
-  // 3. If the WebSocket is already open (kListening / kSpeaking), AudioInputEngine is already
-  //    streaming to cloud STT with zero latency — so local I2S reading is not needed.
-  if (g_chat_state != ai_vox::ChatState::kStandby) {
-    CloseStandbyMic();
-    return;
-  }
-
-  // 4. When WebSocket is closed (kStandby after server "goodbye"), monitor local I2S mic
-  //    and wake immediately via SendWakeText("你好安可") when user speaks!
-  if (ServoController::GetInstance().IsAnimating()) {
-    g_standby_speech_frames = 0;
-    g_standby_cooldown_until_ms = now_ms + 350;
-    return;
-  }
-  if (static_cast<int32_t>(now_ms - g_standby_cooldown_until_ms) < 0) {
-    return;
-  }
-  if (!g_audio_input_device) {
-    return;
-  }
-  if (!g_standby_mic_open) {
-    g_audio_input_device->OpenInput(16000);
-    g_standby_mic_open = true;
-    g_standby_speech_frames = 0;
-    g_standby_cooldown_until_ms = now_ms + 450;  // 450ms I2S DC-offset settle window
-    return;
-  }
-
-  int16_t pcm[80];  // 5ms frame at 16kHz on stack (zero heap allocation)
-  const size_t n = g_audio_input_device->Read(pcm, sizeof(pcm) / sizeof(pcm[0]));
-  if (n == 0) {
-    return;
-  }
-
-  int32_t mean = 0;
-  for (size_t i = 0; i < n; ++i) {
-    mean += pcm[i];
-  }
-  mean /= static_cast<int32_t>(n);
-
-  uint32_t sum_abs = 0;
-  for (size_t i = 0; i < n; ++i) {
-    const int32_t s = static_cast<int32_t>(pcm[i]) - mean;
-    sum_abs += static_cast<uint32_t>(s < 0 ? -s : s);
-  }
-  const uint32_t avg_abs = sum_abs / n;
-
-  if (avg_abs < g_standby_noise_floor * 2) {
-    g_standby_noise_floor = (g_standby_noise_floor * 15 + avg_abs) / 16;
-    if (g_standby_noise_floor < 100) g_standby_noise_floor = 100;
-    if (g_standby_noise_floor > 1000) g_standby_noise_floor = 1000;
-  }
-
-  const uint32_t threshold = std::max<uint32_t>(g_standby_noise_floor * 3, 380);
-  if (avg_abs > threshold) {
-    ++g_standby_speech_frames;
-    if (g_standby_speech_frames >= 10) {
-      printf("[wake] standby voice detected (energy=%u, floor=%u) -> waking ENCO via SendWakeText!\n",
-             static_cast<unsigned>(avg_abs), static_cast<unsigned>(g_standby_noise_floor));
-      g_standby_speech_frames = 0;
-      WakeUpSession("已唤醒 · 连接中...");
-      engine.SendWakeText("你好安可");
-    }
-  } else if (g_standby_speech_frames > 0) {
-    --g_standby_speech_frames;
+    g_next_idle_head_ms = now_ms + 7000 + (esp_random() % 7000);
   }
 }
 
@@ -1758,13 +1684,11 @@ void loop() {
         }
         case ai_vox::ChatState::kConnecting: {
           printf("Connecting...\n");
-          CloseStandbyMic();
           g_display->ShowStatus(g_awake_session ? "连接中..." : "待命 · 叫 \"安可\" 唤醒");
           break;
         }
         case ai_vox::ChatState::kListening: {
           printf("Listening...\n");
-          CloseStandbyMic();
           if (g_awake_session) {
             g_last_active_turn_ms = millis();
             g_display->ShowStatus("聆听中");
@@ -1822,8 +1746,8 @@ void loop() {
         case ai_vox::ChatRole::kUser: {
           printf("role: user, content: %s\n", chat_message_event->content.c_str());
           if (!g_awake_session) {
-            if (IsWakeWordUtterance(chat_message_event->content)) {
-              printf("[wake] Wake word confirmed ('%s') -> entering active listening mode!\n",
+            if (IsWakeWordOrDirectCommand(chat_message_event->content)) {
+              printf("[wake] Wake word or direct command confirmed ('%s') -> entering active listening mode!\n",
                      chat_message_event->content.c_str());
               WakeUpSession("聆听中");
             } else {
@@ -1836,6 +1760,11 @@ void loop() {
           }
           g_display->SetChatMessage(Display::Role::kUser, chat_message_event->content);
           g_last_user_query = chat_message_event->content;
+          // Immediately evaluate timer commands ("提醒我5秒后喝水") on user speech arrival so MCP
+          // tool calls (like screen.notify) cannot swallow g_last_user_query before the timer starts!
+          if (CheckAndExecuteTimerFallback(chat_message_event->content)) {
+            g_last_user_query.clear();
+          }
           if (chat_message_event->content.find("退下") != std::string::npos ||
               chat_message_event->content.find("去休息") != std::string::npos ||
               chat_message_event->content.find("待命") != std::string::npos) {
