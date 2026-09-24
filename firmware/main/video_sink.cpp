@@ -87,18 +87,20 @@ int OutFunc(JDEC* jd, void* bitmap, JRECT* rect) {
   uint16_t* out = g_block;
   for (int y = y0; y <= y1; ++y) {
     // Source is packed RGB888, blk_w pixels per row, indexed from rect->left.
-    const uint8_t* rgb = rows + (static_cast<size_t>(y - rect->top) * static_cast<size_t>(blk_w) + static_cast<size_t>(x0 - rect->left)) * 3;
+    // Read right-to-left (from x1 down to x0) to un-mirror the camera image horizontally.
+    const uint8_t* rgb =
+        rows + (static_cast<size_t>(y - rect->top) * static_cast<size_t>(blk_w) + static_cast<size_t>(x1 - rect->left)) * 3;
     for (int x = 0; x < w; ++x) {
       const uint16_t c = static_cast<uint16_t>(((rgb[0] & 0xF8) << 8) | ((rgb[1] & 0xFC) << 3) | (rgb[2] >> 3));
       // Byte-swapped on the way in: the ST7789 clocks RGB565 MSB first, and this
       // buffer goes to the panel by DMA with no further processing. (The LVGL
       // port does the same thing via its swap_bytes flag.)
       *out++ = static_cast<uint16_t>((c >> 8) | (c << 8));
-      rgb += 3;
+      rgb -= 3;
     }
   }
 
-  const int sx = g_origin_x + (x0 - g_crop_x);
+  const int sx = g_origin_x + g_crop_w - (x1 - g_crop_x + 1);
   const int sy = g_origin_y + (y0 - g_crop_y);
   esp_lcd_panel_draw_bitmap(g_panel, sx, sy, sx + w, sy + h, g_block);
   return 1;
