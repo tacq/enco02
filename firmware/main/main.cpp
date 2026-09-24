@@ -938,6 +938,13 @@ void IdleCompanionTick(ai_vox::Engine& engine) {
   }
 
   // 3. Local I2S microphone speech cadence detector in Standby (no WebSocket open)
+  // Ignore mic input while servos are moving (+350ms acoustic settle time) so motor sound
+  // never triggers wake-word verification.
+  if (ServoController::GetInstance().IsAnimating()) {
+    g_standby_speech_frames = 0;
+    g_standby_cooldown_until_ms = now_ms + 350;
+    return;
+  }
   if (static_cast<int32_t>(now_ms - g_standby_cooldown_until_ms) < 0) {
     return;
   }
@@ -948,6 +955,8 @@ void IdleCompanionTick(ai_vox::Engine& engine) {
     g_audio_input_device->OpenInput(16000);
     g_standby_mic_open = true;
     g_standby_speech_frames = 0;
+    g_standby_cooldown_until_ms = now_ms + 450;  // 450ms I2S DC-offset settle window
+    return;
   }
 
   int16_t pcm[80];  // 5ms frame at 16kHz on stack (zero heap allocation)
@@ -956,24 +965,31 @@ void IdleCompanionTick(ai_vox::Engine& engine) {
     return;
   }
 
+  // Compute zero-mean AC energy (removes INMP441 DC offset)
+  int32_t mean = 0;
+  for (size_t i = 0; i < n; ++i) {
+    mean += pcm[i];
+  }
+  mean /= static_cast<int32_t>(n);
+
   uint32_t sum_abs = 0;
   for (size_t i = 0; i < n; ++i) {
-    const int32_t s = pcm[i];
+    const int32_t s = static_cast<int32_t>(pcm[i]) - mean;
     sum_abs += static_cast<uint32_t>(s < 0 ? -s : s);
   }
   const uint32_t avg_abs = sum_abs / n;
 
   if (avg_abs < g_standby_noise_floor * 2) {
     g_standby_noise_floor = (g_standby_noise_floor * 15 + avg_abs) / 16;
-    if (g_standby_noise_floor < 100) g_standby_noise_floor = 100;
-    if (g_standby_noise_floor > 900) g_standby_noise_floor = 900;
+    if (g_standby_noise_floor < 120) g_standby_noise_floor = 120;
+    if (g_standby_noise_floor > 1200) g_standby_noise_floor = 1200;
   }
 
-  const uint32_t threshold = std::max<uint32_t>(g_standby_noise_floor * 3, 420);
+  const uint32_t threshold = std::max<uint32_t>(g_standby_noise_floor * 4, 650);
   if (avg_abs > threshold) {
     ++g_standby_speech_frames;
-    // ~110ms of clear voice cadence ("Hi ENCO" / "安可")
-    if (g_standby_speech_frames >= 22) {
+    // ~120ms of clear voice cadence ("Hi ENCO" / "安可")
+    if (g_standby_speech_frames >= 24) {
       printf("[wake] voice cadence detected (energy=%u, floor=%u) -> verifying 'Hi ENCO / 安可'\n",
              static_cast<unsigned>(avg_abs), static_cast<unsigned>(g_standby_noise_floor));
       g_standby_speech_frames = 0;
