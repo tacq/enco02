@@ -478,6 +478,7 @@ bool g_volume_dirty = false;
 uint32_t g_last_volume_exec_time = 0;
 // Tracked purely so the deferred NVS write can hold off while she is talking.
 ai_vox::ChatState g_chat_state = ai_vox::ChatState::kIdle;
+uint32_t g_chat_state_since_ms = 0;
 
 uint16_t SetVolume(const int requested) {
   // Clamp in signed arithmetic. set_volume() takes a uint16_t, so doing `volume - step` in the
@@ -1432,10 +1433,18 @@ uint32_t g_cam_view_heap_check_ms = 0;
 // plus the UART ring leave the WiFi/mbedTLS stack short of the ~1.4KB blocks it needs for a TLS
 // record, so esp_websocket_client dies with sock_errno 12 (ENOMEM) mid-session and every spoken
 // command after that goes nowhere. Freeze the stream before it gets that far.
-constexpr size_t kCamFreezeFreeHeap = 24000;
-constexpr size_t kCamFreezeLargestBlock = 9000;
-constexpr size_t kCamThawFreeHeap = 46000;
-constexpr size_t kCamThawLargestBlock = 15000;
+//
+// The stream is also paused for the whole of every spoken reply (see the kSpeaking guard below):
+// TTS alone takes ~10KB and fragments the heap. The thaw margins must be reachable while awake -
+// with AudioInput running, free heap tops out around 23-28KB with the pool released - otherwise
+// the picture stays frozen with its hint up until the session drops to standby.
+constexpr size_t kCamFreezeFreeHeap = 14000;
+constexpr size_t kCamFreezeLargestBlock = 6000;
+constexpr size_t kCamThawFreeHeap = 20000;
+constexpr size_t kCamThawLargestBlock = 10000;
+// After a reply ends, wait this long before re-taking the 4KB pool, so a follow-up sentence or a
+// tool-driven second reply does not immediately bounce the stream again.
+constexpr uint32_t kCamThawSettleMs = 800;
 
 // How long the live picture is shown before the shutter. Enough for a few
 // frames to land so the user can see what is in shot and move their hand if it
@@ -1538,6 +1547,7 @@ void ThawCameraView() {
   g_display->SetCameraHint(nullptr);
   g_display->SetCameraCapturing(false);
   g_cam_view_frozen = false;
+  g_cam_view_low_heap_hold = false;
   g_cam_view_stat_ms = 0;
   g_cam_view_last_frames = 0;
   CamLink::GetInstance().BeginVideo();
@@ -1794,11 +1804,14 @@ void loop() {
       const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
       if (!g_cam_view_frozen) {
         // kConnecting is the single most expensive moment on this board - the mbedTLS handshake
-        // wants tens of KB - so the stream always stands aside for it.
+        // wants tens of KB - so the stream always stands aside for it. A spoken reply is the
+        // next most expensive, and it is short, so the stream stands aside for that too.
         const bool handshaking = (g_chat_state == ai_vox::ChatState::kConnecting ||
                                   g_chat_state == ai_vox::ChatState::kLoading);
-        if (handshaking || free_heap < kCamFreezeFreeHeap || largest < kCamFreezeLargestBlock) {
-          printf("camera view: freezing stream to protect the voice session (free %u, largest %u)\n",
+        const bool speaking = g_chat_state == ai_vox::ChatState::kSpeaking;
+        if (handshaking || speaking || free_heap < kCamFreezeFreeHeap || largest < kCamFreezeLargestBlock) {
+          printf("camera view: pausing stream for the voice session (%s, free %u, largest %u)\n",
+                 speaking ? "speaking" : (handshaking ? "connecting" : "low heap"),
                  static_cast<unsigned>(free_heap), static_cast<unsigned>(largest));
           FreezeCameraView();
           g_cam_view_low_heap_hold = true;
@@ -1807,12 +1820,18 @@ void loop() {
       } else if (g_cam_view_low_heap_hold && g_cam_view_deadline_ms == 0 && !g_pending_look.active) {
         // Hysteresis, and never while she is mid-reply: re-taking the 4KB pool during TTS is what
         // the deferred thaw below already exists to avoid.
-        if (g_chat_state != ai_vox::ChatState::kSpeaking && g_chat_state != ai_vox::ChatState::kConnecting &&
-            free_heap >= kCamThawFreeHeap && largest >= kCamThawLargestBlock) {
-          printf("camera view: heap recovered (free %u, largest %u), resuming stream\n",
+        const bool quiet = g_chat_state != ai_vox::ChatState::kSpeaking &&
+                           g_chat_state != ai_vox::ChatState::kConnecting &&
+                           g_chat_state != ai_vox::ChatState::kLoading &&
+                           now_ms - g_chat_state_since_ms >= kCamThawSettleMs;
+        if (quiet && free_heap >= kCamThawFreeHeap && largest >= kCamThawLargestBlock) {
+          printf("camera view: resuming stream (free %u, largest %u)\n",
                  static_cast<unsigned>(free_heap), static_cast<unsigned>(largest));
           g_cam_view_low_heap_hold = false;
           ThawCameraView();
+        } else if (quiet && now_ms - g_cam_view_stat_ms >= 1000) {
+          printf("camera view: still paused (free %u, largest %u)\n", static_cast<unsigned>(free_heap),
+                 static_cast<unsigned>(largest));
         }
       }
     }
@@ -1867,6 +1886,7 @@ void loop() {
       // Recorded before the switch, which does not have a case for every state: the deferred NVS
       // write below needs to know whether audio is currently playing.
       g_chat_state = state_changed_event->new_state;
+      g_chat_state_since_ms = millis();
       switch (state_changed_event->new_state) {
         case ai_vox::ChatState::kIdle: {
           printf("Idle\n");
