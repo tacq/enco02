@@ -49,6 +49,13 @@ static constexpr uint32_t kHairGapSpreadTicks = 40;  // up to a further 3.2s
 static constexpr const char* kIdleCaption = "待命中 · 说 \"Hi 安可\" 唤醒";
 static bool s_has_active_chat_subtitle = false;
 
+// Overlay layout (240x320 panel). The status bar is ~26px tall (16px glyphs + 3px padding top and
+// bottom + 1px rule). The T-MINUS panel (186x38) sits 8px below it; the alert card (144x148) sits on
+// the right 8px below the panel, with an 8px right margin.
+static constexpr lv_coord_t kTimerPanelY = 34;
+static constexpr lv_coord_t kAlertCardX = 240 - 8 - 144;          // 88
+static constexpr lv_coord_t kAlertCardY = kTimerPanelY + 38 + 8;  // 80
+
 // Sci-Fi HUD Jarvis Theme Color Definitions
 #define SCI_FI_BG_COLOR lv_color_hex(0x060c14)             // Deep space holographic dark
 #define SCI_FI_TEXT_COLOR lv_color_hex(0x7dd3fc)           // Glowing cyan blue text
@@ -782,8 +789,10 @@ bool Display::EnsureTimerPanel() {
     return false;
   }
 
+  // Top of the screen, just below the status bar with a small gap, so it no longer covers the
+  // blue caption/message pill at the bottom.
   timer_panel_ = lv_obj_create(lv_screen_active());
-  lv_obj_set_pos(timer_panel_, 27, 278);
+  lv_obj_set_pos(timer_panel_, 27, kTimerPanelY);
   lv_obj_set_size(timer_panel_, 186, 38);
   lv_obj_set_style_radius(timer_panel_, 5, 0);
   lv_obj_set_style_pad_all(timer_panel_, 0, 0);
@@ -811,7 +820,6 @@ bool Display::EnsureTimerPanel() {
   lv_obj_align(timer_digits_, LV_ALIGN_RIGHT_MID, -8, 0);
 
   lv_obj_move_foreground(timer_panel_);
-  SetSubtitleHidden(true);
   return true;
 }
 
@@ -822,7 +830,6 @@ void Display::DestroyTimerPanel() {
   lv_obj_del(timer_panel_);  // deletes its children too
   timer_panel_ = nullptr;
   timer_digits_ = nullptr;
-  SetSubtitleHidden(false);
 }
 
 void Display::ShowAlert(const char* title, const char* body, const uint32_t duration_ms) {
@@ -844,10 +851,11 @@ void Display::ShowAlert(const char* title, const char* body, const uint32_t dura
       return;
     }
 
-    // Right-hand square-ish sci-fi HUD alert box (144x148 at x=92, y=40) with a protruding
-    // top-left amber folder tab, horizontal telemetry rules, and a bottom warning badge.
+    // Right-hand square-ish sci-fi HUD alert box (144x148) with a protruding top-left amber
+    // folder tab, horizontal telemetry rules, and a bottom warning badge. Sits below the timer
+    // panel with an 8px gap and an 8px right margin.
     alert_card_ = lv_obj_create(lv_screen_active());
-    lv_obj_set_pos(alert_card_, 92, 40);
+    lv_obj_set_pos(alert_card_, kAlertCardX, kAlertCardY);
     lv_obj_set_size(alert_card_, 144, 148);
     lv_obj_set_style_pad_all(alert_card_, 0, 0);
     lv_obj_set_style_bg_opa(alert_card_, LV_OPA_TRANSP, 0);
@@ -964,7 +972,28 @@ void Display::ShowTimer(const uint32_t remaining_seconds) {
   }
 
   lvgl_port_lock(0);
-  if (timer_label_ != nullptr) {
+  // The T-MINUS panel just below the status bar is the primary readout. The status bar only carries
+  // the countdown as a fallback when the panel is declined - the viewfinder owns the screen, or the
+  // heap is low - so the user is never left with no countdown at all.
+  if (EnsureTimerPanel() && timer_digits_ != nullptr) {
+    char big[16];
+    if (hours > 0) {
+      snprintf(big, sizeof(big), "%u:%02u:%02u", hours, minutes, seconds);
+    } else {
+      snprintf(big, sizeof(big), "%02u:%02u", minutes, seconds);
+    }
+    lv_label_set_text(timer_digits_, big);
+    // Panel is up: make sure the status bar is showing its normal status, not a second countdown.
+    if (timer_label_ != nullptr && timer_visible_) {
+      timer_visible_ = false;
+      lv_obj_add_flag(timer_label_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_set_flex_grow(timer_label_, 0);
+      lv_label_set_text(timer_label_, "");
+      if (status_label_ != nullptr) {
+        lv_obj_clear_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+      }
+    }
+  } else if (timer_label_ != nullptr) {
     lv_label_set_text(timer_label_, text);
     if (!timer_visible_) {
       timer_visible_ = true;
@@ -980,20 +1009,6 @@ void Display::ShowTimer(const uint32_t remaining_seconds) {
       }
     }
   }
-
-  // The big T-MINUS panel. The status-bar readout above is kept rather than replaced: it is the
-  // fallback for the cases this panel declines - low heap, or the viewfinder owning the screen -
-  // and it is what chat mode and the camera view show. Neither path can leave the user with no
-  // countdown at all.
-  if (EnsureTimerPanel() && timer_digits_ != nullptr) {
-    char big[16];
-    if (hours > 0) {
-      snprintf(big, sizeof(big), "%u:%02u:%02u", hours, minutes, seconds);
-    } else {
-      snprintf(big, sizeof(big), "%02u:%02u", minutes, seconds);
-    }
-    lv_label_set_text(timer_digits_, big);
-  }
   lvgl_port_unlock();
 }
 
@@ -1002,7 +1017,9 @@ void Display::ShowTimer(const uint32_t remaining_seconds) {
 // noisy, and the screen is the fallback.
 void Display::ShowTimerFinished() {
   lvgl_port_lock(0);
-  if (timer_label_ != nullptr) {
+  // With the T-MINUS panel up it alone reports completion; the status bar is only used as the
+  // fallback readout when the panel was declined.
+  if (timer_panel_ == nullptr && timer_label_ != nullptr) {
     lv_label_set_text(timer_label_, "时间到");
     if (!timer_visible_) {
       timer_visible_ = true;
@@ -1018,8 +1035,7 @@ void Display::ShowTimerFinished() {
   }
   // Park the big digits at zero rather than leaving them on the last value they happened to be
   // polled at. loop() calls this the moment the deadline passes, which is usually somewhere inside
-  // the final second, so without this the panel would freeze on "00:01" while the status bar said
-  // 时间到 - two readouts disagreeing about whether the timer had finished.
+  // the final second, so without this the panel would freeze on "00:01".
   if (timer_digits_ != nullptr) {
     lv_label_set_text(timer_digits_, "00:00");
   }
