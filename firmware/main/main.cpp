@@ -746,7 +746,63 @@ std::string DescribeDuration(const uint32_t total_seconds) {
   return text;
 }
 
-void StartTimer(const uint32_t seconds) {
+std::string g_timer_event_note;
+
+std::string ExtractTimerEventNote(const std::string& query) {
+  if (query.empty()) return "";
+  std::string s = query;
+
+  // Prefer text after "后" (e.g. "提醒我5秒后喝水" -> "喝水", "五分钟后叫我关火" -> "叫我关火")
+  const size_t hou_pos = s.rfind("后");
+  if (hou_pos != std::string::npos && hou_pos + 3 <= s.size()) {
+    s = s.substr(hou_pos + 3);
+  } else {
+    // Or after "提醒我" / "叫我" / "喊我"
+    for (const char* kw : {"提醒我", "叫我", "喊我", "提醒"}) {
+      const size_t pos = s.find(kw);
+      if (pos != std::string::npos) {
+        s = s.substr(pos + strlen(kw));
+        break;
+      }
+    }
+  }
+
+  // Strip leading filler prefixes
+  bool stripped = true;
+  while (stripped && !s.empty()) {
+    stripped = false;
+    for (const char* p : {"提醒我", "提醒", "叫我", "喊我", "去", "要", "记得", "该", " ", "\t", "，", ",", "：", ":"}) {
+      const size_t len = strlen(p);
+      if (s.size() >= len && s.compare(0, len, p) == 0) {
+        s.erase(0, len);
+        stripped = true;
+        break;
+      }
+    }
+  }
+
+  // Strip trailing punctuation and modal particles
+  stripped = true;
+  while (stripped && !s.empty()) {
+    stripped = false;
+    for (const char* suf : {"。", "！", "？", ".", "!", "?", "，", ",", "吧", "哦", "呀", "啦", "呢", " ", "\t"}) {
+      const size_t len = strlen(suf);
+      if (s.size() >= len && s.compare(s.size() - len, len, suf) == 0) {
+        s.erase(s.size() - len);
+        stripped = true;
+        break;
+      }
+    }
+  }
+
+  // Ignore pure timer words if no actual activity was named
+  if (s == "定时" || s == "倒计时" || s == "闹钟" || s == "计时" || s == "时间到") {
+    return "";
+  }
+  return s;
+}
+
+void StartTimer(const uint32_t seconds, const std::string& event_note = "") {
   const uint32_t clamped = std::clamp<uint32_t>(seconds, 1, kTimerMaxSeconds);
   g_timer_running = true;
   g_timer_finished = false;
@@ -755,10 +811,14 @@ void StartTimer(const uint32_t seconds) {
   g_timer_deadline = millis() + clamped * 1000;
   g_timer_shown_remaining = static_cast<int32_t>(clamped);
   g_last_timer_exec_time = millis();
+  if (!event_note.empty()) {
+    g_timer_event_note = event_note;
+  }
   if (g_display) {
     g_display->ShowTimer(clamped);
   }
-  printf("[timer] started: %u seconds\n", static_cast<unsigned>(clamped));
+  printf("[timer] started: %u seconds (note: '%s')\n",
+         static_cast<unsigned>(clamped), g_timer_event_note.c_str());
 }
 
 // Returns whether there was anything to cancel, so the tool call can answer honestly.
@@ -768,6 +828,7 @@ bool CancelTimer() {
   g_timer_finished = false;
   g_timer_announced = true;  // Nothing left to say.
   g_timer_shown_remaining = -1;
+  g_timer_event_note.clear();
   g_last_timer_exec_time = millis();
   if (g_display) {
     g_display->HideTimer();
@@ -837,7 +898,8 @@ void WakeUpSession(const char* status_text = "聆听中") {
   g_awake_session = true;
   g_last_active_turn_ms = millis();
   RestoreWakeVolume();
-  ClearNotification();
+  // NOTE: Do NOT call ClearNotification() here! Otherwise waking up for a timer alarm
+  // immediately erases the sci-fi alert card that TimerTick() just displayed!
   ServoController::GetInstance().CenterAll();
   if (g_display) {
     g_display->ShowStatus(status_text);
@@ -846,8 +908,63 @@ void WakeUpSession(const char* status_text = "聆听中") {
   }
 }
 
+bool IsCloseCameraCommand(const std::string& text) {
+  if (text.empty()) return false;
+  const bool in_cam = (g_display != nullptr && g_display->InCameraView());
+  const bool has_cam_noun =
+      text.find("摄像") != std::string::npos ||
+      text.find("相机") != std::string::npos ||
+      text.find("镜头") != std::string::npos ||
+      text.find("画面") != std::string::npos ||
+      text.find("视频") != std::string::npos ||
+      text.find("预览") != std::string::npos ||
+      text.find("取景") != std::string::npos ||
+      text.find("监控") != std::string::npos ||
+      text.find("拍照") != std::string::npos;
+  const bool has_close_verb =
+      text.find("关") != std::string::npos ||
+      text.find("退") != std::string::npos ||
+      text.find("停") != std::string::npos ||
+      text.find("结束") != std::string::npos ||
+      text.find("取消") != std::string::npos ||
+      text.find("别看") != std::string::npos ||
+      text.find("不看") != std::string::npos ||
+      text.find("返回") != std::string::npos ||
+      text.find("主页") != std::string::npos ||
+      text.find("表情") != std::string::npos ||
+      text.find("官币") != std::string::npos ||
+      text.find("管理") != std::string::npos ||
+      text.find("光闭") != std::string::npos;
+  const bool has_open_verb =
+      text.find("打开") != std::string::npos ||
+      text.find("开启") != std::string::npos ||
+      text.find("启动") != std::string::npos ||
+      text.find("看看") != std::string::npos;
+
+  if (has_cam_noun && has_close_verb && !has_open_verb) {
+    return true;
+  }
+  // When the camera viewfinder is ALREADY on screen, allow concise commands like "关闭", "关掉", "退出", "不看了"
+  if (in_cam && !has_open_verb) {
+    if (text.find("关闭") != std::string::npos ||
+        text.find("关掉") != std::string::npos ||
+        text.find("关了") != std::string::npos ||
+        text.find("退出") != std::string::npos ||
+        text.find("不看了") != std::string::npos ||
+        text.find("别看了") != std::string::npos ||
+        text.find("返回") != std::string::npos ||
+        text.find("恢复") != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool IsWakeWordOrDirectCommand(const std::string& text) {
   if (text.empty()) return false;
+  if (IsCloseCameraCommand(text)) {
+    return true;
+  }
   // Any valid timer command ("提醒我5秒后喝水", "定个5分钟闹钟", etc.) wakes immediately
   if (ClassifyTimerCommand(text).kind != TimerCommandKind::kNone) {
     return true;
@@ -889,7 +1006,8 @@ bool IsWakeWordOrDirectCommand(const std::string& text) {
       text.find("定时") != std::string::npos ||
       text.find("倒计时") != std::string::npos ||
       text.find("闹钟") != std::string::npos ||
-      text.find("摄像头") != std::string::npos) {
+      text.find("摄像头") != std::string::npos ||
+      text.find("相机") != std::string::npos) {
     return true;
   }
   return false;
@@ -897,6 +1015,16 @@ bool IsWakeWordOrDirectCommand(const std::string& text) {
 
 void IdleCompanionTick(ai_vox::Engine& engine) {
   const uint32_t now_ms = millis();
+
+  // Never enter Standby Companion Mode while the camera viewfinder or a countdown timer is active!
+  if ((g_display && g_display->InCameraView()) || g_timer_running || g_timer_finished) {
+    g_last_active_turn_ms = now_ms;
+    if (!g_awake_session) {
+      g_awake_session = true;
+      RestoreWakeVolume();
+    }
+    return;
+  }
 
   // If currently awake, check if the conversation has been idle in kListening for 120s.
   if (g_awake_session) {
@@ -973,27 +1101,21 @@ void TimerTick() {
       g_timer_finished_at = millis();
       g_timer_last_announce_try = 0;
       g_timer_shown_remaining = -1;
-      printf("[timer] fired after %u seconds\n", static_cast<unsigned>(g_timer_total_seconds));
+      printf("[timer] fired after %u seconds (note: '%s')\n",
+             static_cast<unsigned>(g_timer_total_seconds), g_timer_event_note.c_str());
       if (g_display) {
         g_display->ShowTimerFinished();
         g_display->UpdateRobotFaceEmotion("surprised");
       }
-      // The event card. The status bar only has room for 时间到, which does not say *which*
-      // timer - and "定个五分钟的" followed by "再定个十分钟的" is an ordinary thing to ask for.
-      // DescribeDuration() is the same string the spoken announcement below uses, so the screen
-      // and the speaker name the timer identically.
-      // No emoji in the title: font_puhui_16_4 is a CJK + Latin subset with no pictographs, and
-      // LV_USE_FONT_PLACEHOLDER is on, so a "⏱" would render as a hollow box.
-      //
-      // Held for exactly as long as the status bar keeps saying 时间到, so the two halves of the
-      // same alarm appear and disappear together.
-      const std::string body = DescribeDuration(g_timer_total_seconds) + "的定时已结束";
-      ShowNotification("定时提醒 // 触发", body.c_str(), kTimerFinishedHoldMs);
-      // No local MP3 chime here. Firing almost always happens with a websocket session open, and
-      // spinning up the mp3 decoder at that moment wants a 2.3KB contiguous block the heap does not
-      // have - measured: "ALLOC FAILED #2: 2312 bytes, free: 5960, largest: 1396", which took the
-      // low-water mark down to 4.6KB and came uncomfortably close to taking the connection with it.
-      // The screen says 时间到 immediately, and the spoken announcement below follows a second later.
+      // Show the sci-fi HUD alert card on the right side of the screen, including the specific
+      // event the user asked to be reminded of (e.g. "5秒时间到\n事项：喝水").
+      std::string body = DescribeDuration(g_timer_total_seconds) + "时间到";
+      if (!g_timer_event_note.empty()) {
+        body += "\n提醒：" + g_timer_event_note;
+      } else {
+        body += "\n定时已结束";
+      }
+      ShowNotification("定时提醒 // 触发", body.c_str(), 10000);
     } else {
       // Round up, so a five minute timer reads 05:00 for its first second rather than 04:59.
       const int32_t remaining = (remaining_ms + 999) / 1000;
@@ -1013,13 +1135,13 @@ void TimerTick() {
       printf("[timer] gave up on the spoken announcement\n");
       g_timer_announced = true;
     } else {
-      // Phrased as something the user said: SendWakeText() hands the server a transcript, and the
-      // reply to it is what actually comes out of the speaker.
-      //
-      // It has to read like a wake word, not a sentence - see kTimerAnnounceMaxChars. "5分钟时间到"
-      // is within budget and still tells the assistant which timer went off, so its reply names the
-      // duration back to the user.
       std::string text = DescribeDuration(g_timer_total_seconds) + "时间到";
+      if (!g_timer_event_note.empty()) {
+        const std::string with_note = text + "，提醒我" + g_timer_event_note;
+        if (Utf8Length(with_note) <= kTimerAnnounceMaxChars) {
+          text = with_note;
+        }
+      }
       if (Utf8Length(text) > kTimerAnnounceMaxChars) {
         text = "定时时间到";  // Very long durations; drop the duration rather than be rejected.
       }
@@ -1031,12 +1153,13 @@ void TimerTick() {
     }
   }
 
-  if (g_timer_finished && millis() - g_timer_finished_at >= kTimerFinishedHoldMs) {
+  if (g_timer_finished && millis() - g_timer_finished_at >= 10000) {
     if (g_display) {
       g_display->HideTimer();
     }
     if (g_timer_announced) {
       g_timer_finished = false;
+      g_timer_event_note.clear();
     }
   }
 }
@@ -1052,8 +1175,10 @@ bool CheckAndExecuteTimerFallback(const std::string& query) {
   const auto command = ClassifyTimerCommand(query);
   switch (command.kind) {
     case TimerCommandKind::kStart: {
-      printf("[Voice Timer Fallback] start %u seconds\n", static_cast<unsigned>(command.seconds));
-      StartTimer(command.seconds);
+      const std::string note = ExtractTimerEventNote(query);
+      printf("[Voice Timer Fallback] start %u seconds (note: '%s')\n",
+             static_cast<unsigned>(command.seconds), note.c_str());
+      StartTimer(command.seconds, note);
       return true;
     }
     case TimerCommandKind::kCancel: {
@@ -1767,14 +1892,13 @@ void loop() {
             EnterStandbyCompanionMode();
             break;
           }
-          if (chat_message_event->content.find("关闭摄像头") != std::string::npos ||
-              chat_message_event->content.find("关掉摄像头") != std::string::npos ||
-              chat_message_event->content.find("退出摄像头") != std::string::npos ||
-              chat_message_event->content.find("关摄像头") != std::string::npos) {
-            printf("camera view: closing on user voice command\n");
+          if (IsCloseCameraCommand(chat_message_event->content)) {
+            printf("camera view: closing on user voice command ('%s')\n", chat_message_event->content.c_str());
             CloseCameraView();
           } else if (chat_message_event->content.find("打开摄像头") != std::string::npos ||
-                     chat_message_event->content.find("开启摄像头") != std::string::npos) {
+                     chat_message_event->content.find("开启摄像头") != std::string::npos ||
+                     chat_message_event->content.find("打开相机") != std::string::npos ||
+                     chat_message_event->content.find("开启相机") != std::string::npos) {
             OpenCameraView(/*transient=*/false);
           }
           break;
@@ -1849,11 +1973,11 @@ void loop() {
           engine.SendMcpCallError(mcp_tool_call_event->id, why);
         }
       } else if (matches("self.camera.view_off")) {
-        if (user_said.empty() ||
-            user_said.find("关闭摄像头") != std::string::npos ||
-            user_said.find("关掉摄像头") != std::string::npos ||
-            user_said.find("退出摄像头") != std::string::npos ||
-            user_said.find("关摄像头") != std::string::npos) {
+        const bool is_look_query =
+            user_said.find("这是什么") != std::string::npos ||
+            user_said.find("看看这是") != std::string::npos ||
+            user_said.find("看到什么") != std::string::npos;
+        if (!is_look_query) {
           CloseCameraView();
         }
         engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
@@ -1996,6 +2120,9 @@ void loop() {
           engine.SendMcpCallError(mcp_tool_call_event->id, "Missing pin or angle");
         }
       } else if (matches("self.screen.set_mode", "set_mode")) {
+        if (g_display && g_display->InCameraView()) {
+          CloseCameraView();
+        }
         const auto mode_ptr = mcp_tool_call_event->param<std::string>("mode");
         if (mode_ptr != nullptr && (*mode_ptr == "chat" || *mode_ptr == "text")) {
           g_display->SetUiMode(Display::UiMode::kChatText);
@@ -2004,7 +2131,11 @@ void loop() {
         }
         engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
       } else if (matches("self.screen.toggle_mode", "toggle_mode")) {
-        g_display->ToggleUiMode();
+        if (g_display && g_display->InCameraView()) {
+          CloseCameraView();
+        } else {
+          g_display->ToggleUiMode();
+        }
         engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
       } else if (matches("self.timer.start", "start_timer") || matches("self.timer.set", "set_timer")) {
         int64_t seconds = 0;
@@ -2025,7 +2156,8 @@ void loop() {
           }
         }
         if (seconds > 0) {
-          StartTimer(static_cast<uint32_t>(std::min<int64_t>(seconds, kTimerMaxSeconds)));
+          const std::string note = ExtractTimerEventNote(user_said);
+          StartTimer(static_cast<uint32_t>(std::min<int64_t>(seconds, kTimerMaxSeconds)), note);
           engine.SendMcpCallResponse(mcp_tool_call_event->id, static_cast<int64_t>(g_timer_total_seconds));
         } else {
           engine.SendMcpCallError(mcp_tool_call_event->id, "Missing valid argument: seconds");
