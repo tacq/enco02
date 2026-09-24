@@ -15,3 +15,16 @@ firmware/cam/cam_config.h
 tools/home_bridge/.env
 tools/home_bridge/pool_config.json
 tools/home_bridge/.venv/
+
+# Any secrets file anywhere in the repo (templates ending in .example stay tracked).
+.env
+*.env
+.env.*
+!*.env.example
+!.env.example
+**/cam_config.h
+**/pool_config.json
+*secrets*
+*credentials*
+*.pem
+*.key

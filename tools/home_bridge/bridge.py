@@ -86,7 +86,7 @@ def load_config() -> dict[str, Any]:
     if not isinstance(cfg.get("targets"), dict) or not cfg["targets"]:
         sys.exit("pool_config.json: 'targets' must be a non-empty object")
     for name, t in cfg["targets"].items():
-        if t.get("kind") not in ("switch", "thermostat"):
+        if t.get("kind") not in ("switch", "thermostat", "sensor"):
             sys.exit(f"pool_config.json: target {name!r} has invalid kind")
         if t["kind"] == "thermostat":
             lo, hi = t.get("min"), t.get("max")
@@ -188,6 +188,8 @@ class PoolController:
 
     async def _apply(self, target: str, action: str, value: Any) -> str:
         t = self.cfg["targets"][target]
+        if t["kind"] == "sensor":
+            raise ValueError("sensor is read-only")
         devices = await self._devices()
         d = devices.get(t["device"])
         if d is None:
