@@ -529,6 +529,10 @@ def main() -> None:
     sub.add_parser("discover")
     sub.add_parser("status")
     sub.add_parser("summary")
+    st = sub.add_parser("set", help="local control test: set <target> on|off|set [value]")
+    st.add_argument("target")
+    st.add_argument("action", choices=("on", "off", "set"))
+    st.add_argument("value", nargs="?", type=int)
     s = sub.add_parser("serve")
     # Localhost by default; pass --host <this machine's LAN IP> once ENCO needs to reach it.
     s.add_argument("--host", default="127.0.0.1")
@@ -548,6 +552,19 @@ def main() -> None:
         else:
             toast, speech = summarize(status)
             print(f"{toast}\n---\n{speech}")
+    elif args.cmd == "set":
+        cfg = load_config()
+        if args.target not in cfg["targets"]:
+            sys.exit(f"unknown target {args.target!r}; allowed: {', '.join(cfg['targets'])}")
+        ctrl = PoolController(cfg)
+        try:
+            print("result:", ctrl.apply(args.target, args.action, args.value))
+        except ValueError as e:
+            sys.exit(f"rejected: {e}")
+        time.sleep(4)  # the panel takes a moment to report the new state back to the cloud
+        after = ctrl.status().get(args.target, {})
+        print("now:", {k: after.get(k) for k in ("label", "state", "is_on", "target_temperature")
+                       if k in after})
     else:
         cmd_serve(args.host, args.port, args.allow_control)
 
