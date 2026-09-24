@@ -1438,13 +1438,18 @@ uint32_t g_cam_view_heap_check_ms = 0;
 // TTS alone takes ~10KB and fragments the heap. The thaw margins must be reachable while awake -
 // with AudioInput running, free heap tops out around 23-28KB with the pool released - otherwise
 // the picture stays frozen with its hint up until the session drops to standby.
-constexpr size_t kCamFreezeFreeHeap = 14000;
-constexpr size_t kCamFreezeLargestBlock = 6000;
-constexpr size_t kCamThawFreeHeap = 20000;
-constexpr size_t kCamThawLargestBlock = 10000;
+// A resume costs ~6.5KB (measured: 20.4KB free -> 13.9KB right after), so the gap between the
+// thaw and freeze lines must be wider than that or the stream thrashes pause/resume.
+constexpr size_t kCamFreezeFreeHeap = 11000;
+constexpr size_t kCamFreezeLargestBlock = 5000;
+constexpr size_t kCamThawFreeHeap = 18500;
+constexpr size_t kCamThawLargestBlock = 12000;
 // After a reply ends, wait this long before re-taking the 4KB pool, so a follow-up sentence or a
 // tool-driven second reply does not immediately bounce the stream again.
 constexpr uint32_t kCamThawSettleMs = 800;
+uint32_t g_cam_resumed_ms = 0;
+uint32_t g_cam_thaw_not_before_ms = 0;
+uint8_t g_cam_bounce_count = 0;
 
 // How long the live picture is shown before the shutter. Enough for a few
 // frames to land so the user can see what is in shot and move their hand if it
@@ -1497,6 +1502,9 @@ bool OpenCameraView(bool transient, const char** why = nullptr) {
   g_cam_view_transient = transient;
   g_cam_view_frozen = false;
   g_cam_view_low_heap_hold = false;
+  g_cam_bounce_count = 0;
+  g_cam_thaw_not_before_ms = millis();
+  g_cam_resumed_ms = millis();
   g_cam_view_deadline_ms = 0;
   g_cam_view_stat_ms = 0;
   // Give the stream a moment to settle before the guard starts judging it: EnterCameraView() has
@@ -1809,13 +1817,26 @@ void loop() {
         const bool handshaking = (g_chat_state == ai_vox::ChatState::kConnecting ||
                                   g_chat_state == ai_vox::ChatState::kLoading);
         const bool speaking = g_chat_state == ai_vox::ChatState::kSpeaking;
-        if (handshaking || speaking || free_heap < kCamFreezeFreeHeap || largest < kCamFreezeLargestBlock) {
+        const bool low_heap = free_heap < kCamFreezeFreeHeap || largest < kCamFreezeLargestBlock;
+        if (handshaking || speaking || low_heap) {
           printf("camera view: pausing stream for the voice session (%s, free %u, largest %u)\n",
                  speaking ? "speaking" : (handshaking ? "connecting" : "low heap"),
                  static_cast<unsigned>(free_heap), static_cast<unsigned>(largest));
           FreezeCameraView();
           g_cam_view_low_heap_hold = true;
-          g_display->SetCameraHint("语音优先 · 画面暂停");
+          if (low_heap && !speaking && !handshaking && now_ms - g_cam_resumed_ms < 4000) {
+            // The resume itself pushed the heap under the line. Trying again straight away is
+            // what produced the pause/resume thrash (and WiFi alloc failures) - back off.
+            g_cam_bounce_count = std::min<uint8_t>(g_cam_bounce_count + 1, 4);
+            g_cam_thaw_not_before_ms = now_ms + 5000u * g_cam_bounce_count;
+            printf("camera view: resume bounced (%u), retry in %us\n", g_cam_bounce_count,
+                   5u * g_cam_bounce_count);
+            g_display->SetCameraHint("内存紧张 · 画面暂停");
+          } else {
+            g_display->SetCameraHint("语音优先 · 画面暂停");
+          }
+        } else if (g_cam_bounce_count != 0 && now_ms - g_cam_resumed_ms > 6000) {
+          g_cam_bounce_count = 0;
         }
       } else if (g_cam_view_low_heap_hold && g_cam_view_deadline_ms == 0 && !g_pending_look.active) {
         // Hysteresis, and never while she is mid-reply: re-taking the 4KB pool during TTS is what
@@ -1823,15 +1844,18 @@ void loop() {
         const bool quiet = g_chat_state != ai_vox::ChatState::kSpeaking &&
                            g_chat_state != ai_vox::ChatState::kConnecting &&
                            g_chat_state != ai_vox::ChatState::kLoading &&
-                           now_ms - g_chat_state_since_ms >= kCamThawSettleMs;
-        if (quiet && free_heap >= kCamThawFreeHeap && largest >= kCamThawLargestBlock) {
+                           now_ms - g_chat_state_since_ms >= kCamThawSettleMs &&
+                           static_cast<int32_t>(now_ms - g_cam_thaw_not_before_ms) >= 0;
+        const bool cam_ok = cam.IsPresent();
+        if (quiet && cam_ok && free_heap >= kCamThawFreeHeap && largest >= kCamThawLargestBlock) {
           printf("camera view: resuming stream (free %u, largest %u)\n",
                  static_cast<unsigned>(free_heap), static_cast<unsigned>(largest));
-          g_cam_view_low_heap_hold = false;
+          g_cam_resumed_ms = now_ms;
           ThawCameraView();
         } else if (quiet && now_ms - g_cam_view_stat_ms >= 1000) {
-          printf("camera view: still paused (free %u, largest %u)\n", static_cast<unsigned>(free_heap),
-                 static_cast<unsigned>(largest));
+          printf("camera view: still paused (cam %s, free %u, largest %u)\n", cam_ok ? "ok" : "absent",
+                 static_cast<unsigned>(free_heap), static_cast<unsigned>(largest));
+          if (!cam_ok) g_display->SetCameraHint("摄像头未响应");
         }
       }
     }

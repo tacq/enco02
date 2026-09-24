@@ -150,4 +150,21 @@ void ReleaseDecoder(OpusDecoder* decoder) {
   opus_decoder_destroy(decoder);
 }
 
+void* DecoderScratch(const OpusDecoder* decoder, size_t* bytes) {
+  if (bytes != nullptr) *bytes = 0;
+  if (decoder == nullptr || reinterpret_cast<const void*>(decoder) != g_shared_state) {
+    return nullptr;
+  }
+  const int decoder_size = opus_decoder_get_size(kChannels);
+  if (decoder_size <= 0) {
+    return nullptr;
+  }
+  const size_t offset = (static_cast<size_t>(decoder_size) + 7u) & ~static_cast<size_t>(7u);
+  if (offset >= g_shared_size) {
+    return nullptr;
+  }
+  if (bytes != nullptr) *bytes = g_shared_size - offset;
+  return static_cast<uint8_t*>(g_shared_state) + offset;
+}
+
 }  // namespace opus_codec_pool

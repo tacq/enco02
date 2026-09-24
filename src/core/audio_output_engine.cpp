@@ -1,5 +1,7 @@
 #include "audio_output_engine.h"
 
+#include <esp_heap_caps.h>
+
 #include "audio_task_stack.h"
 #include "flex_array/flex_array.h"
 #include "libopus/opus.h"
@@ -20,6 +22,38 @@ constexpr uint32_t kDefaultFrameSize = kDefaultSampleRate / 1000 * kDefaultChann
 // Shared with AudioInputEngine: the engine state machine never keeps both alive at once, so one
 // statically reserved stack is enough and saves 12KB of permanently occupied internal RAM.
 constexpr uint32_t kAudioOutputStackSize = audio_task_stack::kStackSize;
+
+enum ScratchSlot { kPcmSlot = 0, kResampleSlot = 1 };
+
+// Playback scratch. First choice is the idle tail of the codec buffer reserved at boot (the
+// decoder uses 17800 of its 24548 bytes), which costs no heap at all. Fallback is a grow-only,
+// never-freed allocation made with heap_caps_realloc, which returns nullptr instead of throwing,
+// so running out of memory drops a frame rather than aborting the firmware.
+int16_t* ScratchBuffer(const OpusDecoder* decoder, const ScratchSlot slot, const size_t samples,
+                       const size_t pcm_samples) {
+  size_t tail_bytes = 0;
+  auto* tail = static_cast<int16_t*>(opus_codec_pool::DecoderScratch(decoder, &tail_bytes));
+  const size_t tail_samples = tail_bytes / sizeof(int16_t);
+  if (tail != nullptr) {
+    if (slot == kPcmSlot && samples <= tail_samples) {
+      return tail;
+    }
+    if (slot == kResampleSlot && pcm_samples + samples <= tail_samples) {
+      return tail + pcm_samples;
+    }
+  }
+  static int16_t* buffers[2] = {nullptr, nullptr};
+  static size_t capacity[2] = {0, 0};
+  if (capacity[slot] < samples) {
+    void* grown = heap_caps_realloc(buffers[slot], samples * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (grown == nullptr) {
+      return nullptr;
+    }
+    buffers[slot] = static_cast<int16_t*>(grown);
+    capacity[slot] = samples;
+  }
+  return buffers[slot];
+}
 }  // namespace
 
 AudioOutputEngine::AudioOutputEngine(std::shared_ptr<ai_vox::AudioOutputDevice> audio_output_device, const uint32_t frame_duration)
@@ -97,17 +131,21 @@ void AudioOutputEngine::ProcessData(FlexArray<uint8_t>&& data) {
 
   // Persistent buffer: this runs ~17-50 times a second for the length of every reply, so a
   // per-frame allocation is pure heap churn - and on a heap this tight it eventually fails.
-  if (pcm_buffer_.size() != samples_) {
-    pcm_buffer_.resize(samples_);
-  }
-  if (pcm_buffer_.empty()) {
+  //
+  // It also outlives this engine (one is created per reply) and is never freed. It used to be a
+  // std::vector member resized on the first frame of every reply; with the camera view open the
+  // heap had 12.7KB free but a 2.4KB largest block, the 2,880-byte resize threw, and with no
+  // exception handling that is abort() - a reboot mid-sentence. Now it is taken once, with a
+  // non-throwing allocator, and a failure only drops the frame and retries on the next one.
+  int16_t* pcm = ScratchBuffer(opus_decoder_, kPcmSlot, samples_, 0);
+  if (pcm == nullptr) {
     CLOGE("dropping frame, no memory for decode buffer");
     return;
   }
 
-  const auto ret = opus_decode(opus_decoder_, data.data(), data.size(), pcm_buffer_.data(), samples_, 0);
+  const auto ret = opus_decode(opus_decoder_, data.data(), data.size(), pcm, samples_, 0);
   if (ret > 0) {
-    WritePcm(pcm_buffer_.data(), static_cast<size_t>(ret));
+    WritePcm(pcm, static_cast<size_t>(ret));
   }
 }
 
@@ -116,20 +154,18 @@ void AudioOutputEngine::WritePcm(const int16_t* pcm, const size_t samples) {
     return;
   }
   if (resampler_) {
-    // Persistent buffer for the same reason as pcm_buffer_ above: this is the per-frame hot path.
+    // Persistent buffer for the same reason as the decode buffer above.
     const size_t needed = resampler_->OutputSamplesFor(samples);
-    if (resampled_buffer_.size() < needed) {
-      resampled_buffer_.resize(needed);
-    }
-    if (resampled_buffer_.size() < needed) {
+    int16_t* out = ScratchBuffer(opus_decoder_, kResampleSlot, needed, samples_);
+    if (out == nullptr) {
       CLOGE("dropping frame, no memory for resample buffer");
       return;
     }
-    const size_t written = resampler_->Resample(pcm, samples, resampled_buffer_.data(), resampled_buffer_.size());
+    const size_t written = resampler_->Resample(pcm, samples, out, needed);
     if (written == 0) {
       return;
     }
-    audio_output_device_->Write(resampled_buffer_.data(), written);
+    audio_output_device_->Write(out, written);
   } else {
     audio_output_device_->Write(pcm, samples);
   }

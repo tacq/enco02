@@ -3,6 +3,7 @@
 #ifndef _OPUS_CODEC_POOL_H_
 #define _OPUS_CODEC_POOL_H_
 
+#include <stddef.h>
 #include <stdint.h>
 
 struct OpusEncoder;
@@ -35,6 +36,11 @@ void ReleaseEncoder(OpusEncoder* encoder);
 
 OpusDecoder* AcquireDecoder(uint32_t sample_rate, uint32_t channels);
 void ReleaseDecoder(OpusDecoder* decoder);
+
+// The shared buffer is sized for the encoder (24548) but the decoder only needs 17800, so while a
+// pooled decoder is active the remaining ~6.7KB is idle. Returns that tail (8-byte aligned) and its
+// size, or nullptr if `decoder` is not the pooled one. Valid only until ReleaseDecoder().
+void* DecoderScratch(const OpusDecoder* decoder, size_t* bytes);
 
 }  // namespace opus_codec_pool
 

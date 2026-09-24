@@ -33,9 +33,6 @@ class AudioOutputEngine {
   ActiveTaskQueue* task_queue_ = nullptr;
   // Borrowed from audio_task_stack; shared with AudioInputEngine, returned in the destructor.
   StackType_t* task_stack_ = nullptr;
-  // Persistent decode scratch buffer; see ProcessData().
-  std::vector<int16_t> pcm_buffer_;
-  // Persistent resample scratch buffer; only used when the device cannot run at 24kHz.
-  std::vector<int16_t> resampled_buffer_;
+  // Decode/resample scratch buffers are process-lifetime statics in the .cpp; see ProcessData().
   const uint32_t samples_ = 0;
 };
