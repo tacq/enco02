@@ -1467,35 +1467,27 @@ void Display::SetCameraCapturing(bool capturing) {
 void Display::UpdateRobotFaceEmotion(const std::string& emotion) {
   // There is one portrait, so emotion is expressed through timing rather than through geometry:
   // a cheerful Enco blinks more often, a sleepy one keeps her eyes shut.
+  lvgl_port_lock(0);
   current_emotion_ = emotion;
-  if (eyes_overlay_ == nullptr) {
-    return;
+  if (eyes_overlay_ != nullptr) {
+    if (emotion == "sleepy") {
+      blink_frame_ = kBlinkFrameShut;
+    } else if (blink_frame_ == kBlinkFrameShut) {
+      blink_frame_ = 0;
+    }
+    ApplyBlinkFrame();
   }
-  if (emotion == "sleepy") {
-    blink_frame_ = kBlinkFrameShut;
-  } else if (blink_frame_ == kBlinkFrameShut) {
-    blink_frame_ = 0;
-  }
-  ApplyBlinkFrame();
+  lvgl_port_unlock();
 }
 
 void Display::LookDirection(const char* dir) {
-  // With a single portrait there is no separate eye sprite to slide around, so the whole head
-  // shifts a couple of pixels instead. These come from MCP tool calls, so they are rare enough
-  // that the resulting full-screen repaint does not matter.
-  int dx = 0;
-  int dy = 0;
-  if (strcmp(dir, "up") == 0) {
-    dy = -3;
-  } else if (strcmp(dir, "down") == 0) {
-    dy = 3;
-  } else if (strcmp(dir, "left") == 0) {
-    dx = -4;
-  } else if (strcmp(dir, "right") == 0) {
-    dx = 4;
-  }
+  (void)dir;
+  // Keep the 240x240 I4 base portrait and its cropped overlays (eyes, bangs, mouth) strictly at
+  // (0, 0). Shifting the base portrait by +/-4px causes partial-redraw misalignment between
+  // eyes_overlay_ and face_image_ on the ST7789 panel; physical head motion is handled by the
+  // 3-DOF servos instead.
   lvgl_port_lock(0);
-  ApplyHeadOffset(dx, dy);
+  ApplyHeadOffset(0, 0);
   lvgl_port_unlock();
 }
 

@@ -916,21 +916,16 @@ void IdleCompanionTick(ai_vox::Engine& engine) {
     MuteForStandby();
   }
 
-  // 1. Random virtual character facial emoji & gaze changes (every 4.5s - 9.0s)
+  // 1. Random virtual character facial expressions (every 4.5s - 9.0s)
   if (g_next_idle_face_ms == 0) {
     g_next_idle_face_ms = now_ms + 3000;
   } else if (static_cast<int32_t>(now_ms - g_next_idle_face_ms) >= 0) {
     static const char* const kIdleEmotions[] = {
-        "neutral", "happy", "wink", "cool", "thinking", "surprised", "loving", "sleepy"
-    };
-    static const char* const kIdleLookDirs[] = {
-        "center", "left", "right", "up", "down", "center"
+        "neutral", "happy", "wink", "cool", "thinking", "surprised", "loving"
     };
     const size_t idx = esp_random() % (sizeof(kIdleEmotions) / sizeof(kIdleEmotions[0]));
-    const size_t dir_idx = esp_random() % (sizeof(kIdleLookDirs) / sizeof(kIdleLookDirs[0]));
     if (g_display) {
       g_display->UpdateRobotFaceEmotion(kIdleEmotions[idx]);
-      g_display->LookDirection(kIdleLookDirs[dir_idx]);
     }
     g_next_idle_face_ms = now_ms + 4500 + (esp_random() % 4500);
   }
