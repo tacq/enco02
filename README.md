@@ -2,6 +2,8 @@
 
 **ENCO-02** is a sci-fi styled desktop AI assistant robot designed for natural, expressive human-robot interaction.
 
+📖 **User manual:** [English](docs/MANUAL.md) · [简体中文](docs/MANUAL.zh-CN.md) - every feature and voice command, plus flash/RAM limits.
+
 ## Overview
 
 ENCO-02 combines embedded hardware control, visual tracking, and conversational AI into a compact desktop companion with a futuristic aesthetic.
