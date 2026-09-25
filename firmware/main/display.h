@@ -101,6 +101,10 @@ class Display {
   // `pinned` marks an explicit request (the MCP tool). The assistant's own per-reply emotion then
   // cannot replace it until it has run its course.
   bool ShowExpression(const std::string& name, uint32_t hold_ms, bool pinned);
+  // The caption pill under the character (her replies, 聆听中, the idle hint). Off hides it for
+  // good until switched back on; a running countdown still takes the spot either way.
+  void SetCaptionEnabled(bool enabled);
+  bool CaptionEnabled() const { return caption_enabled_; }
   void LookDirection(const char* dir);
   // Creates the handful of LVGL objects that make up the bitmap character. Safe to call more than
   // once; the pixels themselves live in flash, so this costs well under 2KB of heap.
@@ -166,7 +170,9 @@ class Display {
   lv_obj_t* content_ = nullptr;
   lv_obj_t* content_left_ = nullptr;
   lv_obj_t* content_right_ = nullptr;
-  lv_obj_t* emotion_label_ = nullptr;
+  lv_obj_t* clock_label_ = nullptr;
+  int clock_minute_ = -1;  // minute of day last painted; -1 = not synced / never drawn
+  void UpdateClock();
   lv_obj_t* chat_message_label_ = nullptr;
   lv_obj_t* network_label_ = nullptr;
   // Latches once WiFi has associated at least once. Before that, "down" means "still booting" and
@@ -183,6 +189,10 @@ class Display {
   // next chat state change would unhide status_label_ underneath the countdown and the two would
   // sit side by side, each with flex_grow 1, pushing the digits off centre.
   bool timer_visible_ = false;
+  // Caption pill visibility = user setting AND not displaced by the countdown panel.
+  bool caption_enabled_ = true;
+  bool subtitle_timer_hidden_ = false;
+  void ApplySubtitleVisibility();
 
   // Character face mode: a full-screen portrait plus small sprites that are swapped over the
   // hair, eyes and mouth to animate it. Everything else about the picture stays put.

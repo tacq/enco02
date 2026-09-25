@@ -52,6 +52,9 @@
 
 std::unique_ptr<Display> g_display;
 
+// Status-bar clock time zone (POSIX TZ). US Pacific, with DST switching built in.
+constexpr const char* kClockTimeZone = "PST8PDT,M3.2.0,M11.1.0";
+
 namespace {
 // Wi-Fi configurations
 /**
@@ -446,6 +449,10 @@ void ConfigureWifi() {
   printf("- gateway:     %s\n", WiFi.gatewayIP().toString().c_str());
   printf("- subnet mask: %s\n", WiFi.subnetMask().toString().c_str());
 
+  // Wall clock for the status bar. SNTP runs in lwIP's own thread and re-syncs hourly; the POSIX
+  // TZ string carries the US daylight-saving rules, so no table or second request is needed.
+  configTzTime(kClockTimeZone, "pool.ntp.org", "time.google.com");
+
   g_display->ShowStatus("网络已连接");
   char conn_msg[160];
   snprintf(conn_msg, sizeof(conn_msg), "网络已连接: %s\nIP: %s\n调试页面: http://%s/\n小智 AI 正在启动...",
@@ -523,6 +530,32 @@ void FlushVolumeToNvs() {
   prefs.end();
   g_volume_dirty = false;
   printf("[volume] saved %u\n", static_cast<unsigned>(vol));
+}
+
+// The caption on/off choice survives a reboot. Written once per voice command, so no batching.
+constexpr const char* kDisplayPrefsNamespace = "display";
+constexpr const char* kCaptionPrefsKey = "caption";
+
+void SaveCaptionSetting(const bool on) {
+  Preferences prefs;
+  if (!prefs.begin(kDisplayPrefsNamespace, false)) {
+    return;
+  }
+  prefs.putBool(kCaptionPrefsKey, on);
+  prefs.end();
+}
+
+void LoadCaptionSetting() {
+  Preferences prefs;
+  bool on = true;
+  if (prefs.begin(kDisplayPrefsNamespace, true)) {
+    on = prefs.getBool(kCaptionPrefsKey, true);
+    prefs.end();
+  }
+  if (g_display) {
+    g_display->SetCaptionEnabled(on);
+  }
+  printf("[display] caption %s\n", on ? "on" : "off");
 }
 
 // The cloud model decides for itself whether to emit an MCP tool call, and for a bare "大声点" it
@@ -1260,6 +1293,9 @@ void InitMcpTools() {
     {"mode", ai_vox::ParamSchema<std::string>{.default_value = "face"}},
   });
   engine.AddMcpTool("self.screen.toggle_mode", "Toggle screen mode between face and chat (切换屏幕显示模式).", {});
+  engine.AddMcpTool("self.screen.caption", "Show/hide the caption bar under the face (打开字幕/关闭字幕).", {
+    {"on", ai_vox::ParamSchema<bool>{.default_value = std::nullopt}},
+  });
 
   // Facial expressions drawn into the character art (tools/face_assets). One tool, one string
   // param, terse text: every tool adds to the tools/list payload sent at session start.
@@ -1610,6 +1646,7 @@ void setup() {
   g_display->ShowStatus("初始化");
   // Before the engine starts, so the first thing she says is already at the user's chosen level.
   LoadSavedVolume();
+  LoadCaptionSetting();
 
   // Tool registration moved ahead of ConfigureWifi(): it has no network dependency, and the engine
   // singleton it builds is better allocated while the heap is still clean than after WiFi and TLS
@@ -2314,6 +2351,14 @@ void loop() {
         } else {
           g_display->ToggleUiMode();
         }
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+      } else if (matches("self.screen.caption", "caption")) {
+        // No argument means toggle, so a bare "字幕" still does something sensible.
+        const auto on_ptr = mcp_tool_call_event->param<bool>("on");
+        const bool on = on_ptr != nullptr ? *on_ptr : !g_display->CaptionEnabled();
+        g_display->SetCaptionEnabled(on);
+        SaveCaptionSetting(on);
+        printf("on mcp tool call: screen.caption %s\n", on ? "on" : "off");
         engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
       } else if (matches("self.timer.start", "start_timer") || matches("self.timer.set", "set_timer")) {
         int64_t seconds = 0;

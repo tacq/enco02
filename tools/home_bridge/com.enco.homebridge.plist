@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ENCO home bridge as a per-user launchd agent.
+
+  caffeinate -i keeps the Mac from idle-sleeping while the bridge runs (a sleeping Mac is what made
+  the robot say "连接不上家庭网关"). It cannot stop a lid-close sleep on battery - see README.
+
+  Install:   tools/home_bridge/install_launchd.sh
+  Logs:      ~/Library/Logs/enco-home-bridge.log
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.enco.homebridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
+    <string>__PYTHON__</string>
+    <string>__BRIDGE_DIR__/bridge.py</string>
+    <string>serve</string>
+    <string>--host</string>
+    <string>__HOST__</string>
+    <string>--port</string>
+    <string>8787</string>
+    <string>--allow-control</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__BRIDGE_DIR__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- Wi-Fi may not have its address yet at login; don't respawn in a tight loop meanwhile. -->
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/enco-home-bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/enco-home-bridge.log</string>
+</dict>
+</plist>

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <ctime>
 #include <map>
 #include <vector>
 
@@ -271,21 +272,13 @@ void Display::Start() {
   // 设置状态栏的内容垂直居中
   lv_obj_set_flex_align(status_bar_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-  // 创建emotion_label_在状态栏最左侧
-  //
-  // 16px, not 30px. The bar is LV_SIZE_CONTENT, so the emotion glyph alone used to set its height
-  // at ~36px - a ninth of the screen spent on one icon, and the portrait pushed down by the same
-  // amount. font_awesome_16_4 is generated from the identical glyph subset as font_awesome_30_4
-  // (both cover range 57419 + 6008), so every emotion still has an icon; it just sits level with
-  // the volume and network indicators now, which is what makes the bar read as one strip.
-  //
-  // This was briefly put back to 30px on the theory that a bigger network icon needed matching
-  // siblings. On the actual panel the whole row came out oversized; 16px is the right size here.
-  emotion_label_ = lv_label_create(status_bar_);
-  lv_obj_set_style_text_font(emotion_label_, &font_awesome_16_4, 0);
-  lv_obj_set_style_text_color(emotion_label_, current_theme_.jarvis_cyan, 0);
-  lv_label_set_text(emotion_label_, FONT_AWESOME_AI_CHIP);
-  lv_obj_set_style_margin_right(emotion_label_, 6, 0);  // 添加右边距，与后面的元素分隔
+  // Wall clock at the far left ("07:24 PM"). It replaced a 16px emotion glyph inherited from the
+  // stock XiaoZhi UI - too small to read, and her face already shows the emotion. Shows --:-- until
+  // SNTP has synced; OnFaceTimer() refreshes it once the minute changes.
+  clock_label_ = lv_label_create(status_bar_);
+  lv_obj_set_style_text_color(clock_label_, current_theme_.jarvis_cyan, 0);
+  lv_label_set_text(clock_label_, "--:--");
+  lv_obj_set_style_margin_right(clock_label_, 6, 0);  // 添加右边距，与后面的元素分隔
 
   // 倒计时标签。Flex order is creation order, so this has to be built before the notification and
   // status labels for the countdown to end up in the middle of the bar. It stays hidden (and
@@ -400,7 +393,9 @@ void Display::BuildRobotFace() {
   // a board that has ~6KB free during TTS, and neither is driven by anything real - there is a
   // playback beacon (audio_playback_signal) but no amplitude, so they would animate to nothing.
   subtitle_box_ = lv_obj_create(face_container_);
-  lv_obj_set_size(subtitle_box_, 232, 52);
+  // One line (16px font + 5px padding). Long captions scroll as a marquee rather than wrapping, so
+  // the pill never grows over her chin and more of the character stays visible.
+  lv_obj_set_size(subtitle_box_, 232, 32);
   lv_obj_align(subtitle_box_, LV_ALIGN_BOTTOM_MID, 0, -4);
   lv_obj_set_style_radius(subtitle_box_, 12, 0);
   lv_obj_set_style_bg_color(subtitle_box_, lv_color_hex(0x0b1220), 0);
@@ -417,13 +412,19 @@ void Display::BuildRobotFace() {
   lv_obj_set_style_outline_pad(subtitle_box_, 2, 0);
   lv_obj_set_style_pad_all(subtitle_box_, 5, 0);
   lv_obj_set_scrollbar_mode(subtitle_box_, LV_SCROLLBAR_MODE_OFF);
+  lv_obj_clear_flag(subtitle_box_, LV_OBJ_FLAG_SCROLLABLE);
 
   subtitle_label_ = lv_label_create(subtitle_box_);
   lv_obj_set_width(subtitle_label_, 218);
+  lv_obj_center(subtitle_label_);
   lv_obj_set_style_text_font(subtitle_label_, &font_puhui_16_4, 0);
   lv_obj_set_style_text_color(subtitle_label_, lv_color_hex(0xf1f5f9), 0);
+  // Centred while it fits; LVGL drops the centring by itself once the text has to scroll.
   lv_obj_set_style_text_align(subtitle_label_, LV_TEXT_ALIGN_CENTER, 0);
-  lv_label_set_long_mode(subtitle_label_, LV_LABEL_LONG_WRAP);
+  // Circular marquee: text that does not fit glides across and wraps round seamlessly. Short
+  // text does not move. 45 px/s is about three characters a second - readable while she speaks.
+  lv_label_set_long_mode(subtitle_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+  lv_obj_set_style_anim_duration(subtitle_label_, lv_anim_speed_clamped(45, 300, 30000), 0);
   lv_label_set_text(subtitle_label_, kIdleCaption);
 
   next_blink_tick_ = kBlinkMinTicks;
@@ -449,7 +450,7 @@ void Display::SetChatMessage(const Role role, const std::string& content) {
     lvgl_port_lock(0);
     s_has_active_chat_subtitle = true;
     if (subtitle_box_ != nullptr) {
-      lv_obj_clear_flag(subtitle_box_, LV_OBJ_FLAG_HIDDEN);
+      ApplySubtitleVisibility();
     }
     lv_obj_clear_flag(subtitle_label_, LV_OBJ_FLAG_HIDDEN);
     if (role == Role::kUser) {
@@ -801,14 +802,27 @@ void Display::ShowVolume(const uint16_t volume) {
 // The caption pill and the countdown panel both live at the bottom of the screen. Whichever is up
 // owns it; there is no room to stack them, and a timer the user asked for outranks "待命中".
 void Display::SetSubtitleHidden(const bool hidden) {
+  subtitle_timer_hidden_ = hidden;
+  ApplySubtitleVisibility();
+}
+
+// Caller must hold the LVGL lock.
+void Display::ApplySubtitleVisibility() {
   if (subtitle_box_ == nullptr) {
     return;
   }
-  if (hidden) {
+  if (!caption_enabled_ || subtitle_timer_hidden_) {
     lv_obj_add_flag(subtitle_box_, LV_OBJ_FLAG_HIDDEN);
   } else {
     lv_obj_clear_flag(subtitle_box_, LV_OBJ_FLAG_HIDDEN);
   }
+}
+
+void Display::SetCaptionEnabled(const bool enabled) {
+  lvgl_port_lock(0);
+  caption_enabled_ = enabled;
+  ApplySubtitleVisibility();
+  lvgl_port_unlock();
 }
 
 // Three widgets: panel, "T-MINUS" caption, digits. Caller must hold the LVGL lock.
@@ -1103,43 +1117,9 @@ void Display::HideTimer() {
 }
 
 void Display::SetEmotion(const std::string& emotion) {
-  // This used to build a 21-entry std::map<std::string, const char*> on every call - roughly 1.5KB
-  // of allocate-and-free churn each time the assistant changes expression. A static table costs
-  // nothing at runtime and keeps the (very small) remaining heap unfragmented.
-  // Monochrome Font Awesome glyphs, not colour emoji: the status bar is a cyan HUD and a full
-  // colour yellow smiley in the corner of it looked like it belonged to a different program. These
-  // tint with the rest of the bar and are already in the font_awesome_30_4 subset.
-  struct EmotionIcon {
-    const char* name;
-    const char* icon;
-  };
-  static constexpr EmotionIcon kEmotions[] = {
-      {"neutral", FONT_AWESOME_EMOJI_NEUTRAL},         {"happy", FONT_AWESOME_EMOJI_HAPPY},
-      {"laughing", FONT_AWESOME_EMOJI_LAUGHING},       {"funny", FONT_AWESOME_EMOJI_FUNNY},
-      {"sad", FONT_AWESOME_EMOJI_SAD},                 {"angry", FONT_AWESOME_EMOJI_ANGRY},
-      {"crying", FONT_AWESOME_EMOJI_CRYING},           {"loving", FONT_AWESOME_EMOJI_LOVING},
-      {"embarrassed", FONT_AWESOME_EMOJI_EMBARRASSED}, {"surprised", FONT_AWESOME_EMOJI_SURPRISED},
-      {"shocked", FONT_AWESOME_EMOJI_SHOCKED},         {"thinking", FONT_AWESOME_EMOJI_THINKING},
-      {"winking", FONT_AWESOME_EMOJI_WINKING},         {"cool", FONT_AWESOME_EMOJI_COOL},
-      {"relaxed", FONT_AWESOME_EMOJI_RELAXED},         {"delicious", FONT_AWESOME_EMOJI_DELICIOUS},
-      {"kissy", FONT_AWESOME_EMOJI_KISSY},             {"confident", FONT_AWESOME_EMOJI_CONFIDENT},
-      {"sleepy", FONT_AWESOME_EMOJI_SLEEPY},           {"silly", FONT_AWESOME_EMOJI_SILLY},
-      {"confused", FONT_AWESOME_EMOJI_CONFUSED},
-  };
-
-  const char* icon = FONT_AWESOME_EMOJI_NEUTRAL;
-  for (const auto& entry : kEmotions) {
-    if (emotion == entry.name) {
-      icon = entry.icon;
-      break;
-    }
-  }
-
+  // The status bar used to show a Font Awesome glyph per emotion here; that spot is the clock now,
+  // and the emotion is shown on her face instead (below).
   lvgl_port_lock(0);
-  if (emotion_label_ != nullptr) {
-    lv_label_set_text(emotion_label_, icon);
-  }
-
   UpdateRobotFaceEmotion(emotion);
 
   // The same emotion on her face. The server's 21 moods fold onto the 8 drawn expressions; the
@@ -1750,10 +1730,41 @@ void Display::ApplyHairFrame() {
   }
 }
 
+void Display::UpdateClock() {
+  if (clock_label_ == nullptr) {
+    return;
+  }
+  const time_t now = time(nullptr);
+  // Before SNTP answers the RTC counts from 1970; keep the placeholder rather than show 12:00 AM.
+  if (now < 1700000000) {
+    return;
+  }
+  struct tm local;
+  localtime_r(&now, &local);
+  const int minute_of_day = local.tm_hour * 60 + local.tm_min;
+  if (minute_of_day == clock_minute_) {
+    return;
+  }
+  char text[12];
+  strftime(text, sizeof(text), "%I:%M %p", &local);  // "07:24 PM"
+  if (clock_minute_ < 0) {
+    printf("[clock] synced: %s\n", text);
+  }
+  clock_minute_ = minute_of_day;
+  lv_label_set_text(clock_label_, text);
+}
+
 void Display::OnFaceTimer(lv_timer_t* timer) {
   auto* self = static_cast<Display*>(lv_timer_get_user_data(timer));
   if (self == nullptr) {
     return;
+  }
+
+  // Status-bar clock: checked about once a second, in every UI mode. Only a minute change repaints.
+  static uint8_t clock_ticks = 0;
+  if (++clock_ticks >= 1000 / kFaceTickMs) {
+    clock_ticks = 0;
+    self->UpdateClock();
   }
 
   // Toast auto-dismiss & smooth fade-out (runs in every UI mode with zero heap overhead).

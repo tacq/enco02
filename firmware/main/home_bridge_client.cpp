@@ -10,8 +10,10 @@
 #if HOME_BRIDGE_ENABLED
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_system.h>
 #include <mbedtls/md.h>
 
+#include <cerrno>
 #include <cstring>
 #endif
 
@@ -77,6 +79,7 @@ const char* PoolTargetNameZh(const std::string& target) {
 namespace {
 
 constexpr int32_t kConnectTimeoutMs = 1500;
+constexpr int32_t kRetryConnectTimeoutMs = 3000;
 constexpr uint32_t kNonceReadTimeoutMs = 2000;
 // The bridge may need a fresh round trip to the iAqualink cloud for the summary.
 constexpr uint32_t kSummaryReadTimeoutMs = 6000;
@@ -92,8 +95,18 @@ bool HttpRequest(const char* method, const char* path, const std::string& extra_
                  const std::string& req_body, uint32_t read_timeout_ms, int& status,
                  std::string& body) {
   WiFiClient client;
-  if (!client.connect(HOME_BRIDGE_HOST, HOME_BRIDGE_PORT, kConnectTimeoutMs)) {
-    printf("[home] connect %s:%d failed\n", HOME_BRIDGE_HOST, HOME_BRIDGE_PORT);
+  // Two attempts: a Mac that has just woken (or whose Wi-Fi is dozing) often drops the first SYN,
+  // and one 1.5 s try turned that into "连接不上家庭网关" every time.
+  bool connected = false;
+  for (int attempt = 0; attempt < 2 && !connected; ++attempt) {
+    connected = client.connect(HOME_BRIDGE_HOST, HOME_BRIDGE_PORT, attempt == 0 ? kConnectTimeoutMs : kRetryConnectTimeoutMs);
+    if (!connected) {
+      printf("[home] connect %s:%d failed (attempt %d, errno %d, free %u)\n", HOME_BRIDGE_HOST,
+             HOME_BRIDGE_PORT, attempt + 1, errno, static_cast<unsigned>(esp_get_free_heap_size()));
+      client.stop();
+    }
+  }
+  if (!connected) {
     return false;
   }
   std::string req = method;
