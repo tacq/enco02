@@ -38,6 +38,30 @@ static constexpr uint8_t kHairPoseCount = 14;
 static constexpr uint32_t kHairMinGapTicks = 20;   // 1.6s
 static constexpr uint32_t kHairGapSpreadTicks = 40;  // up to a further 3.2s
 
+// Ambient expressions: a random face now and then while nothing is happening, and a quicker,
+// attentive one while she listens. Idle is kept rare so it stays a surprise rather than a loop.
+// No "angry" in either pool - unprompted, it reads as the device being cross with the user.
+static constexpr uint32_t kAmbientIdleMinTicks = 125;      // 10s
+static constexpr uint32_t kAmbientIdleSpreadTicks = 190;   // up to a further ~15s
+static constexpr uint32_t kAmbientListenMinTicks = 30;     // 2.4s
+static constexpr uint32_t kAmbientListenSpreadTicks = 35;  // up to a further 2.8s
+static const char* const kAmbientIdleFaces[] = {"happy", "wink", "pout", "shy", "surprised", "thinking", "sad"};
+static const char* const kAmbientListenFaces[] = {"thinking", "happy", "surprised", "shy", "wink"};
+
+static int8_t FindExpression(const char* name) {
+  for (int8_t i = 0; i < ENCO_FACE_EXPR_COUNT; i++) {
+    if (strcmp(name, enco_face_exprs[i].name) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static uint32_t AmbientGapTicks(uint8_t mode) {
+  return mode == 2 ? kAmbientListenMinTicks + esp_random() % kAmbientListenSpreadTicks
+                   : kAmbientIdleMinTicks + esp_random() % kAmbientIdleSpreadTicks;
+}
+
 // What the caption pill says when nothing is going on.
 //
 // It used to read "Enco 正在待命..." - true, but it told the user nothing they could act on. This
@@ -630,6 +654,21 @@ void Display::ShowStatus(const char* status) {
   // amplifier, and it gets overwritten mid-reply by servo commands like 抬头中... - which used to
   // start the lips early and then freeze them. OnFaceTimer() follows the speaker instead.
   is_speaking_ = (s == "说话中");
+
+  // Ambient expressions only run while idle or listening. Leaving those states drops a random face
+  // at once (its hold only counts quiet ticks, so it would otherwise ride along into the reply).
+  const uint8_t ambient = s == "聆听中" ? 2 : (s.find("待命") == 0 ? 1 : 0);
+  if (ambient != ambient_mode_) {
+    ambient_mode_ = ambient;
+    next_ambient_tick_ = face_tick_ + AmbientGapTicks(ambient);
+    if (expr_ambient_ && expr_index_ >= 0) {
+      expr_index_ = -1;
+      expr_ambient_ = false;
+      next_blink_tick_ = face_tick_ + kBlinkMinTicks;
+      ApplyBlinkFrame();
+      ApplyMouthFrame();
+    }
+  }
 
   if (subtitle_label_ != nullptr) {
     if (s == "聆听中") {
@@ -1547,6 +1586,7 @@ bool Display::ShowExpression(const std::string& name, uint32_t hold_ms, bool pin
   }
   expr_index_ = index;
   expr_pinned_ = pinned && index >= 0;
+  expr_ambient_ = false;
   const uint32_t ticks = hold_ms / kFaceTickMs;
   expr_quiet_ticks_ = static_cast<uint16_t>(ticks > 0xFFFF ? 0xFFFF : ticks);
   if (current_emotion_ != "sleepy") {
@@ -1804,9 +1844,39 @@ void Display::OnFaceTimer(lv_timer_t* timer) {
     } else {
       self->expr_index_ = -1;
       self->expr_pinned_ = false;
+      self->expr_ambient_ = false;
       self->next_blink_tick_ = self->face_tick_ + kBlinkMinTicks;
+      self->next_ambient_tick_ = self->face_tick_ + AmbientGapTicks(self->ambient_mode_);
       self->ApplyBlinkFrame();
       self->ApplyMouthFrame();
+    }
+  }
+
+  // --- Ambient expressions -----------------------------------------------------------------
+  // Only on a neutral, quiet, open-eyed face: never over an expression someone asked for, a
+  // server emotion, a blink in progress, or a sleepy face.
+  if (self->ambient_mode_ != 0 && self->expr_index_ < 0 && !self->mouth_open_ &&
+      self->blink_frame_ == 0 && self->current_emotion_ != "sleepy" &&
+      self->face_tick_ >= self->next_ambient_tick_) {
+    const bool listening = self->ambient_mode_ == 2;
+    const char* const* pool = listening ? kAmbientListenFaces : kAmbientIdleFaces;
+    const size_t n = listening ? sizeof(kAmbientListenFaces) / sizeof(kAmbientListenFaces[0])
+                               : sizeof(kAmbientIdleFaces) / sizeof(kAmbientIdleFaces[0]);
+    int8_t pick = FindExpression(pool[esp_random() % n]);
+    if (pick == self->last_ambient_expr_) {  // one re-roll keeps back-to-back repeats rare
+      pick = FindExpression(pool[esp_random() % n]);
+    }
+    if (pick >= 0) {
+      self->expr_index_ = pick;
+      self->expr_pinned_ = false;
+      self->expr_ambient_ = true;
+      self->last_ambient_expr_ = pick;
+      // 1.6-2.4s listening, 2.0-3.6s idle.
+      self->expr_quiet_ticks_ = listening ? 20 + esp_random() % 10 : 25 + esp_random() % 20;
+      self->ApplyBlinkFrame();
+      self->ApplyMouthFrame();
+    } else {
+      self->next_ambient_tick_ = self->face_tick_ + AmbientGapTicks(self->ambient_mode_);
     }
   }
 

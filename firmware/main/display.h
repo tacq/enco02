@@ -213,6 +213,13 @@ class Display {
   int8_t expr_index_ = -1;
   bool expr_pinned_ = false;
   uint16_t expr_quiet_ticks_ = 0;
+  // Random "ambient" expressions while idle (1) or listening (2); 0 = off (replying, busy, etc).
+  // expr_ambient_ marks the current expression as one of ours, so it can be dropped the moment
+  // the chat state moves on - it must never linger into a reply.
+  uint8_t ambient_mode_ = 0;
+  bool expr_ambient_ = false;
+  int8_t last_ambient_expr_ = -1;
+  uint32_t next_ambient_tick_ = 0;
   // What the eye and mouth overlays currently show (nullptr = hidden). ApplyMouthFrame() runs every
   // tick; setting an unchanged source would still invalidate and repaint the whole sprite.
   const void* eyes_src_ = nullptr;
