@@ -248,6 +248,37 @@ def blend(base2, var2, a):
     return out
 
 
+# Per-sprite mask adjustments, in 1x coordinates.
+#
+# shy: the render's blush sits on her cheeks and carries on below the eye window. Copied as-is it
+# stopped dead at the window's bottom edge - a saturated pink band straight across her face. The
+# cheek skin is taken at reduced strength, and the whole change fades out before the edge.
+ALPHA_TWEAKS = {
+    "enco_face_expr_shy_eyes": {"skin_from_y": 132, "skin_gain": 0.7, "fade_y": (140, 152)},
+}
+
+
+def tweak_alpha(a, base2, win2, tw):
+    x, y, w, h = win2
+    skin_y = tw["skin_from_y"] * S
+    f0, f1 = (v * S for v in tw["fade_y"])
+    gain = tw["skin_gain"]
+    for yy in range(y, y + h):
+        fade = 1.0 if yy <= f0 else max(0.0, 1.0 - (yy - f0) / (f1 - f0))
+        fade = fade * fade * (3.0 - 2.0 * fade)  # smoothstep: no visible start or end of the ramp
+        for xx in range(x, x + w):
+            i = yy * W2 + xx
+            t = a[i]
+            if t <= 0.0:
+                continue
+            if is_skin(base2[i]):
+                if yy >= skin_y:
+                    t *= gain
+                t *= fade
+            a[i] = t
+    return a
+
+
 def is_skin(rgb):
     r, g, b = rgb
     return r > 200 and (r - b) > 12
@@ -391,6 +422,8 @@ def main():
         dx, dy, err = align(base2, var2, win2)
         var2 = shifted(var2, dx, dy)
         a, kept = feature_alpha(base2, var2, win2)
+        if name in ALPHA_TWEAKS:
+            a = tweak_alpha(a, base2, win2, ALPHA_TWEAKS[name])
         frames[name] = finish(half(blend(base2, var2, a)))
         groups.setdefault(group, []).append(name)
         print(f"{name}: offset ({dx:+d},{dy:+d}) @2x, ring residual {err:.1f}, blobs {kept}")

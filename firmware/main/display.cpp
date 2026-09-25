@@ -735,15 +735,15 @@ void Display::ShowNetwork(const bool connected, const int rssi_dbm) {
     colour = net_ever_connected_ ? current_theme_.low_battery : current_theme_.jarvis_cyan_dim;
   } else {
     net_ever_connected_ = true;
-    if (rssi_dbm >= -70) {
-      glyphs = FONT_AWESOME_WIFI FONT_AWESOME_SIGNAL_FULL;
-    } else if (rssi_dbm >= -80) {
-      glyphs = FONT_AWESOME_WIFI FONT_AWESOME_SIGNAL_4;
+    // One glyph: the fan's arc count and colour already carry the strength. A signal-bars glyph
+    // used to sit beside it, which read as a third, unexplained status icon.
+    if (rssi_dbm >= -80) {
+      glyphs = FONT_AWESOME_WIFI;
     } else if (rssi_dbm >= -88) {
-      glyphs = FONT_AWESOME_WIFI_FAIR FONT_AWESOME_SIGNAL_3;
+      glyphs = FONT_AWESOME_WIFI_FAIR;
       colour = current_theme_.jarvis_cyan_dim;  // marginal, but still carrying audio
     } else {
-      glyphs = FONT_AWESOME_WIFI_WEAK FONT_AWESOME_SIGNAL_2;
+      glyphs = FONT_AWESOME_WIFI_WEAK;
       colour = current_theme_.jarvis_gold;  // amber: this is where dropouts actually start
     }
   }
