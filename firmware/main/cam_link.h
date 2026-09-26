@@ -103,6 +103,17 @@ class CamLink {
   // immediately undone by the tracker dragging the head back.
   void NoteManualHeadCommand();
 
+  // Self-calibrating tracking direction, per axis (+1 / -1). The tracker watches whether moving the
+  // head actually shrinks the subject's offset from frame centre; if the offset keeps GROWING while
+  // the head moves, it was turning the wrong way, so it flips that axis and saves the result in NVS.
+  int yaw_dir() const { return yaw_dir_; }
+  int pitch_dir() const { return pitch_dir_; }
+  // Which way the head tilts to mirror the finger's lean. Not learned (the cam does not roll with the
+  // head, so there is nothing to learn from); only flipped by hand.
+  int roll_dir() const { return roll_dir_; }
+  void FlipTrackDir(char axis);  // 'y', 'p' or 'r': manual override from the web page (also saved)
+  void ResetTrackDirs();         // back to the defaults (also saved)
+
   // Hand the cam a vision service to use.
   //
   // The xiaozhi server advertises one in the params of the MCP `initialize`
@@ -148,7 +159,14 @@ class CamLink {
   CamLink& operator=(const CamLink&) = delete;
 
   void HandleLine(const char* line);
-  void ApplyTracking(int dx, int dy, int conf, int roll = 0);
+  void ApplyTracking(int dx, int dy, int conf, int lean = 0);
+
+  // Aims the roll servo so the head tilts with the finger's lean (degrees, + = tip to the right).
+  void MirrorLean(int lean);
+
+  // Called every Poll(): recentres the head once the finger has been out of sight for a few
+  // seconds, and switches a gesture-armed session off after longer.
+  void SuperviseTracking(uint32_t now);
 
   // Eases the head to a stop after the cam stops sending updates. Called every
   // Poll(); does nothing unless a movement is actually in progress.
@@ -190,6 +208,24 @@ class CamLink {
   // TakeGestureArmed(). Lets main.cpp say so on screen.
   bool gesture_armed_ = false;
 
+  // Tracking was switched on by the gesture rather than by voice or the web page. Such a session
+  // turns itself off once the finger has been gone for a while; an explicit one stays on.
+  bool armed_by_gesture_ = false;
+  bool look_resume_gesture_ = false;  // armed_by_gesture_, saved across a look
+
+  // When a finger report last arrived, and whether the head has already been sent back to centre
+  // since then. See SuperviseTracking().
+  uint32_t last_finger_ms_ = 0;
+  bool recentred_ = false;
+
+  // Where the roll glide was last aimed (ServoController::kDefaultAngle = upright), and which way a
+  // lean maps onto it. +1: finger tip to the right of the picture -> roll angle up.
+  float roll_target_ = 90.0f;
+  int8_t roll_dir_ = 1;
+
+  // The old face-tracking cam firmware sends 4-field T lines; say so once rather than per line.
+  bool legacy_warned_ = false;
+
   // Tracking is suspended for the duration of a look so the head holds still
   // for the photo; this remembers whether to switch it back on afterwards.
   bool look_resume_tracking_ = false;
@@ -209,6 +245,26 @@ class CamLink {
   // to tell "the subject is centred and the cam has gone quiet" apart from
   // "updates are still arriving".
   uint32_t last_track_msg_ms_ = 0;
+
+  // ---- Direction learning (see yaw_dir()) ----
+  // One observation window per axis: remember the offset when the head starts moving, and once it
+  // has actually moved kLearnWindowDeg, compare. Grown by a clear margin = a "wrong way" vote;
+  // shrunk = "right way" (clears the votes). kLearnVotes wrong windows in a row flips the axis.
+  struct AxisLearn {
+    bool active = false;
+    int ref_offset = 0;
+    float moved_deg = 0.0f;
+    uint8_t wrong_votes = 0;
+    uint8_t confirmed = 0;        // right-way windows since boot / last flip
+    uint32_t stuck_since_ms = 0;  // pinned on an end stop with the subject still off to that side
+  };
+  void LearnAxis(bool yaw, int offset, float applied_deg, bool at_limit, uint32_t now);
+  void LoadTrackDirs();
+  void SaveTrackDirs();
+  int8_t yaw_dir_ = -1;   // yaw angle up = head turns LEFT, so a subject on the right (dx > 0) needs yaw DOWN
+  int8_t pitch_dir_ = 1;  // pitch angle up = look down, subject below (dy > 0) needs pitch UP
+  AxisLearn yaw_learn_;
+  AxisLearn pitch_learn_;
 
   // Accumulators for the periodic decode-vs-wire report in ReceiveVideoFrame().
   uint32_t video_decode_ms_ = 0;

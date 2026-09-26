@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>ENCO-02 舵机调试控制台</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: rgba(22, 27, 44, 0.85);
+      --border: rgba(56, 189, 248, 0.2);
+      --primary: #38bdf8;
+      --primary-glow: rgba(56, 189, 248, 0.4);
+      --accent: #f43f5e;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --green: #10b981;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px 16px 40px;
+      background-image: radial-gradient(circle at 50% 0%, #1e293b 0%, #0b0f19 75%);
+    }
+    .container {
+      width: 100%;
+      max-width: 480px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .header {
+      text-align: center;
+      padding: 10px 0;
+    }
+    .header h1 {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      color: #fff;
+      text-shadow: 0 0 15px var(--primary-glow);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .header p {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 600;
+      background: rgba(16, 185, 129, 0.2);
+      color: var(--green);
+      border: 1px solid rgba(16, 185, 129, 0.4);
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+    .card-title {
+      font-size: 15px;
+      font-weight: 600;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+    .angle-val {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--primary);
+      text-shadow: 0 0 10px var(--primary-glow);
+    }
+    .slider-container {
+      position: relative;
+      margin: 15px 0 20px;
+    }
+    input[type=range] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 10px;
+      border-radius: 5px;
+      background: #1e293b;
+      outline: none;
+      box-shadow: inset 0 1px 3px rgba(0,0,0,0.5);
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: #fff;
+      border: 3px solid var(--primary);
+      cursor: pointer;
+      box-shadow: 0 0 12px var(--primary-glow);
+      transition: transform 0.1s ease;
+    }
+    input[type=range]::-webkit-slider-thumb:active {
+      transform: scale(1.15);
+    }
+    .scale-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 6px;
+    }
+    .btn-group {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .btn {
+      background: #1e293b;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: var(--text);
+      padding: 8px 4px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.15s ease;
+    }
+    .btn:active {
+      transform: scale(0.95);
+      background: var(--primary);
+      color: #0b0f19;
+      border-color: var(--primary);
+    }
+    .action-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .btn-action {
+      background: #1e293b;
+      border: 1px solid var(--border);
+      color: #fff;
+      padding: 12px;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+    .btn-action.primary {
+      background: linear-gradient(135deg, #0284c7, #0369a1);
+      border: none;
+      box-shadow: 0 4px 15px rgba(2, 132, 199, 0.35);
+    }
+    .btn-action:active {
+      transform: scale(0.97);
+    }
+    .info-box {
+      font-size: 12px;
+      color: var(--text-muted);
+      line-height: 1.6;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .info-box span {
+      color: var(--text);
+      font-family: monospace;
+    }
+    .speed-row {
+      display: grid;
+      grid-template-columns: 40px 1fr 34px 64px;
+      align-items: center;
+      gap: 8px;
+      margin: 8px 0;
+    }
+    .speed-name { font-size: 13px; }
+    .speed-val { font-size: 14px; font-weight: 700; color: var(--primary); text-align: right; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🤖 ENCO-02 舵机调试</h1>
+      <p>双轴 MG92B 模拟相机追踪控制台 <span class="badge" id="net-badge">在线</span></p>
+    </div>
+
+    <!-- Servo 0: PIN 0 -->
+    <div class="card">
+      <div class="card-title">
+        <span>📍 舵机 1：GPIO 0 (俯仰 / Pitch)</span>
+        <span class="angle-val" id="val0">90°</span>
+      </div>
+      <p style="font-size:11px;color:var(--primary);margin-top:-6px;margin-bottom:8px;">安全限位：40° ~ 120° (角大低头，角小抬头)</p>
+      <div class="slider-container">
+        <input type="range" id="slider0" min="40" max="120" value="90" oninput="onSliderInput(0, this.value)">
+        <div class="scale-labels">
+          <span>40° (抬头)</span>
+          <span>60°</span>
+          <span>90° (居中)</span>
+          <span>105°</span>
+          <span>120° (低头)</span>
+        </div>
+      </div>
+      <div class="btn-group">
+        <button class="btn" onclick="setAngle(0, 40)">40° 抬头</button>
+        <button class="btn" onclick="setAngle(0, 60)">60°</button>
+        <button class="btn" onclick="setAngle(0, 90)">90° 居中</button>
+        <button class="btn" onclick="setAngle(0, 105)">105°</button>
+        <button class="btn" onclick="setAngle(0, 120)">120° 低头</button>
+      </div>
+    </div>
+
+    <!-- Servo 1: PIN 25 -->
+    <div class="card">
+      <div class="card-title">
+        <span>📍 舵机 2：GPIO 25 (偏侧 / Roll & Tilt)</span>
+        <span class="angle-val" id="val25">90°</span>
+      </div>
+      <p style="font-size:11px;color:var(--primary);margin-top:-6px;margin-bottom:8px;">安全限位：50° ~ 110° (角大右下歪，角小左下歪)</p>
+      <div class="slider-container">
+        <input type="range" id="slider25" min="50" max="110" value="90" oninput="onSliderInput(25, this.value)">
+        <div class="scale-labels">
+          <span>50° (向左歪)</span>
+          <span>70°</span>
+          <span>90° (居中)</span>
+          <span>100°</span>
+          <span>110° (向右歪)</span>
+        </div>
+      </div>
+      <div class="btn-group">
+        <button class="btn" onclick="setAngle(25, 50)">50° 左歪</button>
+        <button class="btn" onclick="setAngle(25, 70)">70°</button>
+        <button class="btn" onclick="setAngle(25, 90)">90° 居中</button>
+        <button class="btn" onclick="setAngle(25, 100)">100°</button>
+        <button class="btn" onclick="setAngle(25, 110)">110° 右歪</button>
+      </div>
+    </div>
+
+    <!-- Servo 3: PIN 26 -->
+    <div class="card">
+      <div class="card-title">
+        <span>📍 舵机 3：GPIO 26 (整头水平旋转 / Yaw)</span>
+        <span class="angle-val" id="val26">70°</span>
+      </div>
+      <p style="font-size:11px;color:var(--primary);margin-top:-6px;margin-bottom:8px;">安全限位：20° ~ 120° (角小向右看，角大向左看，70°正视)</p>
+      <div class="slider-container">
+        <input type="range" id="slider26" min="20" max="120" value="70" oninput="onSliderInput(26, this.value)">
+        <div class="scale-labels">
+          <span>20° (向右极)</span>
+          <span>45°</span>
+          <span>70° (正视)</span>
+          <span>95°</span>
+          <span>120° (向左极)</span>
+        </div>
+      </div>
+      <div class="btn-group">
+        <button class="btn" onclick="setAngle(26, 20)">20° 右极</button>
+        <button class="btn" onclick="setAngle(26, 45)">45°</button>
+        <button class="btn" onclick="setAngle(26, 70)">70° 正视</button>
+        <button class="btn" onclick="setAngle(26, 95)">95°</button>
+        <button class="btn" onclick="setAngle(26, 120)">120° 左极</button>
+      </div>
+    </div>
+
+    <!-- Quick Global Actions -->
+    <div class="action-row" style="grid-template-columns: 1fr 1.2fr 1fr;">
+      <button class="btn-action primary" onclick="centerAll()">🎯 全部位归中 (正视)</button>
+      <button class="btn-action" style="background: linear-gradient(135deg, #ec4899, #8b5cf6); border: none; box-shadow: 0 4px 15px rgba(236, 72, 153, 0.35);" onclick="runHeadBobble()">🕺 摇头晃脑</button>
+      <button class="btn-action" onclick="runSweep()">🔄 巡航测试</button>
+    </div>
+
+    <!-- Screen UI Mode Switch Action -->
+    <div style="margin-top: 4px;">
+      <button class="btn-action" style="width: 100%; background: linear-gradient(135deg, #0284c7, #6366f1); border: none; box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);" onclick="toggleUiMode()" id="btn-uimode">
+        📺 屏幕模式: 虚拟表情 (点击切换为对话)
+      </button>
+    </div>
+
+    <!-- Predefined animations -->
+    <div class="card">
+      <div class="card-title">
+        <span>🎬 预设动画 (待机随机播放)</span>
+        <span class="angle-val" id="anim-state">--</span>
+      </div>
+      <button class="btn-action" style="width:100%; margin-bottom:8px;" onclick="toggleAutoAnim()" id="btn-auto-anim">🤖 随机动作: --</button>
+      <div class="btn-group" id="anim-buttons"><span style="font-size:12px;color:var(--text-muted);">加载中…</span></div>
+      <div class="btn-group" style="margin-top:8px;">
+        <button class="btn" onclick="playRandomAnim()">🎲 随机</button>
+        <button class="btn" onclick="stopAnim()">⏹ 停止</button>
+      </div>
+      <p style="font-size:11px; color:var(--text-muted); margin-top:8px;">
+        ★ = 随机池中的动画（"摇头晃脑"也在其中）。随机动作开启时，待机和对话中每 6–12 秒随机播放一个；开启摄像头跟踪时自动暂停。播放中点另一个动画会在当前姿势停稳后平滑衔接。动画节奏跟随上面的速度设置。
+      </p>
+    </div>
+
+    <!-- Speed tuning -->
+    <div class="card">
+      <div class="card-title"><span>⏱ 动作速度 (平均 °/秒)</span></div>
+      <div class="speed-row">
+        <span class="speed-name">抬头</span>
+        <input type="range" id="speed0" min="10" max="120" step="5" value="40" oninput="onSpeedInput(0, this.value)">
+        <span class="speed-val" id="speed-val0">40</span>
+        <button class="btn" onclick="testSpeed(0)">试一下</button>
+      </div>
+      <div class="speed-row">
+        <span class="speed-name">歪头</span>
+        <input type="range" id="speed1" min="10" max="120" step="5" value="40" oninput="onSpeedInput(1, this.value)">
+        <span class="speed-val" id="speed-val1">40</span>
+        <button class="btn" onclick="testSpeed(1)">试一下</button>
+      </div>
+      <div class="speed-row">
+        <span class="speed-name">转头</span>
+        <input type="range" id="speed2" min="10" max="120" step="5" value="40" oninput="onSpeedInput(2, this.value)">
+        <span class="speed-val" id="speed-val2">40</span>
+        <button class="btn" onclick="testSpeed(2)">试一下</button>
+      </div>
+      <button class="btn-action primary" style="width:100%; margin-top:10px;" onclick="saveSpeeds()" id="btn-save-speed">💾 保存为默认</button>
+      <p style="font-size:11px; color:var(--text-muted); margin-top:8px;">
+        调整后立即生效（语音动作、滑块、预设动画都用它）。点"保存为默认"后重启也保留。
+      </p>
+    </div>
+
+    <!-- Volume -->
+    <div class="card">
+      <div class="card-title">
+        <span>🔊 音量 / Volume</span>
+        <span class="angle-val" id="val-vol">--</span>
+      </div>
+      <div class="slider-container" style="margin-bottom:10px;">
+        <input type="range" id="slider-vol" min="0" max="100" value="20" oninput="onVolumeInput(this.value)">
+      </div>
+      <div class="btn-group">
+        <button class="btn" onclick="setVolume(0)">静音</button>
+        <button class="btn" onclick="setVolume(20)">20</button>
+        <button class="btn" onclick="setVolume(40)">40</button>
+        <button class="btn" onclick="setVolume(60)">60</button>
+        <button class="btn" onclick="setVolume(80)">80</button>
+      </div>
+    </div>
+
+    <!-- Camera tracking (one finger) -->
+    <div>
+      <button class="btn-action" style="width: 100%;" onclick="toggleTracking()" id="btn-track">📷 跟踪: --</button>
+      <div class="btn-group" style="margin-top:6px; grid-template-columns: 1fr 1fr;">
+        <button class="btn" onclick="trackCmd('flip=yaw')" id="btn-flip-yaw">左右方向: --</button>
+        <button class="btn" onclick="trackCmd('flip=pitch')" id="btn-flip-pitch">上下方向: --</button>
+        <button class="btn" onclick="trackCmd('flip=roll')" id="btn-flip-roll">歪头方向: --</button>
+        <button class="btn" onclick="trackCmd('reset_dir=1')">恢复默认</button>
+      </div>
+      <p style="font-size:11px; color:var(--text-muted); margin-top:6px;">
+        ☝️ 对着摄像头竖起一根手指（其余握拳）约1秒即自动开启，或点上方按钮。头会转动让指尖保持在画面中央，手指左右倾斜时跟着歪头。手指离开4秒后回正；手势开启的跟踪20秒看不到手指会自动关闭。
+        左右/上下方向会自动学习（转头后指尖离中心更远就反向并保存）；歪头方向无法自动学习，反了请点“歪头方向”。
+      </p>
+    </div>
+
+    <!-- Typed message -->
+    <div class="card">
+      <div class="card-title"><span>💬 发送文字 (代替说话)</span></div>
+      <div style="display:flex; gap:8px;">
+        <input id="say-text" type="text" maxlength="40" placeholder="例如: 向左转头" autocomplete="off"
+               style="flex:1; background:#1e293b; border:1px solid var(--border); color:var(--text); border-radius:10px; padding:10px; font-size:14px;"
+               onkeydown="if (event.key === 'Enter') sendSay()">
+        <button class="btn-action primary" style="padding:10px 16px;" onclick="sendSay()">发送</button>
+      </div>
+      <div class="btn-group" style="grid-template-columns: repeat(4, 1fr);">
+        <button class="btn" onclick="quickSay(this)">向左转头</button>
+        <button class="btn" onclick="quickSay(this)">向右转头</button>
+        <button class="btn" onclick="quickSay(this)">摇头</button>
+        <button class="btn" onclick="quickSay(this)">泳池状态</button>
+      </div>
+      <p id="say-status" style="font-size:11px; color:var(--text-muted); margin-top:8px;">
+        服务器只接受短句 (约 10 个字以内)，长句会被忽略。她说话时请稍等。
+      </p>
+    </div>
+
+    <!-- Diagnostics Info -->
+    <div class="card info-box">
+      <div>设备 IP: <span id="info-ip">加载中...</span></div>
+      <div>可用内存: <span id="info-heap">--</span> KB</div>
+    </div>
+  </div>
+
+  <script>
+    let sendTimer = null;
+    let pendingUpdates = {};
+
+    function updateUiValues(pin, angle) {
+      if (pin === 0) {
+        document.getElementById('slider0').value = angle;
+        document.getElementById('val0').innerText = angle + '°';
+      } else if (pin === 25) {
+        document.getElementById('slider25').value = angle;
+        document.getElementById('val25').innerText = angle + '°';
+      } else if (pin === 26) {
+        document.getElementById('slider26').value = angle;
+        document.getElementById('val26').innerText = angle + '°';
+      }
+    }
+
+    function onSliderInput(pin, val) {
+      updateUiValues(pin, val);
+      pendingUpdates[pin] = val;
+      if (!sendTimer) {
+        sendTimer = setTimeout(flushUpdates, 30);
+      }
+    }
+
+    function flushUpdates() {
+      sendTimer = null;
+      for (const pin in pendingUpdates) {
+        const angle = pendingUpdates[pin];
+        delete pendingUpdates[pin];
+        fetch('/api/servo?pin=' + pin + '&angle=' + angle).catch(e => console.error(e));
+      }
+    }
+
+    function setAngle(pin, angle) {
+      updateUiValues(pin, angle);
+      fetch('/api/servo?pin=' + pin + '&angle=' + angle).catch(e => console.error(e));
+    }
+
+    function centerAll() {
+      updateUiValues(0, 90);
+      updateUiValues(25, 90);
+      updateUiValues(26, 70);
+      fetch('/api/center').catch(e => console.error(e));
+    }
+
+    function runHeadBobble() {
+      fetch('/api/bobble').catch(e => console.error(e));
+      setTimeout(syncStatus, 2200);
+    }
+
+    function runSweep() {
+      fetch('/api/sweep').catch(e => console.error(e));
+      setTimeout(syncStatus, 1500);
+    }
+
+    function toggleUiMode() {
+      fetch('/api/ui_mode?action=toggle')
+        .then(r => r.json())
+        .then(data => {
+          if (data.mode) updateUiModeButton(data.mode);
+        })
+        .catch(e => console.error(e));
+    }
+
+    function updateUiModeButton(mode) {
+      const btn = document.getElementById('btn-uimode');
+      if (!btn) return;
+      if (mode === 'face') {
+        btn.innerText = '📺 屏幕模式: 虚拟表情 (点击切换为对话)';
+      } else {
+        btn.innerText = '📺 屏幕模式: 对话文本 (点击切换为表情)';
+      }
+    }
+
+    function syncStatus() {
+      fetch('/api/status')
+        .then(r => r.json())
+        .then(data => {
+          updateUiValues(0, Math.round(data.servo0));
+          updateUiValues(25, Math.round(data.servo25));
+          if (data.servo26 !== undefined) {
+            updateUiValues(26, Math.round(data.servo26));
+          } else if (data.servo15 !== undefined) {
+            updateUiValues(26, Math.round(data.servo15));
+          }
+          if (data.ui_mode) {
+            updateUiModeButton(data.ui_mode);
+          }
+          if (data.volume !== undefined && data.volume >= 0) updateVolumeUi(data.volume);
+          if (data.tracking !== undefined) updateTrackUi(data.tracking, data.cam);
+          document.getElementById('info-ip').innerText = data.ip;
+          document.getElementById('info-heap').innerText = Math.round(data.heap / 1024);
+        })
+        .catch(e => {
+          document.getElementById('net-badge').innerText = '未连接';
+          document.getElementById('net-badge').style.color = '#f43f5e';
+        });
+    }
+
+    // ---- Volume ----
+    let volTimer = null;
+    function updateVolumeUi(v) {
+      document.getElementById('slider-vol').value = v;
+      document.getElementById('val-vol').textContent = v + '%';
+    }
+    function onVolumeInput(v) {
+      updateVolumeUi(v);
+      clearTimeout(volTimer);
+      volTimer = setTimeout(() => setVolume(v), 150);
+    }
+    function setVolume(v) {
+      updateVolumeUi(v);
+      fetch('/api/volume?value=' + encodeURIComponent(v))
+        .then(r => r.json()).then(d => { if (d.volume !== undefined) updateVolumeUi(d.volume); })
+        .catch(e => console.error(e));
+    }
+
+    // ---- Camera tracking ----
+    let trackingOn = false;
+    function updateTrackUi(on, present) {
+      trackingOn = on;
+      const btn = document.getElementById('btn-track');
+      btn.textContent = on ? '📷 跟踪: 已开启 (点击关闭)' : '📷 跟踪: 已关闭 (点击开启)';
+      if (present === false) btn.textContent += ' · 未检测到摄像头';
+      btn.style.background = on ? 'linear-gradient(135deg, #059669, #10b981)' : '#1e293b';
+    }
+    function toggleTracking() {
+      fetch('/api/track?on=' + (trackingOn ? '0' : '1'))
+        .then(r => r.json()).then(d => updateTrackUi(d.tracking, d.cam))
+        .catch(e => console.error(e));
+    }
+    function updateTrackDirs(d) {
+      if (d.yaw_dir !== undefined) document.getElementById('btn-flip-yaw').textContent = '左右方向: ' + (d.yaw_dir > 0 ? '+' : '−') + ' (反转)';
+      if (d.pitch_dir !== undefined) document.getElementById('btn-flip-pitch').textContent = '上下方向: ' + (d.pitch_dir > 0 ? '+' : '−') + ' (反转)';
+      if (d.roll_dir !== undefined) document.getElementById('btn-flip-roll').textContent = '歪头方向: ' + (d.roll_dir > 0 ? '+' : '−') + ' (反转)';
+    }
+    function trackCmd(q) {
+      fetch('/api/track?' + q).then(r => r.json()).then(d => { updateTrackUi(d.tracking, d.cam); updateTrackDirs(d); })
+        .catch(e => console.error(e));
+    }
+    setTimeout(() => trackCmd('x=0'), 900);
+    // Tracking also switches itself on (one-finger gesture) and off (gesture timeout), so re-read it
+    // when the page comes back into view. Deliberately not a periodic poll: the robot's heap is tight
+    // during voice sessions and every request costs a socket.
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') trackCmd('x=0'); });
+
+    // ---- Typed message ----
+    function setSayStatus(msg, color) {
+      const el = document.getElementById('say-status');
+      el.textContent = msg;
+      el.style.color = color || 'var(--text-muted)';
+    }
+    function quickSay(btn) {
+      document.getElementById('say-text').value = btn.textContent;
+      sendSay();
+    }
+    function sendSay() {
+      const input = document.getElementById('say-text');
+      const text = input.value.trim();
+      if (!text) return;
+      setSayStatus('发送中: ' + text);
+      fetch('/api/say', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'text=' + encodeURIComponent(text)
+      })
+        .then(r => r.json())
+        .then(d => {
+          if (d.ok) {
+            setSayStatus('已发送: ' + text + ([...text].length > 10 ? ' (较长，服务器可能忽略)' : ''), 'var(--green)');
+            input.value = '';
+          } else {
+            setSayStatus('失败: ' + (d.error || '未知错误'), 'var(--accent)');
+          }
+        })
+        .catch(e => setSayStatus('失败: ' + e, 'var(--accent)'));
+    }
+
+    // ---- Speed tuning ----
+    const speedTimers = [null, null, null];
+    function updateSpeedUi(speeds) {
+      for (let i = 0; i < 3; i++) {
+        document.getElementById('speed' + i).value = speeds[i];
+        document.getElementById('speed-val' + i).textContent = speeds[i];
+      }
+    }
+    function onSpeedInput(axis, v) {
+      document.getElementById('speed-val' + axis).textContent = v;
+      clearTimeout(speedTimers[axis]);
+      speedTimers[axis] = setTimeout(() => {
+        fetch('/api/speed?axis=' + axis + '&value=' + encodeURIComponent(v)).catch(e => console.error(e));
+      }, 150);
+    }
+    function testSpeed(axis) {
+      fetch('/api/speed?test=' + axis).catch(e => console.error(e));
+    }
+    function saveSpeeds() {
+      const btn = document.getElementById('btn-save-speed');
+      fetch('/api/speed?save=1').then(r => r.json()).then(d => {
+        updateSpeedUi(d.speed);
+        btn.textContent = '✅ 已保存: 抬头 ' + d.speed[0] + ' / 歪头 ' + d.speed[1] + ' / 转头 ' + d.speed[2];
+        setTimeout(() => { btn.textContent = '💾 保存为默认'; }, 3000);
+      }).catch(e => console.error(e));
+    }
+    function loadSpeeds() {
+      fetch('/api/speed').then(r => r.json()).then(d => updateSpeedUi(d.speed)).catch(e => console.error(e));
+    }
+
+    function setAnimState(text) {
+      document.getElementById('anim-state').textContent = text;
+    }
+    function playAnim(name, label) {
+      fetch('/api/anim?name=' + encodeURIComponent(name)).then(r => r.json())
+        .then(d => setAnimState(d.ok ? '▶ ' + label : '忙'))
+        .catch(e => console.error(e));
+    }
+    function playRandomAnim() {
+      fetch('/api/anim?random=1').then(r => r.json())
+        .then(d => setAnimState(d.ok ? '▶ 随机' : '忙'))
+        .catch(e => console.error(e));
+    }
+    function stopAnim() {
+      fetch('/api/anim?stop=1').then(() => setAnimState('⏹ 已停止')).catch(e => console.error(e));
+    }
+    let autoAnimOn = false;
+    function updateAutoAnim(on) {
+      if (on === undefined) return;
+      autoAnimOn = on;
+      const btn = document.getElementById('btn-auto-anim');
+      btn.textContent = on ? '🤖 随机动作: 已开启 (点击关闭)' : '🤖 随机动作: 已关闭 (点击开启)';
+      btn.style.background = on ? 'linear-gradient(135deg, #7c3aed, #a855f7)' : '#1e293b';
+    }
+    function toggleAutoAnim() {
+      fetch('/api/anim?auto=' + (autoAnimOn ? '0' : '1')).then(r => r.json())
+        .then(d => updateAutoAnim(d.auto)).catch(e => console.error(e));
+    }
+    function loadAnims() {
+      fetch('/api/anim').then(r => r.json()).then(d => {
+        const box = document.getElementById('anim-buttons');
+        box.replaceChildren();
+        d.anims.forEach(a => {
+          const b = document.createElement('button');
+          b.className = 'btn';
+          b.textContent = (a.idle ? '★ ' : '') + a.label;
+          b.title = a.name;
+          b.addEventListener('click', () => playAnim(a.name, a.label));
+          box.appendChild(b);
+        });
+        setAnimState(d.playing ? '▶' : '空闲');
+        updateAutoAnim(d.auto);
+      }).catch(e => console.error(e));
+    }
+
+    syncStatus();
+    setTimeout(loadSpeeds, 300);
+    setTimeout(loadAnims, 600);
+  </script>
+</body>
+</html>

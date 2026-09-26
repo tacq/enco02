@@ -43,4 +43,24 @@
 #define CAM_VFLIP 0
 #define CAM_HMIRROR 0
 
+// ---------------------------------------------------------------------------
+// Over-the-air updates (optional)
+// ---------------------------------------------------------------------------
+// Define this to let the camera be reflashed over WiFi instead of USB:
+//   ENCO_CAM_OTA_PASSWORD=<the same value> pio run -e enco02_cam_ota -t upload
+// Use a long random value, e.g.  python3 -c "import secrets; print(secrets.token_urlsafe(18))"
+// Left undefined, OTA is not compiled in at all.
+// #define CAM_OTA_PASSWORD "change-me-to-a-long-random-value"
+
+// ---------------------------------------------------------------------------
+// Hand tracker (optional, recommended)
+// ---------------------------------------------------------------------------
+// Shared secret for tools/hand_tracker, the program on a computer that finds
+// the raised finger in this camera's video (MediaPipe) and steers the head.
+// Its samples are HMAC-signed with this key; without it they are all refused.
+// Put the SAME value in tools/hand_tracker/.env as ENCO_TRACK_KEY=... (chmod
+// 600). At least 32 characters, e.g.
+//   python3 -c "import secrets; print(secrets.token_hex(32))"
+// #define CAM_TRACK_KEY "change-me-to-64-random-hex-characters"
+
 #endif  // _CAM_CONFIG_H_

@@ -80,18 +80,35 @@ Hold something up and ask. The ESP32‑CAM in her head takes a photo, has it rec
 
 ---
 
-## ★★★★☆ 3. Head tracking: she follows you
+## ★★★★☆ 3. Head tracking: she follows your finger
 
-The 3‑axis head (pitch / yaw / roll) turns to keep your face in view.
+Hold up **one finger** (the rest of the hand in a fist) and the 3‑axis head follows it. Yaw (转头) and pitch (抬头/低头) keep the fingertip in the middle of the picture. Roll (歪头) tilts the head the same way the finger leans.
 
 | How | Action |
 |---|---|
-| Say **"看着我" / "跟着我" / "开启跟踪"** | Tracking on |
-| **Hold up one finger** to the camera | Tracking on (the status bar shows **跟踪开启**) |
-| Say **"别看我了" / "停止跟踪"** | Tracking off |
+| **Hold up one finger** to the camera for ~1 s | Tracking on (the status bar shows **跟踪开启**) |
+| Say **"开启跟踪" / "跟着我"**, or press **📷 跟踪** on the web page | Tracking on |
+| Say **"别看我了" / "停止跟踪"**, or press the button again | Tracking off |
 
 - Tracking is **off after every boot**.
+- Turning tracking on stops any running animation, and random animations stay paused while it is on.
 - It pauses during a head gesture and for 4 s after any head command, so "向左转头" isn't immediately undone.
+- **Finger gone:** after 4 s the head glides back to the neutral pose and waits. If the gesture turned tracking on, tracking turns itself off after 20 s with no finger and random animations resume. Tracking turned on by voice or the web page stays on until you turn it off.
+- **Roll is open loop.** The camera is not on the roll stage, so tilting the head does not rotate the picture and cannot be checked by the camera. The head simply tilts by as much as the finger leans past ~6°, up to ±20°.
+- **Self-calibrating direction (yaw/pitch).** The camera rides on the yaw and pitch stages, so turning the right way pulls the fingertip toward centre. After each ~4° of movement she checks, using only confident detections. If the fingertip got *further* from centre twice in a row, or she is pinned on an end stop with the finger still off to that side for 2 s, that axis was backwards. She flips it and saves it, and the serial log shows `[track] ... flipped`.
+- The web page shows the current 左右 / 上下 / 歪头 directions, with buttons to flip each by hand or 恢复默认. Roll cannot learn its direction, so if she tilts the opposite way to your finger, press **歪头方向**.
+- Needs the finger-tracking camera firmware (`enco02_cam`). With the old face-tracking firmware the serial log says so once and the head does not move.
+
+### Who finds the finger
+
+**Best: the hand tracker on the Mac** (`tools/hand_tracker`; setup is in its README).
+- The ESP32‑CAM can't run a hand-recognition network. Like every ESP32‑CAM gesture project, it streams video to a computer.
+- On the Mac, Google MediaPipe finds the hand and sends the finger position back. Each sample is signed, so nothing else on the Wi‑Fi can steer the head.
+- While the tracker runs, the camera's sensor compresses JPEG itself: 640×480, ~15 fps while tracking, ~7 fps while waiting for the gesture.
+- **Start it:** run `tools/hand_tracker/.venv/bin/python tools/hand_tracker/hand_tracker.py`, or install it as a login agent with `tools/hand_tracker/install_launchd.sh`.
+- **Check it:** `http://192.168.86.65/status` shows `"ext":1` and `"sensor":"jpeg"`.
+
+**Fallback: the camera's own skin-colour finder.** It takes over automatically whenever the Mac tracker isn't connected. It needs no computer, but it can mistake skin-coloured walls or furniture for a finger.
 
 ---
 
@@ -140,6 +157,9 @@ Needs the home bridge running on your Mac (see [§16](#16-home-bridge-on-the-mac
 | "向右转头" / "往右看" | Turn right 10° | surprised |
 | "摇头" / "摇头晃脑" / "不要不要" | Playful ~3 s shake: yaw ±28°, tilt ±17°, nod ±8° | laughing |
 | "头摆正" / "向前看" / "头复位" | Centre all axes | neutral |
+| "随机动作" / "做个动作" | One random predefined animation | – |
+| "开始随机动作" | Random animations on: standby and awake, every 6–12 s (saved; also the 🤖 button on the web page) | – |
+| "停止随机动作" | Random animations off: stop and ease back to centre (saved) | – |
 
 All moves ease in and out (cosine curve): soft start, soft stop, ~30°/s average, never faster than 0.45 s per move.
 
@@ -151,7 +171,7 @@ Repeated commands within 2.5 s are ignored, so one sentence can't move the head 
 
 | State | Behaviour |
 |---|---|
-| **Standby** (caption: *待命中 · 说 "Hi 安可" 唤醒*) | Speaker muted. Idle life: random mood every 4.5–9 s, small gentle head movements every 7–14 s |
+| **Standby** (caption: *待命中 · 说 "Hi 安可" 唤醒*) | Speaker muted. Idle life: random mood every 4.5–9 s, a predefined head animation every 6–12 s (look around, curious tilt, glance, nod, breathe, sleepy, shy, think, 摇头晃脑…; never the same twice in a row) |
 | **Wake** | "Hi 安可", "安可", "Hi ENCO", "你好", "小智"; timer or camera requests also wake her directly |
 | **Awake** | Listens and answers; your volume is restored |
 | **Back to standby** | "退下" / "去休息" / "待命", or 120 s with no conversation |
@@ -207,8 +227,10 @@ Only one card is shown at a time; a new one replaces the old one.
 | "现在音量多少?" | Tells you the level |
 
 - Questions ("声音大吗?") are never mistaken for commands.
-- Relative changes never go below 10.
-- The default is **20 %**. The volume icon in the status bar updates every time.
+- Relative changes never go below 10, and "quieter" never turns up a level that is already lower (or a mute).
+- **Mute:** say "音量调到 0", or press **静音** on the web page. She stays muted through standby, wake-ups and reboots until you raise the volume. Timer announcements are silent too, but still shown on screen.
+- **Remembered across power-off.** The level is saved about 3 s after your last change (never while she is talking) and restored at the next boot. **20 %** is only the default on a fresh board.
+- The volume icon in the status bar updates every time. In standby the speaker is parked silent, but the page and "现在音量多少?" still report your level, and a change made in standby takes effect when she wakes.
 
 ---
 
@@ -247,17 +269,37 @@ The pill at the bottom shows what you said (**你:**), her replies (**Enco:**), 
 
 ## ★☆☆☆☆ 14. Web debug page
 
-After she has connected to the cloud once, open **`http://<robot-ip>/`** on the same network. The IP is shown on screen at boot.
+The page is **off by default** to save memory. Turn it on by voice:
+
+| Say | Effect |
+|---|---|
+| "打开调试页面" | Starts the page; a toast shows the IP and she reads out `http://<robot-ip>/` |
+| "关闭调试页面" | Stops it |
+
+- It switches itself off after **10 minutes**. Say "打开调试页面" again to reset the timer.
+- It also stops if free memory drops below 5 KB, or when the camera view opens.
+- If free memory is below 14 KB, she refuses and asks you to try later.
+- Open it by IP; `enco02.local` (mDNS) was removed to save memory.
+- **Testing build:** with `kDebugServerAlwaysOn = true` (main.cpp) the page starts by itself once she is idle, never times out, and is paused only while she speaks.
+
+**Page controls:** servo sliders (moves glide, never snap) · centre / bobble / sweep · screen mode ·
+**🎬 predefined animations** (🤖 random on/off switch, one button each, 🎲 random, ⏹ stop) · **⏱ speed** per axis (抬头 / 歪头 / 转头, 10–120 °/s, "试一下" test, "保存为默认" saves to flash) ·
+**🔊 volume** · **camera tracking** on/off · **💬 text box** (sends text as if you had said it).
 
 | Endpoint | Use |
 |---|---|
 | `/` or `/servo` | Servo test page |
-| `/api/status` | JSON status |
-| `/api/servo` | Set a servo angle (GET/POST) |
+| `/api/status` | JSON status (angles, heap, volume, tracking) |
+| `/api/servo` | Glide a servo to an angle (GET/POST) |
 | `/api/center` | Centre the head |
 | `/api/sweep` | Sweep test |
 | `/api/bobble` | Head bobble |
 | `/api/ui_mode` | Get/set face vs. chat mode |
+| `/api/anim` | List animations; `?name=nod` play; `?random=1`; `?stop=1` |
+| `/api/speed` | Get speeds; `?axis=0..2&value=`; `?test=0..2`; `?save=1` |
+| `/api/volume` | Get; `?value=0..100` set |
+| `/api/track` | Get; `?on=0\|1`, `?flip=yaw\|pitch\|roll`, `?reset_dir=1` |
+| `/api/say` | POST `text=` (1–120 bytes) |
 
 ---
 
@@ -383,6 +425,9 @@ Static: `.dram0.data` 25,716 B plus `.dram0.bss` 51,424 B ≈ 77 KB.
 | "连接不上家庭网关" | The Mac is asleep or the bridge is stopped. Check `launchctl print gui/$(id -u)/com.enco.homebridge`, and keep the Mac plugged in with the lid open |
 | Clock shows `--:--` | Not synced yet (needs internet); give it a few seconds after Wi‑Fi connects |
 | No caption bar | You turned it off. Say "打开字幕" |
-| Head won't follow | Tracking is off after boot. Say "看着我" or hold up one finger |
+| Head won't follow | Tracking is off after boot. Hold up one finger for ~1 s, or say "开启跟踪". The camera needs the finger-tracking firmware. For reliable detection, run the Mac hand tracker (`tools/hand_tracker`) |
+| Head chases something that isn't a finger | The camera's fallback finder saw a skin-coloured object. Run the Mac hand tracker, which recognises real hands |
+| Web debug page stops answering during a conversation | On purpose: requests wait until free heap is back above 16 KB (standby), because answering them mid-conversation ran the board out of memory |
 | She's silent in standby | By design: the speaker is muted in standby. Say "Hi 安可" |
+| Silent even when awake (status bar shows the muted speaker) | Volume is 0, and a mute is remembered across reboots. Say "大声一点" / "音量调到 30", or use the web page |
 | Wi‑Fi changed | Wait for the setup hotspot to appear and redo [§15](#15-wi-fi-setup-hotspot-portal) |

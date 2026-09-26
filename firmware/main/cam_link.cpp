@@ -9,6 +9,9 @@
 #include <esp_mac.h>
 #include <hal/uart_ll.h>
 
+#include <Preferences.h>
+#include <math.h>
+
 #include "servo_controller.h"
 #include "video_sink.h"
 
@@ -17,16 +20,14 @@ namespace {
 // Tracking response. These four numbers are what stop the head looking either
 // palsied or asleep.
 
-// Ignore anything inside +/-15% of frame centre. A centroid wanders by a few
-// percent even against a static scene, and without a deadband the head hunts
-// back and forth forever and the servos buzz. Widened from 12 so that small
-// shifts - someone leaning, or the centroid breathing around a stationary
-// face - leave the head alone entirely.
+// Ignore anything inside +/-12% of frame centre. A finger held "still" still
+// wanders by a few percent, and without a deadband the head hunts back and
+// forth forever and the servos buzz.
 //
-// MUST match the suppression threshold in the cam's ReportSample(): the cam
-// stops sending 'T' once the subject is inside this band, so if the two
-// numbers disagree the head either hunts or stops short of centre.
-constexpr int kDeadband = 15;
+// MUST match kCentredBand in the cam's cam_main.cpp: the cam stops sending 'T'
+// once the finger is inside this band and holding still, so if the two numbers
+// disagree the head either hunts or stops short of centre.
+constexpr int kDeadband = 12;
 
 // Degrees of head movement per unit of frame offset, applied to the offset
 // MEASURED PAST THE DEADBAND (see the step() lambda).
@@ -38,11 +39,16 @@ constexpr int kDeadband = 15;
 // the head could only be perfectly still or slewing at full speed, with no
 // values in between, and it stopped dead the instant it crossed the boundary.
 //
-// 0.07 puts the knee at an offset of ~58 instead, so the whole usable range of
+// 0.07 puts the knee at an offset of ~55 instead, so the whole usable range of
 // the picture maps onto a real spread of speeds: the head creeps when the
-// subject is slightly off-centre and only runs flat out when they are near the
+// finger is slightly off-centre and only runs flat out when it is near the
 // frame edge.
-constexpr int kGainNumer = 7;
+//
+// Pitch gets less: the picture is 4:3, so one unit of dy is ~0.2 deg of view
+// against ~0.27 deg for dx, and the same gain would make the vertical loop a
+// third more aggressive (and overshoot, with the cam's ~2 frames of lag).
+constexpr int kYawGainNumer = 7;
+constexpr int kPitchGainNumer = 5;
 constexpr int kGainDenom = 100;
 
 // Ceiling per update, in degrees. Together with kMoveIntervalMs this caps the
@@ -94,6 +100,60 @@ constexpr int kMinConf = 30;
 // After an explicit "向左转头", leave the head where the user put it for a
 // while instead of immediately dragging it back.
 constexpr uint32_t kManualHoldMs = 4000;
+
+// OFF. Measured live (2026-09-26): with the defaults the head centred the finger on both axes
+// (yaw 50 -> 74 took dx -94 -> +17; pitch 82 -> 63 took dy -82 -> -13), but the learner still
+// flipped yaw, twice in one session, because the hand itself moved faster than the head and a
+// moving subject looks exactly like a wrong-way turn. The defaults below are right for this build;
+// the web page's flip buttons remain for a rebuilt head.
+constexpr bool kAutoLearnDirections = false;
+
+// Direction learning. With the camera on the head, turning the right way pulls the subject toward
+// centre; turning the wrong way pushes them out. After the head has really moved kLearnWindowDeg on
+// an axis, the subject's offset is compared with where it was at the start of that window. 4 deg is
+// ~12 offset units on a ~65 deg lens, so a wrong turn adds well over kLearnMargin; kLearnVotes wrong
+// windows in a row (a person walking faster than the head can produce one) flips the axis.
+constexpr float kLearnWindowDeg = 4.0f;
+constexpr int kLearnMargin = 8;
+constexpr uint8_t kLearnVotes = 2;
+// Pinned on an end stop with the subject still far off to that side for this long also counts as a
+// wrong-way vote - but only until the axis has been confirmed right a few times, after which it
+// just means the person is outside the head's range.
+constexpr int kLearnStuckOffset = 35;
+constexpr uint32_t kLearnStuckMs = 2000;
+constexpr uint8_t kLearnConfirmedEnough = 3;
+// Direction learning only listens to confident (strict-shape) finger reports. A loose match is the
+// cam following an existing lock through a poor frame; if that frame was really a knuckle or the
+// desk edge, its offset says nothing about which way the head should have turned.
+constexpr int kLearnMinConf = 80;
+
+// Roll (歪头) mirrors the finger's lean. The cam is NOT on the roll stage - measured: rolling the
+// head does not rotate the picture - so this cannot be a closed loop the way yaw and pitch are. It
+// is a straight mapping from the lean the cam reports to a roll angle: finger tipped to one side,
+// head tipped the same way, as if the head were lining itself up with the finger.
+//
+// Soft deadband, like the yaw/pitch step(): the tilt is measured from the edge of the deadband, so
+// the target passes through upright continuously instead of jumping 6 deg when the lean crosses
+// it. 1:1 past that, capped at +/-20 deg, which stays inside the roll servo's 50..110 on both sides
+// of 90.
+constexpr int kLeanDeadbandDeg = 6;
+constexpr float kLeanGain = 1.0f;
+constexpr float kMaxLeanTiltDeg = 20.0f;
+// Re-aim the roll only for a change at least this big. The lean still jitters a degree or two frame
+// to frame after the cam's smoothing, and a servo nudged by 1 deg every 80ms buzzes.
+constexpr float kLeanRetargetDeg = 2.0f;
+// Roll glide speed as a fraction of the roll axis' tuned speed. Slow on purpose: this is an
+// expression, not a correction, and nothing is waiting on it.
+constexpr float kLeanGlideScale = 0.6f;
+
+// Finger out of sight this long: glide back to the neutral pose, once, and wait there - which is
+// also where the user is most likely to raise it again.
+constexpr uint32_t kFingerLostRecentreMs = 4000;
+constexpr float kRecentreGlideScale = 0.6f;
+// Armed by the gesture (not by voice or the web page) and no finger for this long: the user has
+// moved on, so disarm, which hands the head back to the idle animations and puts the cam back to
+// watching for the gesture.
+constexpr uint32_t kGestureIdleOffMs = 20000;
 
 // If nothing has arrived for this long the cam is unplugged, unpowered or
 // wedged. Stop claiming the feature works.
@@ -182,6 +242,7 @@ void CamLink::Init() {
   initialised_ = true;
   line_len_ = 0;
   result_[0] = '\0';
+  LoadTrackDirs();
   printf("cam link: uart2 rx=%d tx=%d @%u\n", kPinRx, kPinTx, static_cast<unsigned>(kBaud));
 }
 
@@ -195,6 +256,18 @@ void CamLink::SendCommand(const char* cmd) {
 
 void CamLink::SetTrackingEnabled(bool enabled) {
   tracking_enabled_ = enabled;
+  // An explicit decision (voice, web page, a look finishing). The 'G' handler marks a gesture arm
+  // again straight after calling this.
+  armed_by_gesture_ = false;
+  // The tracker yields to animations, so a random idle animation still playing would hold it off.
+  // Tracking wins: end it now (the head stays where it is and tracking takes over from there).
+  if (enabled) {
+    ServoController::GetInstance().StopAnimation();
+    // Start the lost-finger clocks now, so switching tracking on with no finger in view waits the
+    // full grace period before SuperviseTracking() recentres or disarms, rather than firing at once.
+    last_finger_ms_ = millis();
+    recentred_ = false;
+  }
   // Push it immediately rather than waiting for the next ping, so "别看我了"
   // takes effect while the user is still saying it.
   SendCommand(enabled ? "A 1" : "A 0");
@@ -275,6 +348,7 @@ bool CamLink::RequestLook(int64_t mcp_id, const char* question) {
   // Recognition mode. Stop the head BEFORE asking for the photo.
   if (tracking_enabled_) {
     look_resume_tracking_ = true;
+    look_resume_gesture_ = armed_by_gesture_;
     SetTrackingEnabled(false);
   }
   NoteManualHeadCommand();
@@ -326,16 +400,21 @@ bool CamLink::TakeLookResult(int64_t* id, bool* ok, const char** text) {
   return true;
 }
 
-void CamLink::ApplyTracking(int dx, int dy, int conf, int roll) {
+void CamLink::ApplyTracking(int dx, int dy, int conf, int lean) {
   if (!tracking_enabled_ || conf < kMinConf) {
     return;
   }
+  const uint32_t now = millis();
+  // The finger is in view, so SuperviseTracking()'s lost-finger clocks start over. Stamped before
+  // the animation and manual-hold checks: the finger being there is a fact whether or not we act on
+  // it this time.
+  last_finger_ms_ = now;
+  recentred_ = false;
   // A gesture animation owns the servos while it runs; fighting it would make
   // the bobble look broken and the head end up somewhere unintended.
   if (ServoController::GetInstance().IsAnimating()) {
     return;
   }
-  const uint32_t now = millis();
   // Any usable update counts as "the cam is still talking", whether or not it
   // ends up moving anything. CoastTracking() keys off this to decide the cam
   // has gone quiet and the ramp-down is now its responsibility.
@@ -343,6 +422,9 @@ void CamLink::ApplyTracking(int dx, int dy, int conf, int roll) {
   if (static_cast<int32_t>(manual_until_ms_ - now) > 0) {
     return;
   }
+  // Roll first, and outside the move-interval gate below: it is a glide that runs on the servo
+  // controller's own clock, so re-aiming it on every report costs nothing and keeps it current.
+  MirrorLean(lean);
   if (now - last_move_ms_ < kMoveIntervalMs) {
     return;
   }
@@ -352,6 +434,8 @@ void CamLink::ApplyTracking(int dx, int dy, int conf, int roll) {
   if (now - last_move_ms_ > kVelocityResetMs) {
     yaw_speed_ = 0.0f;
     pitch_speed_ = 0.0f;
+    yaw_learn_.active = false;
+    pitch_learn_.active = false;
   }
 
   // Soft deadband: measure the offset from the EDGE of the deadband, not from
@@ -363,7 +447,7 @@ void CamLink::ApplyTracking(int dx, int dy, int conf, int roll) {
   // worst possible place for one. Subtracting the deadband makes the speed pass
   // smoothly through zero at the boundary: the head now drifts to a halt as it
   // centres instead of cutting out.
-  auto step = [](int offset) -> float {
+  auto step = [](int offset, int gain_numer) -> float {
     int past = 0;
     if (offset >= kDeadband) {
       past = offset - kDeadband;
@@ -372,7 +456,7 @@ void CamLink::ApplyTracking(int dx, int dy, int conf, int roll) {
     } else {
       return 0.0f;
     }
-    float d = static_cast<float>(past * kGainNumer) / static_cast<float>(kGainDenom);
+    float d = static_cast<float>(past * gain_numer) / static_cast<float>(kGainDenom);
     if (d > kMaxStepDeg) {
       d = kMaxStepDeg;
     } else if (d < -kMaxStepDeg) {
@@ -395,8 +479,9 @@ void CamLink::ApplyTracking(int dx, int dy, int conf, int roll) {
     return want;
   };
 
-  yaw_speed_ = accelerate(yaw_speed_, step(dx));
-  pitch_speed_ = accelerate(pitch_speed_, step(dy));
+  // Speeds are kept in servo-angle space; the learned direction maps frame offset onto it.
+  yaw_speed_ = accelerate(yaw_speed_, yaw_dir_ * step(dx, kYawGainNumer));
+  pitch_speed_ = accelerate(pitch_speed_, pitch_dir_ * step(dy, kPitchGainNumer));
 
   // Below a twentieth of a degree the servo cannot resolve the difference and
   // we are just writing the same PWM value; treat it as stopped so the
@@ -410,44 +495,23 @@ void CamLink::ApplyTracking(int dx, int dy, int conf, int roll) {
 
   const float yaw_step = yaw_speed_;
   const float pitch_step = pitch_speed_;
+  const bool learn = conf >= kLearnMinConf;
 
   auto& servos = ServoController::GetInstance();
 
-  // Roll (歪头, kPinServo1 GPIO 25): mapped proportionally around neutral 90°
-  // when we have a skin-tone face lock (conf >= 60), so tilting your head left
-  // or right makes the robot tilt its head to match, and straightening your
-  // head smoothly returns Roll to 90°.
-  //
-  // Clamped to the SAME kServo1Min/MaxAngle the rest of the firmware uses. This
-  // was hardcoded to 68..112, which overshot the Roll servo's 110° mechanical
-  // limit by two degrees - SetAngle() would have caught it, but a tracker that
-  // aims outside the safe range is a tracker that parks the servo on its end
-  // stop and stalls it.
-  float roll_step = 0.0f;
-  if (conf >= 60) {
-    float target_roll = (abs(roll) < 15)
-                            ? ServoController::kDefaultAngle
-                            : (ServoController::kDefaultAngle + static_cast<float>(roll) * 0.20f);
-    if (target_roll < ServoController::kServo1MinAngle) {
-      target_roll = ServoController::kServo1MinAngle;
-    } else if (target_roll > ServoController::kServo1MaxAngle) {
-      target_roll = ServoController::kServo1MaxAngle;
+  if (yaw_step == 0.0f && pitch_step == 0.0f) {
+    if (learn) {
+      LearnAxis(true, dx, 0.0f, false, now);
+      LearnAxis(false, dy, 0.0f, false, now);
     }
-    const float diff_roll = target_roll - servos.GetAngle(ServoController::kPinServo1);
-    if (diff_roll > 1.0f) {
-      roll_step = diff_roll > 2.0f ? 2.0f : diff_roll;
-    } else if (diff_roll < -1.0f) {
-      roll_step = diff_roll < -2.0f ? -2.0f : diff_roll;
-    }
-  }
-
-  if (yaw_step == 0.0f && pitch_step == 0.0f && roll_step == 0.0f) {
     return;
   }
   last_move_ms_ = now;
 
-  // Subject right of centre -> turn right -> yaw angle up. Subject below centre
-  // -> look down -> pitch angle up.
+  // Direction: the learned yaw_dir_ / pitch_dir_ (already folded into the speeds) decide which way
+  // an offset turns the head. Defaults: subject right of centre -> yaw angle DOWN (bigger yaw is
+  // left); subject below centre -> pitch angle up (look down). If a default is wrong for this build
+  // (e.g. the cam image is mirrored), LearnAxis notices and flips it.
   //
   // Every write is clamped to that servo's own kServoNMin/MaxAngle here, on top
   // of the clamp inside SetAngle(). Belt and braces is warranted: this is the
@@ -457,22 +521,233 @@ void CamLink::ApplyTracking(int dx, int dy, int conf, int roll) {
   //
   // SetAngle(), not MoveAngleSmooth(): the smooth variant sleeps ~18ms per
   // degree, and loop() also drives the display, the event pump and the timer.
-  auto move = [&servos](gpio_num_t pin, float step, float lo, float hi) {
+  // Returns the change actually applied (less than `step` when clamped at an end stop).
+  auto move = [&servos](gpio_num_t pin, float step, float lo, float hi) -> float {
     if (step == 0.0f) {
-      return;
+      return 0.0f;
     }
-    float target = servos.GetAngle(pin) + step;
+    const float before = servos.GetAngle(pin);
+    float target = before + step;
     if (target < lo) {
       target = lo;
     } else if (target > hi) {
       target = hi;
     }
     servos.SetAngle(pin, target);
+    return target - before;
   };
 
-  move(ServoController::kPinServo2, yaw_step, ServoController::kServo2MinAngle, ServoController::kServo2MaxAngle);
-  move(ServoController::kPinServo0, pitch_step, ServoController::kServo0MinAngle, ServoController::kServo0MaxAngle);
-  move(ServoController::kPinServo1, roll_step, ServoController::kServo1MinAngle, ServoController::kServo1MaxAngle);
+  const float yaw_applied =
+      move(ServoController::kPinServo2, yaw_step, ServoController::kServo2MinAngle, ServoController::kServo2MaxAngle);
+  const float pitch_applied =
+      move(ServoController::kPinServo0, pitch_step, ServoController::kServo0MinAngle, ServoController::kServo0MaxAngle);
+
+  // Live-debug trace, at most twice a second so it does not flood the UART.
+  static uint32_t last_trace_ms = 0;
+  if (now - last_trace_ms >= 500) {
+    last_trace_ms = now;
+    printf("[track] dx %d dy %d conf %d -> yaw %.1f (%+.1f) pitch %.1f (%+.1f)\n", dx, dy, conf,
+           servos.GetAngle(ServoController::kPinServo2), yaw_applied, servos.GetAngle(ServoController::kPinServo0),
+           pitch_applied);
+  }
+
+  if (learn) {
+    LearnAxis(true, dx, yaw_applied, yaw_step != 0.0f && fabsf(yaw_applied) < 0.01f, now);
+    LearnAxis(false, dy, pitch_applied, pitch_step != 0.0f && fabsf(pitch_applied) < 0.01f, now);
+  }
+}
+
+// Roll mirrors the finger's lean (see kLeanDeadbandDeg for why this is open loop). A glide rather
+// than a SetAngle: the servo controller eases it on its own clock with bounded acceleration, so it
+// keeps moving smoothly between reports - including when the cam goes quiet because the finger is
+// centred and holding still - and re-aiming it mid-glide keeps the current velocity.
+void CamLink::MirrorLean(int lean) {
+  float tilt = 0.0f;
+  if (lean > kLeanDeadbandDeg) {
+    tilt = static_cast<float>(lean - kLeanDeadbandDeg) * kLeanGain;
+  } else if (lean < -kLeanDeadbandDeg) {
+    tilt = static_cast<float>(lean + kLeanDeadbandDeg) * kLeanGain;
+  }
+  if (tilt > kMaxLeanTiltDeg) {
+    tilt = kMaxLeanTiltDeg;
+  } else if (tilt < -kMaxLeanTiltDeg) {
+    tilt = -kMaxLeanTiltDeg;
+  }
+  // roll_dir_ +1: finger tip leaning to the right of the picture -> roll angle up (向右歪头).
+  const float target = ServoController::kDefaultAngle + static_cast<float>(roll_dir_) * tilt;
+
+  auto& servos = ServoController::GetInstance();
+  const float current = servos.GetAngle(ServoController::kPinServo1);
+  // Checked against where the head actually is as well as where it was last sent: if something
+  // else moved the roll servo meanwhile (a voice "歪头", the web slider), a stale roll_target_ must
+  // not stop it being brought back.
+  if (fabsf(target - roll_target_) < kLeanRetargetDeg && fabsf(target - current) < kLeanRetargetDeg) {
+    return;
+  }
+  roll_target_ = target;
+  servos.GlideTo(ServoController::kPinServo1, target, kLeanGlideScale);
+}
+
+// Runs every Poll(). The cam only talks while it can see a finger, so "the finger has gone" is an
+// absence that has to be noticed on our own clock.
+void CamLink::SuperviseTracking(uint32_t now) {
+  if (!tracking_enabled_ || look_pending_) {
+    return;
+  }
+  const uint32_t since = now - last_finger_ms_;
+
+  if (armed_by_gesture_ && since >= kGestureIdleOffMs) {
+    printf("[track] armed by gesture, no finger for %us -> tracking off\n",
+           static_cast<unsigned>(kGestureIdleOffMs / 1000));
+    SetTrackingEnabled(false);
+    return;
+  }
+
+  if (recentred_ || since < kFingerLostRecentreMs) {
+    return;
+  }
+  auto& servos = ServoController::GetInstance();
+  // An explicit "向左转头" is still being honoured, or a gesture animation has the head: leave it,
+  // and look again next time round.
+  if (static_cast<int32_t>(manual_until_ms_ - now) > 0 || servos.IsAnimating()) {
+    return;
+  }
+  recentred_ = true;
+  yaw_speed_ = 0.0f;
+  pitch_speed_ = 0.0f;
+  yaw_learn_.active = false;
+  pitch_learn_.active = false;
+  roll_target_ = ServoController::kDefaultAngle;
+  servos.GlideTo(ServoController::kPinServo2, ServoController::kServo2DefaultAngle, kRecentreGlideScale);
+  servos.GlideTo(ServoController::kPinServo0, ServoController::kDefaultAngle, kRecentreGlideScale);
+  servos.GlideTo(ServoController::kPinServo1, ServoController::kDefaultAngle, kRecentreGlideScale);
+  printf("[track] no finger for %us -> back to centre\n", static_cast<unsigned>(kFingerLostRecentreMs / 1000));
+}
+
+void CamLink::LearnAxis(bool yaw, int offset, float applied_deg, bool at_limit, uint32_t now) {
+  if (!kAutoLearnDirections) {
+    return;
+  }
+  AxisLearn& L = yaw ? yaw_learn_ : pitch_learn_;
+  const char* axis = yaw ? "yaw" : "pitch";
+  const int mag = abs(offset);
+  if (mag < kDeadband) {
+    // Centred: nothing to learn, and whatever window was open is over.
+    L.active = false;
+    L.stuck_since_ms = 0;
+    return;
+  }
+
+  bool wrong = false;
+
+  // Pinned on an end stop while the subject stays well off to that side.
+  if (at_limit && mag >= kLearnStuckOffset && L.confirmed < kLearnConfirmedEnough) {
+    if (L.stuck_since_ms == 0) {
+      L.stuck_since_ms = now;
+    } else if (now - L.stuck_since_ms >= kLearnStuckMs) {
+      L.stuck_since_ms = 0;
+      printf("[track] %s pinned at end stop, subject still off-centre (%d)\n", axis, offset);
+      wrong = true;
+    }
+  } else {
+    L.stuck_since_ms = 0;
+  }
+
+  if (!wrong && applied_deg != 0.0f) {
+    if (!L.active) {
+      L.active = true;
+      L.ref_offset = offset;
+      L.moved_deg = 0.0f;
+    }
+    L.moved_deg += fabsf(applied_deg);
+    if (L.moved_deg >= kLearnWindowDeg) {
+      const int ref_mag = abs(L.ref_offset);
+      const bool same_side = (offset > 0) == (L.ref_offset > 0);
+      if (same_side && mag >= ref_mag + kLearnMargin) {
+        printf("[track] %s moved %.1f deg but offset grew %d -> %d\n", axis, L.moved_deg, L.ref_offset, offset);
+        wrong = true;
+      } else if (!same_side || mag <= ref_mag - kLearnMargin) {
+        L.wrong_votes = 0;
+        if (L.confirmed < 255) ++L.confirmed;
+      }
+      L.active = false;
+    }
+  }
+
+  if (!wrong) {
+    return;
+  }
+  if (++L.wrong_votes < kLearnVotes) {
+    return;
+  }
+  // Two strikes: this axis turns the head away from the subject. Flip it and start over.
+  int8_t& dir = yaw ? yaw_dir_ : pitch_dir_;
+  dir = static_cast<int8_t>(-dir);
+  L = AxisLearn{};
+  (yaw ? yaw_speed_ : pitch_speed_) = 0.0f;
+  printf("[track] %s direction was wrong -> flipped to %d (saved)\n", axis, dir);
+  SaveTrackDirs();
+}
+
+// Keys renamed from ydir/pdir when auto-learning was turned off (kAutoLearnDirections): the values
+// it had saved were flipped by a moving hand, not by a wrong servo, and must not be loaded again.
+void CamLink::LoadTrackDirs() {
+  Preferences prefs;
+  if (prefs.begin("track", true)) {
+    const int8_t y = prefs.getChar("ydir_m", yaw_dir_);
+    const int8_t p = prefs.getChar("pdir_m", pitch_dir_);
+    const int8_t r = prefs.getChar("rdir", roll_dir_);
+    prefs.end();
+    yaw_dir_ = y < 0 ? -1 : 1;
+    pitch_dir_ = p < 0 ? -1 : 1;
+    roll_dir_ = r < 0 ? -1 : 1;
+  }
+  printf("[track] directions: yaw %d, pitch %d, roll %d\n", yaw_dir_, pitch_dir_, roll_dir_);
+}
+
+void CamLink::SaveTrackDirs() {
+  Preferences prefs;
+  if (prefs.begin("track", false)) {
+    prefs.putChar("ydir_m", yaw_dir_);
+    prefs.putChar("pdir_m", pitch_dir_);
+    prefs.putChar("rdir", roll_dir_);
+    prefs.end();
+  }
+}
+
+void CamLink::FlipTrackDir(char axis) {
+  const char* name = nullptr;
+  if (axis == 'y' || axis == 'p') {
+    const bool yaw = (axis == 'y');
+    int8_t& dir = yaw ? yaw_dir_ : pitch_dir_;
+    dir = static_cast<int8_t>(-dir);
+    (yaw ? yaw_learn_ : pitch_learn_) = AxisLearn{};
+    yaw_speed_ = 0.0f;
+    pitch_speed_ = 0.0f;
+    name = yaw ? "yaw" : "pitch";
+  } else if (axis == 'r') {
+    // Nothing is learned for roll, so there is nothing to reset: the next finger report re-aims it
+    // on the other side.
+    roll_dir_ = static_cast<int8_t>(-roll_dir_);
+    name = "roll";
+  } else {
+    return;
+  }
+  printf("[track] %s direction flipped manually -> yaw %d, pitch %d, roll %d\n", name, yaw_dir_, pitch_dir_,
+         roll_dir_);
+  SaveTrackDirs();
+}
+
+void CamLink::ResetTrackDirs() {
+  yaw_dir_ = -1;
+  pitch_dir_ = 1;
+  roll_dir_ = 1;
+  yaw_learn_ = AxisLearn{};
+  pitch_learn_ = AxisLearn{};
+  yaw_speed_ = 0.0f;
+  pitch_speed_ = 0.0f;
+  printf("[track] directions reset to defaults\n");
+  SaveTrackDirs();
 }
 
 // Finishes a movement after the cam has stopped talking.
@@ -842,12 +1117,28 @@ void CamLink::HandleLine(const char* line) {
 
   switch (line[0]) {
     case 'T': {
+      // "T dx dy conf lean kind". kind 1 is a finger - the only thing the head follows now.
       int dx = 0;
       int dy = 0;
       int conf = 0;
-      int roll = 0;
-      if (sscanf(line + 1, "%d %d %d %d", &dx, &dy, &conf, &roll) >= 3) {
-        ApplyTracking(dx, dy, conf, roll);
+      int lean = 0;
+      int kind = 0;
+      const int n = sscanf(line + 1, "%d %d %d %d %d", &dx, &dy, &conf, &lean, &kind);
+      if (n >= 5) {
+        // The cam only sends T while it believes tracking is armed. If we are not, the two boards
+        // disagree - seen live after the main board rebooted mid-gesture: the cam had armed itself
+        // and sent "G 1" into a board that was still booting. Recording what the cam evidently thinks
+        // lets Poll()'s resync tell it "A 0", after which a raised finger arms both sides again.
+        if (!tracking_enabled_) {
+          tracking_armed_ = true;
+        }
+        if (kind == 1) {
+          ApplyTracking(dx, dy, conf, lean);
+        }
+      } else if (n >= 3 && !legacy_warned_) {
+        // Four fields is the old face tracker, whose output the head no longer follows.
+        legacy_warned_ = true;
+        printf("cam link: camera runs the old face-tracking firmware - flash enco02_cam for finger tracking\n");
       }
       // RunVision() on the cam board is synchronous and blocks loop(), so receiving
       // a 'T' line >700ms after we sent 'V' proves the cam is idle in loop() and
@@ -886,6 +1177,7 @@ void CamLink::HandleLine(const char* line) {
       if (look_resume_tracking_) {
         look_resume_tracking_ = false;
         SetTrackingEnabled(true);
+        armed_by_gesture_ = look_resume_gesture_;
       }
       break;
     }
@@ -898,6 +1190,9 @@ void CamLink::HandleLine(const char* line) {
         printf("cam link: one-finger gesture -> tracking on\n");
         gesture_armed_ = true;
         SetTrackingEnabled(true);
+        // After the call, which clears it: a gesture arm switches itself off again once the finger
+        // has been gone for kGestureIdleOffMs.
+        armed_by_gesture_ = true;
       }
       break;
     }
@@ -1036,6 +1331,7 @@ void CamLink::Poll() {
     if (look_resume_tracking_) {
       look_resume_tracking_ = false;
       SetTrackingEnabled(true);
+      armed_by_gesture_ = look_resume_gesture_;
     }
   }
 
@@ -1046,4 +1342,7 @@ void CamLink::Poll() {
     last_frame_ms_ = now;
     SendCommand("F 1");
   }
+
+  // Finger gone: recentre after a few seconds, and disarm a gesture-armed session after longer.
+  SuperviseTracking(now);
 }

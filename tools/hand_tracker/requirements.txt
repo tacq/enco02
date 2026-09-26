@@ -1,0 +1,5 @@
+# Python 3.10+ (tested with 3.13 on macOS arm64). Install into a venv next to this file:
+#   /opt/homebrew/bin/python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt
+mediapipe==1.0.1
+opencv-contrib-python==5.0.0.93
+numpy==2.5.3

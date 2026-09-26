@@ -16,6 +16,10 @@ tools/home_bridge/.env
 tools/home_bridge/pool_config.json
 tools/home_bridge/.venv/
 
+# Hand tracker: venv and the downloaded MediaPipe model (fetched + hash-checked by --download-model).
+tools/hand_tracker/.venv/
+tools/hand_tracker/models/
+
 # Any secrets file anywhere in the repo (templates ending in .example stay tracked).
 .env
 *.env

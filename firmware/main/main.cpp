@@ -159,20 +159,77 @@ void OnHeapAllocFailed(size_t size, uint32_t caps, const char* function_name) {
 }
 
 // The debug console (WebServer + mDNS) costs ~8.5KB of heap and an extra task. With the TLS session
-// and the audio pipeline live there is only ~20KB left on this no-PSRAM board, so it is no longer
-// started automatically - long-press the boot button to bring it up when you actually need it.
-void EnsureDebugServerStarted() {
-  static bool started = false;
-  if (started) {
+// and the audio pipeline live there is only ~20KB left on this no-PSRAM board, so it is never
+// started automatically. The physical button that used to bring it up is gone (GPIO0 drives the
+// pitch servo now), so it is switched by voice instead ("打开调试页面" -> self.screen.set_mode
+// debug_on) and switches itself off again after kDebugServerLifetimeMs.
+// The wake-word session keeps the audio pipeline and TLS socket up even in standby, so free heap
+// normally sits around 20 KB. Without mDNS and with the page streamed from flash the server itself
+// needs only a couple of KB, but it is shut down again if the heap gets dangerously low.
+constexpr uint32_t kDebugServerMinFreeHeap = 14000;
+constexpr uint32_t kDebugServerPanicFreeHeap = 5000;
+constexpr uint32_t kDebugServerLifetimeMs = 10UL * 60UL * 1000UL;
+// Free heap needed to answer a request at all; below it requests wait in the socket backlog. Set
+// above the 10-16 KB a live voice session leaves - see the HandleClient() call at the end of loop().
+constexpr uint32_t kDebugServeMinFreeHeap = 16000;
+// Testing switch: start the page automatically at standby and keep it up (no 10-min timeout, no
+// low-heap shutdown). Idle cost was measured at ~0.4 KB, and requests are held while she speaks.
+// Set back to false for everyday use.
+constexpr bool kDebugServerAlwaysOn = true;
+uint32_t g_debug_server_deadline_ms = 0;
+
+// Returns nullptr on success, otherwise a short reason suitable for the model to read out.
+const char* StartDebugServer() {
+  auto& server = ServoWebServer::GetInstance();
+  if (!server.IsRunning()) {
+    const uint32_t free_heap = esp_get_free_heap_size();
+    if (free_heap < kDebugServerMinFreeHeap) {
+      printf("[debug server] not enough heap (free: %u), refusing to start\n", static_cast<unsigned>(free_heap));
+      return "Not enough memory for the debug page right now, try again later";
+    }
+    server.Start();
+    LogHeap("debug server started");
+  }
+  g_debug_server_deadline_ms = kDebugServerAlwaysOn ? 0 : millis() + kDebugServerLifetimeMs;
+  return nullptr;
+}
+
+void StopDebugServer() {
+  g_debug_server_deadline_ms = 0;
+  if (ServoWebServer::GetInstance().IsRunning()) {
+    ServoWebServer::GetInstance().Stop();
+    LogHeap("debug server stopped");
+  }
+}
+
+extern ai_vox::ChatState g_chat_state;
+
+void DebugServerTick() {
+  if (kDebugServerAlwaysOn) {
+    // Bring it up once the cloud session has settled (so the TLS handshake gets the heap first),
+    // and again after the camera view, which stops it to borrow the memory.
+    static uint32_t last_try_ms = 0;
+    const bool settled = g_chat_state == ai_vox::ChatState::kStandby ||
+                         g_chat_state == ai_vox::ChatState::kListening;
+    if (settled && !ServoWebServer::GetInstance().IsRunning() &&
+        !(g_display && g_display->InCameraView()) && millis() - last_try_ms > 5000) {
+      last_try_ms = millis();
+      if (StartDebugServer() == nullptr) {
+        printf("[debug server] always-on: http://%s/\n", WiFi.localIP().toString().c_str());
+      }
+    }
     return;
   }
-  if (esp_get_free_heap_size() < 25000) {
-    printf("[debug server] not enough heap (free: %u), refusing to start\n", static_cast<unsigned>(esp_get_free_heap_size()));
+  if (g_debug_server_deadline_ms == 0) {
     return;
   }
-  started = true;
-  ServoWebServer::GetInstance().Start();
-  LogHeap("debug server started");
+  if (static_cast<int32_t>(millis() - g_debug_server_deadline_ms) >= 0) {
+    printf("[debug server] 10 min timeout, stopping\n");
+    StopDebugServer();
+  } else if (esp_get_free_heap_size() < kDebugServerPanicFreeHeap) {
+    printf("[debug server] heap low (free: %u), stopping\n", static_cast<unsigned>(esp_get_free_heap_size()));
+    StopDebugServer();
+  }
 }
 
 void InitDisplay() {
@@ -455,15 +512,14 @@ void ConfigureWifi() {
 
   g_display->ShowStatus("网络已连接");
   char conn_msg[160];
-  snprintf(conn_msg, sizeof(conn_msg), "网络已连接: %s\nIP: %s\n调试页面: http://%s/\n小智 AI 正在启动...",
-           WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.localIP().toString().c_str());
+  snprintf(conn_msg, sizeof(conn_msg), "网络已连接: %s\nIP: %s\n调试页面: 说\"打开调试页面\"\n小智 AI 正在启动...",
+           WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
   g_display->SetChatMessage(Display::Role::kSystem, conn_msg);
   PlayMp3(kNetworkConnectedMp3, sizeof(kNetworkConnectedMp3));
 
-  // NOTE: the servo web server + mDNS responder are deliberately NOT started here. They cost an
-  // extra task and several KB of heap, and the mbedTLS handshake that follows (OTA config fetch,
-  // then the WebSocket) needs every byte it can get on this no-PSRAM ESP32. They are started from
-  // loop() once the device has successfully reached the cloud - see EnsureDebugServerStarted().
+  // NOTE: the servo web server is deliberately NOT started here. The mbedTLS handshake that follows
+  // (OTA config fetch, then the WebSocket) needs every byte it can get on this no-PSRAM ESP32. It is
+  // opened on demand by voice - see StartDebugServer().
   LogHeap("wifi connected");
 }
 
@@ -475,10 +531,25 @@ constexpr int kVolumeStep = 10;
 // Floor for *relative* changes only. Letting "小声一点" walk all the way to zero would leave her
 // mute with no audible way to discover it; an explicit set_volume(0) can still silence her.
 constexpr int kMinRelativeVolume = 10;
+// Level on a board that has never saved one.
+constexpr uint16_t kDefaultInitialVolume = 20;
 constexpr char kVolumePrefsNamespace[] = "enco";
 constexpr char kVolumePrefsKey[] = "volume";
 
-// Set when the live volume no longer matches what is stored in NVS. The commit itself is deferred
+// The level the user chose, 0-100, where 0 means they muted her on purpose. This is the setting:
+// it is what the web page and get_volume report, what is saved in NVS, and what the next boot
+// starts at.
+//
+// Deliberately kept apart from the speaker's own level, because standby parks the speaker at 0
+// (MuteForStandby) whatever the user chose, and waking puts it back to exactly this - 0 included.
+// The old code kept the choice in the speaker and read "speaker at 0" as "standby left it muted",
+// so a mute from the web page in standby was dropped outright, and one made while awake was undone
+// at the next turn: the level jumped straight back to 20.
+uint16_t g_user_volume = kDefaultInitialVolume;
+// True while standby has the speaker parked at 0.
+bool g_standby_muted = false;
+
+// Set when g_user_volume no longer matches what is stored in NVS. The commit itself is deferred
 // to loop() and only runs while she is not speaking: an NVS write stalls the flash cache for tens
 // of milliseconds, which is audible as a click if it lands in the middle of a reply.
 bool g_volume_dirty = false;
@@ -492,9 +563,13 @@ uint16_t SetVolume(const int requested) {
   // device's own type would wrap 5-10 round to 65531, and "quieter" would come out as full blast.
   const int clamped = std::clamp(requested, 0, static_cast<int>(ai_vox::AudioOutputDevice::kMaxVolume));
   const auto volume = static_cast<uint16_t>(clamped);
-  if (volume != g_audio_output_device->volume()) {
-    g_audio_output_device->set_volume(volume);
+  if (volume != g_user_volume) {
+    g_user_volume = volume;
     g_volume_dirty = true;
+  }
+  // In standby the speaker stays parked at 0; she simply wakes up at the new level.
+  if (!g_standby_muted && volume != g_audio_output_device->volume()) {
+    g_audio_output_device->set_volume(volume);
   }
   if (g_display) {
     g_display->ShowVolume(volume);
@@ -503,25 +578,36 @@ uint16_t SetVolume(const int requested) {
 }
 
 uint16_t AdjustVolume(const int delta) {
-  const int current = static_cast<int>(g_audio_output_device->volume());
-  return SetVolume(std::max(current + delta, kMinRelativeVolume));
+  const int current = static_cast<int>(g_user_volume);
+  int target = current + delta;
+  // Quieter stops at the floor - and never turns up a level that is already below it, or a mute.
+  if (delta < 0) {
+    target = std::max(target, std::min(current, kMinRelativeVolume));
+  }
+  return SetVolume(target);
 }
 
+// Restores the saved level as-is, 0 included: a mute the user chose survives a reboot like any
+// other level. Only a board that has never saved one starts at kDefaultInitialVolume.
 void LoadSavedVolume() {
-  constexpr uint16_t kDefaultInitialVolume = 20;
-  g_audio_output_device->set_volume(kDefaultInitialVolume);
-  if (g_display) {
-    g_display->ShowVolume(g_audio_output_device->volume());
+  uint16_t saved = kDefaultInitialVolume;
+  Preferences prefs;
+  if (prefs.begin(kVolumePrefsNamespace, true)) {
+    saved = prefs.getUShort(kVolumePrefsKey, kDefaultInitialVolume);
+    prefs.end();
   }
-  printf("[volume] initialized to %u%%\n", static_cast<unsigned>(g_audio_output_device->volume()));
+  g_user_volume = std::min<uint16_t>(saved, ai_vox::AudioOutputDevice::kMaxVolume);
+  // Not via SetVolume(): the value just came *out* of NVS, so there is nothing to write back.
+  g_audio_output_device->set_volume(g_user_volume);
+  if (g_display) {
+    g_display->ShowVolume(g_user_volume);
+  }
+  printf("[volume] restored %u%%%s\n", static_cast<unsigned>(g_user_volume), g_user_volume == 0 ? " (muted)" : "");
 }
 
 void FlushVolumeToNvs() {
-  const uint16_t vol = g_audio_output_device ? g_audio_output_device->volume() : 0;
-  if (vol == 0) {
-    g_volume_dirty = false;
-    return;
-  }
+  // 0 is saved like any other level: it is the user's mute, and it has to survive a power-off.
+  const uint16_t vol = g_user_volume;
   Preferences prefs;
   if (!prefs.begin(kVolumePrefsNamespace, false)) {
     return;
@@ -537,6 +623,10 @@ void FlushVolumeToNvs() {
 constexpr const char* kDisplayPrefsNamespace = "display";
 constexpr const char* kCaptionPrefsKey = "caption";
 constexpr const char* kAmbientPrefsKey = "ambient";
+constexpr const char* kHeadRandomPrefsKey = "head_rand";
+// Random head animations (standby and awake). Web toggle / voice "开始随机动作" / "停止随机动作";
+// saved. Camera tracking always wins over it.
+bool g_head_random = true;
 
 void SaveDisplayFlag(const char* key, const bool on) {
   Preferences prefs;
@@ -556,13 +646,15 @@ void LoadCaptionSetting() {
   if (prefs.begin(kDisplayPrefsNamespace, true)) {
     caption = prefs.getBool(kCaptionPrefsKey, true);
     ambient = prefs.getBool(kAmbientPrefsKey, true);
+    g_head_random = prefs.getBool(kHeadRandomPrefsKey, true);
     prefs.end();
   }
   if (g_display) {
     g_display->SetCaptionEnabled(caption);
     g_display->SetAmbientEnabled(ambient);
   }
-  printf("[display] caption %s, random expressions %s\n", caption ? "on" : "off", ambient ? "on" : "off");
+  printf("[display] caption %s, random expressions %s, random head %s\n", caption ? "on" : "off",
+         ambient ? "on" : "off", g_head_random ? "on" : "off");
 }
 
 // The cloud model decides for itself whether to emit an MCP tool call, and for a bare "大声点" it
@@ -939,31 +1031,29 @@ constexpr uint32_t kAwakeIdleTimeoutMs = 120000;  // Return to Standby Companion
 
 bool g_awake_session = false;
 uint32_t g_last_active_turn_ms = 0;
-uint8_t g_saved_wake_volume = 20;
-bool g_standby_muted = false;
 uint32_t g_next_idle_head_ms = 0;
 uint32_t g_next_idle_face_ms = 0;
 
+// Puts the speaker back to the user's level after standby, 0 included - a mute they chose stays a
+// mute. Also called on every turn while awake; then it is a no-op unless the speaker has somehow
+// drifted from the setting, in which case the setting wins.
 void RestoreWakeVolume() {
   if (g_audio_output_device) {
-    const uint16_t target = (g_saved_wake_volume > 0) ? g_saved_wake_volume : 20;
-    if (g_standby_muted || g_audio_output_device->volume() == 0) {
-      g_audio_output_device->set_volume(target);
-      if (g_display) {
-        g_display->ShowVolume(target);
-      }
-      printf("[wake] speaker volume restored to %u\n", static_cast<unsigned>(target));
-    }
+    const bool was_parked = g_standby_muted;
     g_standby_muted = false;
+    if (was_parked || g_audio_output_device->volume() != g_user_volume) {
+      g_audio_output_device->set_volume(g_user_volume);
+      if (g_display) {
+        g_display->ShowVolume(g_user_volume);
+      }
+      printf("[wake] speaker volume restored to %u\n", static_cast<unsigned>(g_user_volume));
+    }
   }
 }
 
+// Parks the speaker at 0 for standby. The user's level is untouched: it lives in g_user_volume.
 void MuteForStandby() {
   if (g_audio_output_device) {
-    const uint8_t cur = g_audio_output_device->volume();
-    if (cur > 0) {
-      g_saved_wake_volume = cur;
-    }
     g_audio_output_device->set_volume(0);
     g_standby_muted = true;
   }
@@ -991,6 +1081,32 @@ void WakeUpSession(const char* status_text = "聆听中") {
     g_display->UpdateRobotFaceEmotion("happy");
     g_display->LookDirection("center");
   }
+}
+
+// ---- Web debug page hooks (see ServoWebServer::Hooks) ----
+
+// The user's level, not the speaker's: in standby the speaker is parked at 0, and showing that
+// would make every page load look like a mute.
+int WebGetVolume() { return g_user_volume; }
+
+// SetVolume() keeps a parked (standby) speaker at 0, so a change here - a mute included - is
+// saved without waking her speaker up; she comes back at the new level.
+void WebSetVolume(int volume) {
+  volume = std::clamp(volume, 0, static_cast<int>(ai_vox::AudioOutputDevice::kMaxVolume));
+  printf("[web] volume -> %d%s\n", volume, g_standby_muted ? " (standby: applied on wake)" : "");
+  SetVolume(volume);
+  g_last_volume_exec_time = millis();
+}
+
+// Typed message from the page, handled exactly like the timer announcement: wake her up and hand
+// the text to the server as if it had followed the wake word.
+const char* WebSendText(const String& text) {
+  printf("[web] say: %s\n", text.c_str());
+  WakeUpSession("聆听中");
+  if (!ai_vox::Engine::GetInstance().SendWakeText(std::string(text.c_str()))) {
+    return "She is busy (speaking or connecting), try again in a moment";
+  }
+  return nullptr;
 }
 
 bool IsCloseCameraCommand(const std::string& text) {
@@ -1098,6 +1214,46 @@ bool IsWakeWordOrDirectCommand(const std::string& text) {
   return false;
 }
 
+// A predefined head animation every ~6-12 s (look around, curious tilt, glance, nod, breathe, 摇头晃脑,
+// ...; see ServoController's animation library). Animations run on the gesture task, are fully eased,
+// start from the current pose and never repeat back to back.
+void SetHeadRandom(const bool on) {
+  g_head_random = on;
+  SaveDisplayFlag(kHeadRandomPrefsKey, on);
+  if (on) {
+    g_next_idle_head_ms = millis() + 1500;  // first one shortly after
+  } else {
+    auto& servo = ServoController::GetInstance();
+    servo.StopAnimation();
+    if (!CamLink::GetInstance().tracking_enabled()) {
+      // Non-blocking ease back to centre (glides run from loop()).
+      servo.GlideTo(ServoController::kPinServo0, ServoController::kDefaultAngle);
+      servo.GlideTo(ServoController::kPinServo1, ServoController::kDefaultAngle);
+      servo.GlideTo(ServoController::kPinServo2, ServoController::kServo2DefaultAngle);
+    }
+  }
+  printf("[head] random animations %s\n", on ? "on" : "off");
+}
+
+void IdleHeadTick(const uint32_t now_ms) {
+  // Off by switch, or camera tracking owns the head, or a voice head command was just obeyed (a
+  // "向左看" is not overridden for 4 s).
+  if (!g_head_random || CamLink::GetInstance().tracking_enabled() || millis() - g_last_motion_exec_time < 4000) {
+    return;
+  }
+  if (g_next_idle_head_ms == 0) {
+    g_next_idle_head_ms = now_ms + 4500;
+  } else if (static_cast<int32_t>(now_ms - g_next_idle_head_ms) >= 0) {
+    auto& servo = ServoController::GetInstance();
+    if (servo.IsAnimating()) {
+      g_next_idle_head_ms = now_ms + 1000;  // still playing; check again shortly
+    } else {
+      servo.PlayRandomIdle();
+      g_next_idle_head_ms = now_ms + 6000 + (esp_random() % 6000);
+    }
+  }
+}
+
 void IdleCompanionTick(ai_vox::Engine& engine) {
   const uint32_t now_ms = millis();
 
@@ -1121,6 +1277,8 @@ void IdleCompanionTick(ai_vox::Engine& engine) {
       printf("[wake] 120s conversation inactivity -> returning to Standby Companion Mode\n");
       EnterStandbyCompanionMode();
     }
+    // Random head animations run while awake too (same switch), between turns and while she talks.
+    IdleHeadTick(now_ms);
     return;
   }
 
@@ -1143,34 +1301,8 @@ void IdleCompanionTick(ai_vox::Engine& engine) {
     g_next_idle_face_ms = now_ms + 4500 + (esp_random() % 4500);
   }
 
-  // 2. Random gentle head movements via ServoController (every 7.0s - 14.0s)
-  // Using non-blocking SetAngle with small gentle steps or TriggerHeadBobble so loopTask never blocks!
-  if (g_next_idle_head_ms == 0) {
-    g_next_idle_head_ms = now_ms + 4500;
-  } else if (static_cast<int32_t>(now_ms - g_next_idle_head_ms) >= 0) {
-    auto& servo = ServoController::GetInstance();
-    if (!servo.IsAnimating()) {
-      const uint32_t action = esp_random() % 5;
-      switch (action) {
-        case 0:
-          servo.SetAngle(ServoController::kPinServo2, 62.0f + static_cast<float>(esp_random() % 8));
-          break;
-        case 1:
-          servo.SetAngle(ServoController::kPinServo2, 72.0f + static_cast<float>(esp_random() % 8));
-          break;
-        case 2:
-          servo.SetAngle(ServoController::kPinServo0, 85.0f + static_cast<float>(esp_random() % 10));
-          break;
-        case 3:
-          servo.SetAngle(ServoController::kPinServo1, 84.0f + static_cast<float>(esp_random() % 12));
-          break;
-        default:
-          servo.CenterAll();
-          break;
-      }
-    }
-    g_next_idle_head_ms = now_ms + 7000 + (esp_random() % 7000);
-  }
+  // 2. Idle "alive" head motion.
+  IdleHeadTick(now_ms);
 }
 
 // Driven from loop(). Deliberately not from the display's own LVGL timer: that one early-returns
@@ -1282,7 +1414,10 @@ void InitMcpTools() {
   engine.AddMcpTool("self.head.tilt_right", "Tilt head right (向右歪头).", {});
   engine.AddMcpTool("self.head.turn_left", "Turn head left (向左转头/往左看).", {});
   engine.AddMcpTool("self.head.turn_right", "Turn head right (向右转头/往右看).", {});
-  engine.AddMcpTool("self.head.bobble", "Head bobble and shake (摇头/摇头晃脑/不要).", {});
+  // mode rides on the bobble tool instead of a new tool: tools/list is within ~200 B of its reserve.
+  engine.AddMcpTool("self.head.bobble", "摇头晃脑/摇头/不要. mode: random随机动作, random_on/random_off开始/停止随机动作", {
+    {"mode", ai_vox::ParamSchema<std::string>{.default_value = "bobble"}},
+  });
   engine.AddMcpTool("self.head.center", "Head straight forward (头摆正/向前看).", {});
 
   engine.AddMcpTool("self.audio_speaker.set_volume", "Set speaker volume 0-100 (调整音量).", {
@@ -1292,14 +1427,13 @@ void InitMcpTools() {
   // Relative siblings of set_volume. The model reaches for these far more readily than it works
   // out an absolute number from get_volume, and they are what a bare "大声一点" should map to.
   engine.AddMcpTool("self.audio_speaker.volume_up",
-                    "Increase speaker volume one step (音量增加/调大音量/大声一点/声音大点).", {});
+                    "Volume up one step (调大音量/大声一点/声音大点).", {});
   engine.AddMcpTool("self.audio_speaker.volume_down",
-                    "Decrease speaker volume one step (音量减小/调低音量/小声一点/声音小点).", {});
+                    "Volume down one step (调低音量/小声一点/声音小点).", {});
 
-  engine.AddMcpTool("self.screen.set_mode", "Set screen mode (切换屏幕: face 表情, chat 对话).", {
+  engine.AddMcpTool("self.screen.set_mode", "Screen mode (切换屏幕): face表情 chat对话 toggle切换 debug_on/debug_off调试页面", {
     {"mode", ai_vox::ParamSchema<std::string>{.default_value = "face"}},
   });
-  engine.AddMcpTool("self.screen.toggle_mode", "Toggle screen mode between face and chat (切换屏幕显示模式).", {});
   engine.AddMcpTool("self.screen.caption", "Show/hide the caption bar under the face (打开字幕/关闭字幕).", {
     {"on", ai_vox::ParamSchema<bool>{.default_value = std::nullopt}},
   });
@@ -1385,7 +1519,7 @@ void InitMcpTools() {
   // intent perfectly well from two, and the tool list has to fit its 5120-byte
   // reservation (ai_vox_mcp_tool_manager.h) - past that it doubles to 10KB of
   // heap for the rest of the session.
-  engine.AddMcpTool("self.camera.track_on", "Head follows the user via camera (开启跟踪/看着我/跟着我).", {});
+  engine.AddMcpTool("self.camera.track_on", "Head follows a raised finger (开启跟踪/跟着我手指).", {});
   engine.AddMcpTool("self.camera.track_off", "Stop head tracking (停止跟踪/别看我了).", {});
   // The viewfinder. Separate from look: this one shows the user what the robot
   // sees and leaves it on screen, rather than taking a single picture and going
@@ -1539,7 +1673,7 @@ bool OpenCameraView(bool transient, const char** why = nullptr) {
     }
     return true;
   }
-  ServoWebServer::GetInstance().Stop();
+  StopDebugServer();
   if (!g_display->EnterCameraView()) {
     printf("camera view: display refused (free heap %u)\n", static_cast<unsigned>(esp_get_free_heap_size()));
     if (why) *why = "Not enough memory for the camera view";
@@ -1644,6 +1778,15 @@ void setup() {
   // it would mean asking for that memory mid-session, when the largest
   // contiguous block has been measured at 2,036 bytes.
   CamLink::GetInstance().Init();
+  {
+    ServoWebServer::Hooks hooks;
+    hooks.get_volume = &WebGetVolume;
+    hooks.set_volume = &WebSetVolume;
+    hooks.send_text = &WebSendText;
+    hooks.get_head_random = []() { return g_head_random; };
+    hooks.set_head_random = &SetHeadRandom;
+    ServoWebServer::GetInstance().SetHooks(hooks);
+  }
 
   pinMode(kLedPin, OUTPUT);
   digitalWrite(kLedPin, LOW);
@@ -2214,7 +2357,7 @@ void loop() {
         g_last_volume_exec_time = millis();
         engine.SendMcpCallResponse(mcp_tool_call_event->id, static_cast<int64_t>(volume));
       } else if (matches("self.audio_speaker.get_volume", "get_volume")) {
-        const auto volume = g_audio_output_device->volume();
+        const uint16_t volume = g_user_volume;
         printf("on mcp tool call: get_volume, volume: %" PRIu16 "\n", volume);
         engine.SendMcpCallResponse(mcp_tool_call_event->id, volume);
       } else if (matches("self.head.look_up", "look_up") || name.find("head_up") != std::string::npos) {
@@ -2296,14 +2439,36 @@ void loop() {
         }
         ServoController::GetInstance().TurnRight(step);
       } else if (matches("self.head.bobble", "bobble") || matches("self.servo.bobble", "shake")) {
-        printf("on mcp tool call: bobble\n");
-        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
-        g_last_motion_exec_time = millis();
-        if (g_display) {
-          g_display->UpdateRobotFaceEmotion("laughing");
-          g_display->ShowStatus("摇头晃脑...");
+        std::string mode = "bobble";
+        if (const auto p = mcp_tool_call_event->param<std::string>("mode")) mode = *p;
+        auto& servo = ServoController::GetInstance();
+        if (mode == "random_on") {
+          printf("on mcp tool call: head random on\n");
+          SetHeadRandom(true);
+          if (g_display) g_display->ShowStatus("随机动作: 开");
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        } else if (mode == "random_off") {
+          printf("on mcp tool call: head random off\n");
+          if (g_display) g_display->ShowStatus("随机动作: 关");
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+          SetHeadRandom(false);
+        } else if (mode == "random") {
+          printf("on mcp tool call: head random once\n");
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+          g_last_motion_exec_time = millis();
+          servo.StopAnimation();
+          servo.PlayRandomIdle();
+        } else {
+          printf("on mcp tool call: bobble\n");
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+          g_last_motion_exec_time = millis();
+          if (g_display) {
+            g_display->UpdateRobotFaceEmotion("laughing");
+            g_display->ShowStatus("摇头晃脑...");
+          }
+          servo.StopAnimation();
+          servo.TriggerHeadBobble();
         }
-        ServoController::GetInstance().TriggerHeadBobble();
       } else if (matches("self.head.center", "center") || matches("self.servo.center", "reset")) {
         printf("on mcp tool call: center\n");
         engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
@@ -2352,16 +2517,42 @@ void loop() {
           }
         }
       } else if (matches("self.screen.set_mode", "set_mode")) {
-        if (g_display && g_display->InCameraView()) {
-          CloseCameraView();
-        }
         const auto mode_ptr = mcp_tool_call_event->param<std::string>("mode");
-        if (mode_ptr != nullptr && (*mode_ptr == "chat" || *mode_ptr == "text")) {
-          g_display->SetUiMode(Display::UiMode::kChatText);
+        if (mode_ptr != nullptr && *mode_ptr == "debug_on") {
+          const char* why = StartDebugServer();
+          if (why != nullptr) {
+            engine.SendMcpCallError(mcp_tool_call_event->id, why);
+          } else {
+            char reply[96];
+            const String ip = WiFi.localIP().toString();
+            snprintf(reply, sizeof(reply), "Debug page open for 10 min at http://%s/", ip.c_str());
+            printf("on mcp tool call: %s\n", reply);
+            g_display->ShowAlert("调试页面 · 10 分钟", ip.c_str(), 15000);
+            engine.SendMcpCallResponse(mcp_tool_call_event->id, std::string(reply));
+          }
+        } else if (mode_ptr != nullptr && *mode_ptr == "debug_off") {
+          StopDebugServer();
+          printf("on mcp tool call: debug page off\n");
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        } else if (mode_ptr != nullptr && *mode_ptr == "toggle") {
+          // Folded in from the old self.screen.toggle_mode tool to keep tools/list small.
+          if (g_display && g_display->InCameraView()) {
+            CloseCameraView();
+          } else {
+            g_display->ToggleUiMode();
+          }
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
         } else {
-          g_display->SetUiMode(Display::UiMode::kRobotFace);
+          if (g_display && g_display->InCameraView()) {
+            CloseCameraView();
+          }
+          if (mode_ptr != nullptr && (*mode_ptr == "chat" || *mode_ptr == "text")) {
+            g_display->SetUiMode(Display::UiMode::kChatText);
+          } else {
+            g_display->SetUiMode(Display::UiMode::kRobotFace);
+          }
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
         }
-        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
       } else if (matches("self.screen.toggle_mode", "toggle_mode")) {
         if (g_display && g_display->InCameraView()) {
           CloseCameraView();
@@ -2531,7 +2722,19 @@ void loop() {
     }
   }
 
-  // Handle Web UI requests for servo testing
-  ServoWebServer::GetInstance().HandleClient();
+  // Handle Web UI requests for servo testing. Not while she is speaking: the Opus decoder and TTS
+  // stream already take the heap to its low point, and the page's TCP send buffers on top of that
+  // starved it to ~1 KB in testing. Requests simply wait in the socket backlog until she is done.
+  //
+  // Nor while the heap is low. A live voice session leaves 10-16 KB, and answering requests on top
+  // of that (every response takes a ~1.5 KB TCP buffer) fragmented it until the Wi-Fi driver could
+  // not get its 2.3 KB receive buffers and the audio engine's next `new` aborted the board
+  // (AudioInputEngine::PullData -> std::deque growth -> std::terminate). Standby has ~70 KB, so the
+  // page still answers at once whenever she is not in a conversation.
+  DebugServerTick();
+  ServoController::GetInstance().Tick();
+  if (g_chat_state != ai_vox::ChatState::kSpeaking && esp_get_free_heap_size() >= kDebugServeMinFreeHeap) {
+    ServoWebServer::GetInstance().HandleClient();
+  }
   delay(2);
 }

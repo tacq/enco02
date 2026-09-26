@@ -7,7 +7,12 @@
 // the whole link can be read by clipping a USB-serial adapter onto the wire.
 //
 //   cam  -> main   R                    booted, ready
-//                  T <dx> <dy> <conf>   subject offset, -100..100, conf 0..100
+//                  T <dx> <dy> <conf> <lean> <kind>
+//                                       finger position, -100..100 from the
+//                                       middle of the picture; conf 0..100;
+//                                       lean in degrees (+ = tip leans right);
+//                                       kind 1 = one raised finger
+//                  G 1                  one finger held up: arm tracking
 //                  L <text>             vision result
 //                  E <msg>              something went wrong
 //
@@ -25,6 +30,17 @@
 // board decides what to do about it - only the main board knows the safe angle
 // limits, whether a gesture animation is already running, and whether the user
 // just asked for the head to be somewhere specific.
+//
+// Where the finger comes from. Normally a computer on the LAN runs
+// tools/hand_tracker/hand_tracker.py: it pulls /stream?raw=1&tracker=1, finds
+// the hand with Google MediaPipe (a neural network - the approach every
+// "ESP32-CAM gesture tracking" project uses, because this chip cannot run one),
+// and sends a signed finger sample back up the same socket for every frame
+// (cam_remote.h). Those samples go through ReportSample() below exactly like
+// the on-board ones, so the gesture debounce, the T lines and the main board's
+// side are all unchanged. When no tracker is connected, cam_tracker.cpp's
+// skin-colour finder is used instead - it fits on this board but is easily
+// fooled by skin-coloured walls and furniture.
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -34,9 +50,14 @@
 
 #include "cam_config.h"
 #include "cam_pins.h"
+#include "cam_remote.h"
 #include "cam_tracker.h"
 #include "cam_vision.h"
 #include "cam_web.h"
+
+#ifdef CAM_OTA_PASSWORD
+#include <ArduinoOTA.h>
+#endif
 
 namespace {
 
@@ -59,6 +80,18 @@ constexpr framesize_t kVideoSize = FRAMESIZE_HQVGA;
 constexpr int kVideoWidth = 240;
 constexpr int kVideoHeight = 176;
 
+// Hand tracker mode (tools/hand_tracker is steering): the OV2640 compresses
+// JPEG in hardware and the frames go straight to the socket. Converting RGB565
+// with frame2jpg() in software took ~250ms a frame - 4 fps, too slow to follow
+// a hand. VGA because MediaPipe crops the hand and scales it to 224px: a hand
+// 120px across in VGA keeps far more detail than the same hand at 60px in QVGA,
+// and the hardware encoder makes the size nearly free. Quality 10-63, lower is
+// better and bigger; 14 is ~20-30KB here.
+constexpr framesize_t kStreamSize = FRAMESIZE_VGA;
+constexpr int kStreamQuality = 14;
+// If the sensor refuses the JPEG mode, wait this long before trying again.
+constexpr uint32_t kStreamRetryMs = 10000;
+
 // JPEG quality for the viewfinder. 10-63, lower is better and bigger. 14 lands
 // around 5-7KB for a typical indoor scene, which is ~65ms on the fast link.
 constexpr int kVideoQuality = 14;
@@ -71,48 +104,52 @@ constexpr uint32_t kVideoIntervalMs = 90;
 // other side, so sending faster would only fill a queue nobody drains.
 constexpr uint32_t kTrackIntervalMs = 80;
 
-// While tracking is disarmed the tracker still runs, but at 3 fps: the only
-// thing it is looking for is the one-finger gesture that arms it.
-constexpr uint32_t kIdleScanIntervalMs = 320;
+// While tracking is disarmed the tracker still runs, at ~6 fps: the only thing
+// it is looking for is the one-finger gesture that arms it.
+constexpr uint32_t kIdleScanIntervalMs = 160;
 
-// Whether a one-finger gesture may arm tracking. OFF, on measured evidence.
+// Whether holding up one finger arms tracking. ON again, now that there is a
+// real finger detector behind it.
 //
-// The detector does not work, and the debounce below cannot rescue it. Polled
-// against a real scene with nobody gesturing, /status reported "one finger" on
-// 43 of 90 consecutive frames - 48% - with a longest unbroken run of 7. An
-// earlier 67-sample capture minutes before, same room, put it at 9%. A signal
-// whose false-positive rate swings from 9% to 48% depending on what happens to
-// be in shot is not measuring fingers; it is measuring the scene.
-//
-// The reason is structural. The test runs on head_row_n[], which is the
-// tracker's locked *topmost skin cluster* - the user's head. So it is really
-// asking "is the face blob tall and narrow", and a face turned side-on or
-// clipped by the frame edge answers yes. Tightening the geometry (bounded
-// aspect, bounded height, minimum width) cut the rate but could not separate
-// two things being computed from the same pixels.
-//
-// Raising kGestureFrames past the observed run of 7 would be fitting to one
-// 90-sample capture, not fixing the mechanism - and the cost of being wrong is
-// precisely the bug this was meant to address: the head starting to move on
-// its own. Voice ("开启跟踪") is deterministic and already does the job, so it
-// is the only trigger until the detector earns its place back.
-//
-// Re-enabling needs real connected-component labelling to find a finger blob
-// *separate* from the face, not a better threshold on this one.
-constexpr bool kGestureArmingEnabled = false;
+// It was switched off because the old test ran on the tracker's topmost skin
+// cluster - the user's face - and so was really asking "is the face blob tall
+// and narrow": 9-48% false positives depending on the scene. cam_tracker.cpp
+// now labels every skin blob separately and walks each fingertip down to the
+// fist it grows out of; only a finger that is entirely in view, upright-ish,
+// round-tipped and alone on its hand counts as the gesture. On top of that the
+// debounce below still wants it held for kGestureFrames frames straight after
+// kGestureClearFrames frames without it, so nothing that sits in shot
+// permanently can ever arm anything.
+constexpr bool kGestureArmingEnabled = true;
 
-// Consecutive frames of "one finger" before it counts, and how long to ignore
-// the gesture afterwards so a held-up finger arms tracking once. Retained for
-// when the detector above is fixed; inert while kGestureArmingEnabled is false.
-constexpr uint8_t kGestureFrames = 8;
+// Consecutive frames of "one finger" before it counts (5 x 160ms = 0.8s held),
+// and how long to ignore the gesture afterwards so a held-up finger arms
+// tracking once.
+constexpr uint8_t kGestureFrames = 5;
 // ...preceded by this many frames with no gesture at all. See ReportSample():
 // this is what stops something permanently in the frame from ever arming
 // tracking, which no amount of extra hold time can do on its own.
-constexpr uint8_t kGestureClearFrames = 5;
+constexpr uint8_t kGestureClearFrames = 3;
 constexpr uint32_t kGestureCooldownMs = 3000;
 
 // Below this the reading is noise and is not worth a line on the wire.
 constexpr uint8_t kMinReportConf = 25;
+
+// A finger sample is not sent again while it sits still inside this band round
+// the middle of the picture (the main board's deadband, kDeadband in
+// cam_link.cpp - keep the two equal)...
+constexpr int kCentredBand = 12;
+// ...except as a keepalive this often, so the main board knows the finger is
+// still there and does not give up on it.
+constexpr uint32_t kFingerKeepaliveMs = 400;
+
+// Auto-exposure target, -2..2 (esp32-camera's ae_level). The OV2640 meters the
+// whole picture, and with the user's dark clothes filling most of it, it opens
+// up until a hand held close to the lens clips to white: the lit side of a fist
+// measured (248,252,216) - no colour left for the skin test to find. One step
+// down keeps the hand in range. Adjustable at runtime from the web page
+// (/configure?ae=N) for testing; not persisted.
+constexpr int kTrackAeLevel = -1;
 
 // Tracking starts DISARMED. The head moving on its own the instant the robot
 // powers up is startling, and the user asked for it to be something they turn
@@ -131,6 +168,10 @@ uint32_t g_last_gesture_ms = 0;
 bool g_video = false;
 uint32_t g_last_video_ms = 0;
 framesize_t g_sensor_size = kTrackSize;
+// True while the sensor is in hand-tracker JPEG mode (InitStreamCamera). Every
+// consumer that expects RGB565 checks the frame format anyway.
+bool g_sensor_jpeg = false;
+uint32_t g_stream_init_failed_ms = 0;
 
 // Viewfinder diagnostics. When the screen shows nothing there are three very
 // different reasons - we never got a frame from the sensor, we got one but
@@ -186,6 +227,12 @@ constexpr uint32_t kFastLinkIdleMs = 7000;
 uint32_t g_last_track_ms = 0;
 int16_t g_last_dx = 0;
 int16_t g_last_dy = 0;
+int16_t g_last_roll = 0;
+uint32_t g_last_sent_ms = 0;
+
+// Current auto-exposure target (see kTrackAeLevel). Re-applied every time the
+// sensor is re-initialised, e.g. after a vision capture.
+int g_ae_level = kTrackAeLevel;
 
 // 240, not 96. A K command is "K " + url + token + a 17 char MAC; the main
 // board sizes its side at 240 from the worst case its buffers allow (227
@@ -243,7 +290,7 @@ void Send(const char* s) {
   Serial.println(s);
 }
 
-bool InitTrackingCamera(framesize_t size = kTrackSize) {
+bool InitCamera(pixformat_t format, framesize_t size, int jpeg_quality, size_t fb_count) {
   // Preserve any Flip V / Flip H toggled in the web UI across the JPEG mode
   // switch, falling back to the cam_config.h defaults on first boot.
   int vflip = CAM_VFLIP;
@@ -256,6 +303,7 @@ bool InitTrackingCamera(framesize_t size = kTrackSize) {
   // Harmless if the driver is not up; required if it is, because Describe()
   // leaves the sensor configured for JPEG.
   esp_camera_deinit();
+  g_sensor_jpeg = false;
 
   camera_config_t cfg = {};
   cfg.ledc_channel = LEDC_CHANNEL_0;
@@ -277,9 +325,10 @@ bool InitTrackingCamera(framesize_t size = kTrackSize) {
   cfg.pin_pwdn = PWDN_GPIO_NUM;
   cfg.pin_reset = RESET_GPIO_NUM;
   cfg.xclk_freq_hz = 20000000;
-  cfg.pixel_format = PIXFORMAT_RGB565;
+  cfg.pixel_format = format;
   cfg.frame_size = size;
-  cfg.fb_count = 1;
+  cfg.jpeg_quality = jpeg_quality;
+  cfg.fb_count = fb_count;
   cfg.fb_location = CAMERA_FB_IN_PSRAM;
   // LATEST rather than WHEN_EMPTY: a stale frame makes the head chase history.
   cfg.grab_mode = CAMERA_GRAB_LATEST;
@@ -290,6 +339,7 @@ bool InitTrackingCamera(framesize_t size = kTrackSize) {
     return false;
   }
   g_sensor_size = size;
+  g_sensor_jpeg = (format == PIXFORMAT_JPEG);
 
   sensor_t* s = esp_camera_sensor_get();
   if (s != nullptr) {
@@ -300,10 +350,87 @@ bool InitTrackingCamera(framesize_t size = kTrackSize) {
     s->set_hmirror(s, hmirror);
     // Auto white balance left on - the skin-tone test depends on colour being
     // roughly right, and a fixed gain indoors is reliably wrong.
+    s->set_ae_level(s, g_ae_level);
   }
+  cam_web::SetExposureLevel(g_ae_level);
 
   cam_tracker::Reset();
   return true;
+}
+
+// RGB565, for the on-board finder and the robot's viewfinder.
+bool InitTrackingCamera(framesize_t size = kTrackSize) { return InitCamera(PIXFORMAT_RGB565, size, 12, 1); }
+
+// Hardware JPEG, for the hand tracker's stream (see kStreamSize).
+bool InitStreamCamera() { return InitCamera(PIXFORMAT_JPEG, kStreamSize, kStreamQuality, 2); }
+
+// Puts the sensor in whichever mode the moment needs: hardware JPEG while the
+// hand tracker is steering (nothing on this board looks at the pixels then),
+// RGB565 otherwise. Never while the viewfinder or a vision capture owns it.
+//
+// In as soon as the tracker's first authenticated sample arrives; out only when
+// its socket closes. A re-init costs 100-500ms, so a tracker that stalls for a
+// second - the Mac busy, a Wi-Fi retry - must not bounce the sensor twice.
+void UpdateSensorMode() {
+  const uint32_t now = millis();
+  const bool tracker = cam_web::TrackerConnected() && (g_sensor_jpeg || cam_web::TrackerActive());
+  const bool want_jpeg = tracker && !g_video && !g_vision_busy &&
+                         (g_stream_init_failed_ms == 0 || now - g_stream_init_failed_ms > kStreamRetryMs);
+  if (want_jpeg == g_sensor_jpeg) {
+    return;
+  }
+  if (want_jpeg) {
+    if (InitStreamCamera()) {
+      g_stream_init_failed_ms = 0;
+      Serial.println("[cam] hand tracker steering - sensor now compresses JPEG itself");
+      return;
+    }
+    g_stream_init_failed_ms = now;
+    Serial.println("[cam] hardware JPEG failed - staying in RGB565");
+  } else {
+    Serial.println("[cam] hand tracker gone - sensor back to RGB565 for the on-board finder");
+  }
+  InitTrackingCamera(g_video ? kVideoSize : kTrackSize);
+}
+
+// A sensor that failed to start stays failed: esp_camera_init() is only called
+// on boot and on a mode change. Seen in the robot: plugging the main board in
+// power-cycles both boards, the servos start at the same moment, and the
+// OV2640 on the dipping rail did not answer - the camera was up on Wi-Fi with
+// no picture at all until the next power cycle. Retry every few seconds
+// instead. Not while a vision capture owns the driver (it re-inits itself).
+void RecoverCamera() {
+  constexpr uint32_t kRetryMs = 3000;
+  static uint32_t last_try_ms = 0;
+  static uint32_t attempts = 0;
+  if (g_vision_busy || esp_camera_sensor_get() != nullptr) {
+    attempts = 0;
+    return;
+  }
+  const uint32_t now = millis();
+  if (now - last_try_ms < kRetryMs) {
+    return;
+  }
+  last_try_ms = now;
+  ++attempts;
+  if (InitTrackingCamera(g_video ? kVideoSize : kTrackSize)) {
+    Serial.printf("[cam] sensor recovered after %u retries\n", static_cast<unsigned>(attempts));
+    Send("R");
+  } else if (attempts == 1 || attempts % 20 == 0) {
+    Serial.printf("[cam] sensor still not answering (%u retries)\n", static_cast<unsigned>(attempts));
+  }
+}
+
+// From the web page (/configure?ae=N), for trying exposures while watching the
+// skin mask. Not saved: a reboot goes back to kTrackAeLevel.
+void SetAeLevel(int level) {
+  g_ae_level = level < -2 ? -2 : (level > 2 ? 2 : level);
+  if (sensor_t* s = esp_camera_sensor_get()) {
+    s->set_ae_level(s, g_ae_level);
+  }
+  cam_web::SetExposureLevel(g_ae_level);
+  cam_tracker::Reset();
+  Serial.printf("[cam] ae_level %d\n", g_ae_level);
 }
 
 // One place for the JPEG mode switch, the brevity hint, and putting the sensor
@@ -432,6 +559,12 @@ void SendVideoFrame() {
   camera_fb_t* fb = esp_camera_fb_get();
   if (fb == nullptr) {
     ++g_video_fb_fail;
+    return;
+  }
+  // The sensor can still be in the hand tracker's JPEG mode for one pass of
+  // loop(); an RGB565 reader must never walk a JPEG buffer.
+  if (fb->format != PIXFORMAT_RGB565) {
+    esp_camera_fb_return(fb);
     return;
   }
 
@@ -701,8 +834,8 @@ void ReportSample(const TrackSample& s) {
     if (g_gesture_frames < 255) {
       ++g_gesture_frames;
     }
-    if (kGestureArmingEnabled && g_gesture_frames == kGestureFrames && g_gesture_clear_frames >= kGestureClearFrames &&
-        (now - g_last_gesture_ms) > kGestureCooldownMs) {
+    if (kGestureArmingEnabled && !g_tracking && g_gesture_frames == kGestureFrames &&
+        g_gesture_clear_frames >= kGestureClearFrames && (now - g_last_gesture_ms) > kGestureCooldownMs) {
       g_last_gesture_ms = now;
       g_gesture_clear_frames = 0;
       Serial.println("[cam] gesture: one finger -> arm tracking");
@@ -716,35 +849,34 @@ void ReportSample(const TrackSample& s) {
     }
   }
 
-  if (!g_tracking || s.conf < kMinReportConf) {
+  if (!g_tracking || s.kind != 1 || s.conf < kMinReportConf) {
     return;
   }
-  // Only suppress unchanged readings when the subject is ALREADY inside the
-  // main board's deadband (and head roll is inside +/-15%). When outside it the
-  // main board eases toward the subject over several updates, so we must keep
-  // emitting 'T' every tick until the head arrives - it decelerates using these
-  // messages, and starving it mid-move would leave it stopped off-centre.
-  //
-  // 15 must match kDeadband in the main board's cam_link.cpp. If this number is
-  // smaller the head hunts (we keep talking about an offset it has decided to
-  // ignore); if it is larger the head stops short and never gets the updates it
-  // needs to finish centring.
-  const bool inside_deadband = (abs(s.dx) < 15 && abs(s.dy) < 15 && abs(s.roll) < 15);
-  if (inside_deadband && abs(s.dx - g_last_dx) < 3 && abs(s.dy - g_last_dy) < 3) {
+  // Go quiet only while the finger is centred (inside the main board's
+  // deadband) AND holding still - lean included, since the head mirrors it.
+  // Anywhere else every sample goes out: the main board eases the head towards
+  // the finger over several updates and decelerates on these messages, so
+  // starving it mid-move would leave it stopped off-centre. A keepalive every
+  // kFingerKeepaliveMs tells it the finger is still there.
+  const bool centred = abs(s.dx) < kCentredBand && abs(s.dy) < kCentredBand;
+  const bool still = abs(s.dx - g_last_dx) < 3 && abs(s.dy - g_last_dy) < 3 && abs(s.roll - g_last_roll) < 3;
+  if (centred && still && (now - g_last_sent_ms) < kFingerKeepaliveMs) {
     return;
   }
   g_last_dx = s.dx;
   g_last_dy = s.dy;
+  g_last_roll = s.roll;
+  g_last_sent_ms = now;
 
   char buf[40];
-  snprintf(buf, sizeof(buf), "T %d %d %u %d", s.dx, s.dy, static_cast<unsigned>(s.conf), s.roll);
+  snprintf(buf, sizeof(buf), "T %d %d %u %d 1", s.dx, s.dy, static_cast<unsigned>(s.conf), s.roll);
   Send(buf);
 }
 
 void Track() {
-  // Runs even when tracking is disarmed, but four times slower: the frame is
-  // still needed to spot the one-finger gesture that arms it. Analyse() costs
-  // ~8ms, so the idle duty cycle is ~2.5%.
+  // Runs even when tracking is disarmed, but half as often: the frame is still
+  // needed to spot the one-finger gesture that arms it. Analyse() costs ~10ms,
+  // so the idle duty cycle is ~6%.
   //
   // Not while a vision capture is in flight: Describe() reconfigures the sensor
   // for JPEG, and grabbing an RGB565 frame underneath it returns garbage.
@@ -773,10 +905,69 @@ void Track() {
   if (fb == nullptr) {
     return;
   }
+  // Analyse() reads w*h*2 bytes of RGB565. A hardware JPEG buffer from the hand
+  // tracker's mode is a fraction of that, so it must never get one.
+  if (fb->format != PIXFORMAT_RGB565) {
+    esp_camera_fb_return(fb);
+    return;
+  }
   const TrackSample s = cam_tracker::Analyse(fb->buf, fb->width, fb->height);
   esp_camera_fb_return(fb);
   cam_web::SetLastSample(s);
   ReportSample(s);
+}
+
+// Over-the-air updates, so the camera can be reflashed without taking it out of
+// the robot's head:
+//   pio run -e enco02_cam_ota -t upload   (see platformio.ini)
+//
+// Only compiled in when cam_config.h (gitignored) defines CAM_OTA_PASSWORD.
+// Without a password anyone on the LAN could replace this firmware, so no
+// password means no OTA at all - fail closed.
+//
+// TODO(security): ArduinoOTA authenticates with an MD5 challenge-response and
+// sends the image unencrypted. Acceptable on a home LAN only; never forward
+// port 3232 beyond it. Signed images (esp_secure_boot) would be the real fix.
+#ifdef CAM_OTA_PASSWORD
+bool g_ota_started = false;
+#endif
+
+void StartOta() {
+#ifdef CAM_OTA_PASSWORD
+  if (g_ota_started || WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+  ArduinoOTA.setHostname("enco02-cam");
+  ArduinoOTA.setPassword(CAM_OTA_PASSWORD);
+  // Uploads go to the IP directly; no need to advertise on mDNS.
+  ArduinoOTA.setMdnsEnabled(false);
+  ArduinoOTA.onStart([]() {
+    // The update blocks loop() until it finishes and reboots. Let go of the
+    // sensor first: its DMA keeps running otherwise, while flash writes stall
+    // the cache under it.
+    Serial.println("[cam] ota: receiving update");
+    g_tracking = false;
+    cam_web::StopStream();
+    esp_camera_deinit();
+  });
+  ArduinoOTA.onError([](ota_error_t e) {
+    Serial.printf("[cam] ota: failed (%d), carrying on\n", static_cast<int>(e));
+    InitTrackingCamera(g_video ? kVideoSize : kTrackSize);
+  });
+  ArduinoOTA.begin();
+  g_ota_started = true;
+  Serial.println("[cam] ota: ready (port 3232, password required)");
+#endif
+}
+
+void PollOta() {
+#ifdef CAM_OTA_PASSWORD
+  if (!g_ota_started) {
+    StartOta();  // WiFi may have come up after setup()
+    return;
+  }
+  ArduinoOTA.handle();
+#endif
 }
 
 }  // namespace
@@ -822,7 +1013,9 @@ void setup() {
 
   cam_web::SetSampleSink(&ReportSample);
   cam_web::SetVisionHandler(&RunVision);
+  cam_web::SetExposureHandler(&SetAeLevel);
   cam_web::Begin();
+  StartOta();
 
   Serial.printf("[cam] free heap %u, free psram %u\n", static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getFreePsram()));
   Send("R");
@@ -837,6 +1030,9 @@ void setup() {
     Serial.println("      The main board will send K automatically once it");
     Serial.println("      connects and the server advertises a vision url.");
   }
+  // Whether a key is set, never the key.
+  Serial.println(cam_remote::Enabled() ? "[cam] hand tracker: accepted on /stream?raw=1&tracker=1"
+                                       : "[cam] hand tracker: off (no CAM_TRACK_KEY in cam_config.h)");
 }
 
 void loop() {
@@ -848,6 +1044,7 @@ void loop() {
   // wrong - which is exactly when there is no serial adapter attached to this
   // board to tell you what is happening.
   cam_web::SetLinkStats(g_link_rx_bytes, g_link_cmds, g_link_last_rx_ms);
+  cam_web::SetTrackingArmed(g_tracking);
   {
     const uint32_t now = millis();
     const uint32_t quiet_for = (g_link_last_rx_ms == 0) ? now : (now - g_link_last_rx_ms);
@@ -858,6 +1055,11 @@ void loop() {
   }
 
   cam_web::Poll();
+  // Straight after Poll(), which is where the hand tracker connects, sends its
+  // samples and disconnects - so Track() below never sees a stale mode.
+  UpdateSensorMode();
+  RecoverCamera();
+  PollOta();
   Track();
   SendVideoFrame();
 

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ENCO hand tracker as a per-user launchd agent: starts at login, restarts if it crashes.
+
+  caffeinate -i keeps the Mac from idle-sleeping while it runs; a sleeping Mac means the head stops
+  following the finger (the camera then falls back to its own skin-colour finder).
+
+  Install:   tools/hand_tracker/install_launchd.sh
+  Remove:    launchctl bootout gui/$(id -u)/com.enco.handtracker
+  Logs:      ~/Library/Logs/enco-hand-tracker.log
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.enco.handtracker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
+    <string>__PYTHON__</string>
+    <string>__TRACKER_DIR__/hand_tracker.py</string>
+    <string>--cam</string>
+    <string>__CAM__</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__TRACKER_DIR__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- The script retries the camera by itself; this only paces restarts after a crash. -->
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/enco-hand-tracker.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/enco-hand-tracker.log</string>
+</dict>
+</plist>

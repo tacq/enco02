@@ -64,12 +64,34 @@ class ServoController {
 
   // Smooth interpolated movements to avoid mechanical inertia/shaking.
   // Motion follows a cosine ease-in/ease-out curve (soft start, soft stop). Duration is derived from
-  // the distance at `speed_deg_s` average speed, never shorter than kSmoothMinDurationMs.
-  static constexpr float kSmoothSpeedDegPerSec = 30.0f;
+  // the distance at the axis' average speed (see SetAxisSpeed), never shorter than
+  // kSmoothMinDurationMs. Pass speed_deg_s > 0 to override for one move.
+  static constexpr float kSmoothSpeedDegPerSec = 40.0f;   // default per-axis speed until tuned
+  static constexpr float kMinAxisSpeed = 10.0f;
+  static constexpr float kMaxAxisSpeed = 120.0f;
   static constexpr uint32_t kSmoothMinDurationMs = 450;
   static constexpr uint32_t kSmoothFrameMs = 20;
-  void MoveAngleSmooth(int pin, float target_angle, float speed_deg_s = kSmoothSpeedDegPerSec);
-  void MoveAllSmooth(float target0, float target1, float target2, float speed_deg_s = kSmoothSpeedDegPerSec);
+  void MoveAngleSmooth(int pin, float target_angle, float speed_deg_s = 0.0f);
+  void MoveAllSmooth(float target0, float target1, float target2, float speed_deg_s = 0.0f);
+
+  // Per-axis average speed in deg/s (0 pitch 抬头, 1 roll 歪头, 2 yaw 转头). Tunable from the web
+  // page and saved in NVS so the chosen value survives a reboot.
+  void SetAxisSpeed(int axis, float deg_s);
+  float AxisSpeed(int axis) const { return (axis >= 0 && axis < 3) ? axis_speed_[axis] : kSmoothSpeedDegPerSec; }
+  void LoadAxisSpeeds();
+  void SaveAxisSpeeds();
+
+  // Non-blocking smooth move for callers that must not stall (web UI sliders, idle motion). GlideTo
+  // only sets a target; Tick(), called from loop(), moves toward it with bounded acceleration. Cruise
+  // speed is the axis speed x kGlideCruiseFactor x speed_scale. Any direct SetAngle /
+  // MoveAngleSmooth on the same axis cancels the glide.
+  static constexpr float kGlideCruiseFactor = 1.4f;   // ~ the peak speed of an eased move
+  static constexpr float kGlideAccelFactor = 2.5f;    // reach cruise in ~0.4 s
+  void GlideTo(int pin, float angle, float speed_scale = 1.0f);
+  void Tick();
+
+  // There-and-back move on one axis at its current speed, run on the gesture task. For tuning.
+  void TriggerAxisTest(int axis);
 
   // Relative head motion methods (default 10 degrees, strictly bounded by safe limits)
   void LookUp(float delta_deg = kDefaultStepDeg);     // Pin 0 Pitch decreases (抬头, min 40)
@@ -79,21 +101,59 @@ class ServoController {
   void TurnLeft(float delta_deg = kDefaultStepDeg);   // Pin 26 Yaw increases (向左转头, max 120)
   void TurnRight(float delta_deg = kDefaultStepDeg);  // Pin 26 Yaw decreases (向右转头, min 20)
 
-  // Sweep test for calibration
+  // Sweep test for calibration (eased). TriggerSweepTest runs it on the gesture task, non-blocking.
+  static constexpr float kSweepSpeedDegPerSec = 45.0f;
   void RunSweepTest();
+  void TriggerSweepTest();
 
   // Trigger cute "摇头晃脑" action (smooth 3-axis tilt + nod + rotate bobble)
   void TriggerHeadBobble();
   void RunHeadBobble();
   bool IsAnimating() const { return is_animating_; }
 
+  // ---- Predefined keyframe animations (idle "alive" motions, also playable from the web page) ----
+  // Each animation is a list of 3-axis poses relative to the neutral pose, each reached with an
+  // easing curve and then held. Playback always starts from wherever the head currently is, so
+  // switching animations never jumps. Requesting a new animation while one plays queues it for the
+  // next pose boundary (where velocity is zero), so the hand-over is smooth too.
+  static int AnimationCount();
+  static const char* AnimationName(int index);   // ascii id, e.g. "look_around"
+  static const char* AnimationLabel(int index);  // Chinese label for the web page
+  static bool AnimationIsIdle(int index);        // part of the standby random pool
+  static int FindAnimation(const char* name);    // -1 if unknown
+  bool PlayAnimation(int index);
+  // Picks a random idle animation, never the same one twice in a row.
+  bool PlayRandomIdle();
+  // Aborts any animation/gesture on the gesture task and waits briefly for it to let go.
+  void StopAnimation();
+
  private:
+  static constexpr uint32_t kGestureBobble = 1;
+  static constexpr uint32_t kGestureSweep = 2;
+  static constexpr uint32_t kGestureAxisTest = 4;   // axis index in bits 8..15
+  static constexpr uint32_t kGestureAnim = 8;       // animation index in bits 8..15
+  bool TriggerGesture(uint32_t gesture, const char* name);
+  void RunAxisTest(int axis);
+  void RunAnimation(int index);
+  // Eased 3-axis move on the gesture task; returns false if aborted.
+  bool AnimSegment(float p, float r, float y, uint32_t ms, uint8_t ease);
+  bool OnAnimationTask() const;
+  void StopGlides();
+  volatile bool abort_ = false;
+  volatile int pending_anim_ = -1;
+  volatile int current_anim_ = -1;   // -1 while running a non-keyframe gesture
+  int last_idle_anim_ = -1;
+
   ServoController() = default;
   ~ServoController() = default;
   ServoController(const ServoController&) = delete;
   ServoController& operator=(const ServoController&) = delete;
 
   uint32_t AngleToDuty(float angle) const;
+
+  // Raw clamped PWM write; does not touch glide state.
+  void ApplyAngle(int pin, float angle);
+  static int PinToIndex(int pin);
 
   // Easing helpers for MoveAngleSmooth / MoveAllSmooth.
   static float EaseInOut(float t);
@@ -112,6 +172,14 @@ class ServoController {
   float angle_servo0_ = kDefaultAngle;
   float angle_servo1_ = kDefaultAngle;
   float angle_servo2_ = kServo2DefaultAngle;
+
+  // Glide state per axis (0 pitch, 1 roll, 2 yaw). Written by GlideTo/SetAngle, read by Tick.
+  volatile bool glide_active_[3] = {false, false, false};
+  float glide_target_[3] = {kDefaultAngle, kDefaultAngle, kServo2DefaultAngle};
+  float glide_velocity_[3] = {0.0f, 0.0f, 0.0f};
+  float glide_cruise_[3] = {kSmoothSpeedDegPerSec, kSmoothSpeedDegPerSec, kSmoothSpeedDegPerSec};
+  float axis_speed_[3] = {kSmoothSpeedDegPerSec, kSmoothSpeedDegPerSec, kSmoothSpeedDegPerSec};
+  uint32_t last_tick_ms_ = 0;
 };
 
 #endif  // _SERVO_CONTROLLER_H_
