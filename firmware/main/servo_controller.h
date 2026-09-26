@@ -62,17 +62,22 @@ class ServoController {
   // Center all 3 servos to 90 degrees
   void CenterAll();
 
-  // Smooth interpolated movements to avoid mechanical inertia/shaking
-  void MoveAngleSmooth(int pin, float target_angle, float step_deg = 1.0f, uint32_t step_delay_ms = 18);
-  void MoveAllSmooth(float target0, float target1, float target2, float step_deg = 1.0f, uint32_t step_delay_ms = 18);
+  // Smooth interpolated movements to avoid mechanical inertia/shaking.
+  // Motion follows a cosine ease-in/ease-out curve (soft start, soft stop). Duration is derived from
+  // the distance at `speed_deg_s` average speed, never shorter than kSmoothMinDurationMs.
+  static constexpr float kSmoothSpeedDegPerSec = 30.0f;
+  static constexpr uint32_t kSmoothMinDurationMs = 450;
+  static constexpr uint32_t kSmoothFrameMs = 20;
+  void MoveAngleSmooth(int pin, float target_angle, float speed_deg_s = kSmoothSpeedDegPerSec);
+  void MoveAllSmooth(float target0, float target1, float target2, float speed_deg_s = kSmoothSpeedDegPerSec);
 
   // Relative head motion methods (default 10 degrees, strictly bounded by safe limits)
   void LookUp(float delta_deg = kDefaultStepDeg);     // Pin 0 Pitch decreases (抬头, min 40)
   void LookDown(float delta_deg = kDefaultStepDeg);   // Pin 0 Pitch increases (低头, max 120)
   void TiltLeft(float delta_deg = kDefaultStepDeg);   // Pin 25 Roll decreases (向左歪头, min 50)
   void TiltRight(float delta_deg = kDefaultStepDeg);  // Pin 25 Roll increases (向右歪头, max 110)
-  void TurnLeft(float delta_deg = kDefaultStepDeg);   // Pin 26 Yaw decreases (向左转头, min 20)
-  void TurnRight(float delta_deg = kDefaultStepDeg);  // Pin 26 Yaw increases (向右转头, max 120)
+  void TurnLeft(float delta_deg = kDefaultStepDeg);   // Pin 26 Yaw increases (向左转头, max 120)
+  void TurnRight(float delta_deg = kDefaultStepDeg);  // Pin 26 Yaw decreases (向右转头, min 20)
 
   // Sweep test for calibration
   void RunSweepTest();
@@ -89,6 +94,10 @@ class ServoController {
   ServoController& operator=(const ServoController&) = delete;
 
   uint32_t AngleToDuty(float angle) const;
+
+  // Easing helpers for MoveAngleSmooth / MoveAllSmooth.
+  static float EaseInOut(float t);
+  static int EasedFrameCount(float distance_deg, float speed_deg_s);
 
   // Gestures run on their own task so the caller (the MCP tool handler) is not blocked for the ~2s
   // the animation takes. That task used to be created on demand, which meant asking a nearly

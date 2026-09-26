@@ -825,6 +825,20 @@ void Display::SetCaptionEnabled(const bool enabled) {
   lvgl_port_unlock();
 }
 
+void Display::SetAmbientEnabled(const bool enabled) {
+  lvgl_port_lock(0);
+  ambient_enabled_ = enabled;
+  next_ambient_tick_ = face_tick_ + AmbientGapTicks(ambient_mode_);
+  if (!enabled && expr_ambient_ && expr_index_ >= 0) {
+    expr_index_ = -1;
+    expr_ambient_ = false;
+    next_blink_tick_ = face_tick_ + kBlinkMinTicks;
+    ApplyBlinkFrame();
+    ApplyMouthFrame();
+  }
+  lvgl_port_unlock();
+}
+
 // Three widgets: panel, "T-MINUS" caption, digits. Caller must hold the LVGL lock.
 bool Display::EnsureTimerPanel() {
   if (timer_panel_ != nullptr) {
@@ -1866,7 +1880,7 @@ void Display::OnFaceTimer(lv_timer_t* timer) {
   // --- Ambient expressions -----------------------------------------------------------------
   // Only on a neutral, quiet, open-eyed face: never over an expression someone asked for, a
   // server emotion, a blink in progress, or a sleepy face.
-  if (self->ambient_mode_ != 0 && self->expr_index_ < 0 && !self->mouth_open_ &&
+  if (self->ambient_enabled_ && self->ambient_mode_ != 0 && self->expr_index_ < 0 && !self->mouth_open_ &&
       self->blink_frame_ == 0 && self->current_emotion_ != "sleepy" &&
       self->face_tick_ >= self->next_ambient_tick_) {
     const bool listening = self->ambient_mode_ == 2;

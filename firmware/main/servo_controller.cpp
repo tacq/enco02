@@ -177,7 +177,7 @@ float ServoController::GetAngle(int pin) const {
   return 90.0f;
 }
 
-void ServoController::MoveAngleSmooth(int pin, float target_angle, float step_deg, uint32_t step_delay_ms) {
+void ServoController::MoveAngleSmooth(int pin, float target_angle, float speed_deg_s) {
   if (pin == 0 || pin == kPinServo0) {
     if (target_angle < kServo0MinAngle) target_angle = kServo0MinAngle;
     if (target_angle > kServo0MaxAngle) target_angle = kServo0MaxAngle;
@@ -197,18 +197,33 @@ void ServoController::MoveAngleSmooth(int pin, float target_angle, float step_de
     return;
   }
 
-  int steps = static_cast<int>(ceilf(abs_diff / step_deg));
-  if (steps < 1) steps = 1;
-
+  int steps = EasedFrameCount(abs_diff, speed_deg_s);
   for (int i = 1; i <= steps; ++i) {
-    float angle = current + diff * (static_cast<float>(i) / static_cast<float>(steps));
+    float angle = current + diff * EaseInOut(static_cast<float>(i) / static_cast<float>(steps));
     SetAngle(pin, angle);
-    delay(step_delay_ms);
+    delay(kSmoothFrameMs);
   }
   SetAngle(pin, target_angle);
 }
 
-void ServoController::MoveAllSmooth(float target0, float target1, float target2, float step_deg, uint32_t step_delay_ms) {
+float ServoController::EaseInOut(float t) {
+  if (t <= 0.0f) return 0.0f;
+  if (t >= 1.0f) return 1.0f;
+  // Cosine ease: zero velocity at both ends, peak speed = pi/2 x average speed in the middle.
+  return 0.5f - 0.5f * cosf(static_cast<float>(M_PI) * t);
+}
+
+int ServoController::EasedFrameCount(float distance_deg, float speed_deg_s) {
+  if (speed_deg_s < 1.0f) speed_deg_s = kSmoothSpeedDegPerSec;
+  float duration_ms = distance_deg / speed_deg_s * 1000.0f;
+  if (duration_ms < static_cast<float>(kSmoothMinDurationMs)) {
+    duration_ms = static_cast<float>(kSmoothMinDurationMs);
+  }
+  int steps = static_cast<int>(ceilf(duration_ms / static_cast<float>(kSmoothFrameMs)));
+  return steps < 1 ? 1 : steps;
+}
+
+void ServoController::MoveAllSmooth(float target0, float target1, float target2, float speed_deg_s) {
   if (target0 < kServo0MinAngle) target0 = kServo0MinAngle;
   if (target0 > kServo0MaxAngle) target0 = kServo0MaxAngle;
   if (target1 < kServo1MinAngle) target1 = kServo1MinAngle;
@@ -230,16 +245,14 @@ void ServoController::MoveAllSmooth(float target0, float target1, float target2,
     return;
   }
 
-  int steps = static_cast<int>(ceilf(max_diff / step_deg));
-  if (steps < 1) steps = 1;
-
+  int steps = EasedFrameCount(max_diff, speed_deg_s);
   for (int i = 1; i <= steps; ++i) {
-    float fraction = static_cast<float>(i) / static_cast<float>(steps);
+    float fraction = EaseInOut(static_cast<float>(i) / static_cast<float>(steps));
     float a0 = cur0 + diff0 * fraction;
     float a1 = cur1 + diff1 * fraction;
     float a2 = cur2 + diff2 * fraction;
     SetAllAngles(a0, a1, a2);
-    delay(step_delay_ms);
+    delay(kSmoothFrameMs);
   }
   SetAllAngles(target0, target1, target2);
 }
@@ -277,16 +290,17 @@ void ServoController::TiltRight(float delta_deg) {
   MoveAngleSmooth(kPinServo1, target);
 }
 
+// Yaw is mounted so that a larger angle turns the head to the robot's left (verified on hardware).
 void ServoController::TurnLeft(float delta_deg) {
   float current = GetAngle(kPinServo2);
-  float target = current - delta_deg;
+  float target = current + delta_deg;
   ESP_LOGI(TAG, "TurnLeft: %.1f -> %.1f deg (smooth)", current, target);
   MoveAngleSmooth(kPinServo2, target);
 }
 
 void ServoController::TurnRight(float delta_deg) {
   float current = GetAngle(kPinServo2);
-  float target = current + delta_deg;
+  float target = current - delta_deg;
   ESP_LOGI(TAG, "TurnRight: %.1f -> %.1f deg (smooth)", current, target);
   MoveAngleSmooth(kPinServo2, target);
 }
@@ -354,26 +368,27 @@ void ServoController::TriggerHeadBobble() {
 
 void ServoController::RunHeadBobble() {
   ESP_LOGI(TAG, "Executing cute 3-axis '摇头晃脑' (head bobble) gesture...");
-  // 2 complete gentle cycles of combined tilt, nod & rotation
-  const int total_steps = 72;
+  // 2 complete cycles of combined shake, tilt & nod over ~3 s. Yaw (the actual "shake") dominates
+  // and uses most of its range; every axis stays a few degrees inside its safe limit.
+  const int total_steps = 120;
   const int delay_ms = 25;
+  const float yaw_amp = 28.0f;    // 70 +- 28 -> 42..98   (limit 20..120)
+  const float roll_amp = 17.0f;   // 90 +- 17 -> 73..107  (limit 50..110)
+  const float pitch_amp = 8.0f;   // 90 +- 8  -> 82..98   (limit 40..120), 2x frequency bounce
 
   for (int step = 0; step <= total_steps; ++step) {
     float p = static_cast<float>(step) / static_cast<float>(total_steps); // 0.0 to 1.0
     // Hanning-style smooth envelope (starts 0, peaks at middle, ends at 0)
     float envelope = sinf(M_PI * p);
 
-    // Servo 1 (Pin 25, Roll / Tilt): swings left and right (safe: 74 to 106 deg)
-    float tilt_delta = 16.0f * sinf(4.0f * M_PI * p) * envelope;
-    float tilt_angle = kDefaultAngle + tilt_delta;
+    // Servo 2 (Pin 26, Yaw / Rotate): the main left-right shake
+    float yaw_angle = kServo2DefaultAngle + yaw_amp * sinf(4.0f * M_PI * p) * envelope;
 
-    // Servo 0 (Pin 0, Pitch / Nod): playful nod / lift (safe: 78 to 102 deg)
-    float pitch_delta = 12.0f * cosf(4.0f * M_PI * p) * envelope;
-    float pitch_angle = kDefaultAngle + pitch_delta;
+    // Servo 1 (Pin 25, Roll / Tilt): tilts in step with the shake for a playful sway
+    float tilt_angle = kDefaultAngle + roll_amp * sinf(4.0f * M_PI * p + (M_PI / 4.0f)) * envelope;
 
-    // Servo 2 (Pin 26, Yaw / Rotate): gentle rotation centered around 70 deg (safe: 60 to 80 deg, limited to +-10 deg)
-    float yaw_delta = 10.0f * sinf(4.0f * M_PI * p + (M_PI / 4.0f)) * envelope;
-    float yaw_angle = kServo2DefaultAngle + yaw_delta;
+    // Servo 0 (Pin 0, Pitch / Nod): light bounce at twice the shake frequency
+    float pitch_angle = kDefaultAngle + pitch_amp * sinf(8.0f * M_PI * p) * envelope;
 
     SetAllAngles(pitch_angle, tilt_angle, yaw_angle);
     vTaskDelay(pdMS_TO_TICKS(delay_ms));

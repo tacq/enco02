@@ -105,6 +105,8 @@ class Display {
   // good until switched back on; a running countdown still takes the spot either way.
   void SetCaptionEnabled(bool enabled);
   bool CaptionEnabled() const { return caption_enabled_; }
+  // Random idle/listening expressions (see OnFaceTimer). Off drops one that is showing right now.
+  void SetAmbientEnabled(bool enabled);
   void LookDirection(const char* dir);
   // Creates the handful of LVGL objects that make up the bitmap character. Safe to call more than
   // once; the pixels themselves live in flash, so this costs well under 2KB of heap.
@@ -227,6 +229,7 @@ class Display {
   // expr_ambient_ marks the current expression as one of ours, so it can be dropped the moment
   // the chat state moves on - it must never linger into a reply.
   uint8_t ambient_mode_ = 0;
+  bool ambient_enabled_ = true;  // user switch (voice: auto_on / auto_off), persisted in NVS
   bool expr_ambient_ = false;
   int8_t last_ambient_expr_ = -1;
   uint32_t next_ambient_tick_ = 0;

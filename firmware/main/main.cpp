@@ -532,30 +532,37 @@ void FlushVolumeToNvs() {
   printf("[volume] saved %u\n", static_cast<unsigned>(vol));
 }
 
-// The caption on/off choice survives a reboot. Written once per voice command, so no batching.
+// Display on/off choices (caption bar, random expressions) survive a reboot. Written once per
+// voice command, so no batching.
 constexpr const char* kDisplayPrefsNamespace = "display";
 constexpr const char* kCaptionPrefsKey = "caption";
+constexpr const char* kAmbientPrefsKey = "ambient";
 
-void SaveCaptionSetting(const bool on) {
+void SaveDisplayFlag(const char* key, const bool on) {
   Preferences prefs;
   if (!prefs.begin(kDisplayPrefsNamespace, false)) {
     return;
   }
-  prefs.putBool(kCaptionPrefsKey, on);
+  prefs.putBool(key, on);
   prefs.end();
 }
 
+void SaveCaptionSetting(const bool on) { SaveDisplayFlag(kCaptionPrefsKey, on); }
+
 void LoadCaptionSetting() {
   Preferences prefs;
-  bool on = true;
+  bool caption = true;
+  bool ambient = true;
   if (prefs.begin(kDisplayPrefsNamespace, true)) {
-    on = prefs.getBool(kCaptionPrefsKey, true);
+    caption = prefs.getBool(kCaptionPrefsKey, true);
+    ambient = prefs.getBool(kAmbientPrefsKey, true);
     prefs.end();
   }
   if (g_display) {
-    g_display->SetCaptionEnabled(on);
+    g_display->SetCaptionEnabled(caption);
+    g_display->SetAmbientEnabled(ambient);
   }
-  printf("[display] caption %s\n", on ? "on" : "off");
+  printf("[display] caption %s, random expressions %s\n", caption ? "on" : "off", ambient ? "on" : "off");
 }
 
 // The cloud model decides for itself whether to emit an MCP tool call, and for a bare "大声点" it
@@ -1301,7 +1308,7 @@ void InitMcpTools() {
   // param, terse text: every tool adds to the tools/list payload sent at session start.
   engine.AddMcpTool("self.face.expression",
                     "Make a facial expression (做表情). name: happy开心 sad难过 wink眨眼 pout嘟嘴卖萌 "
-                    "surprised惊讶 angry生气 shy害羞 thinking思考 neutral恢复",
+                    "surprised惊讶 angry生气 shy害羞 thinking思考 neutral恢复 auto_on/auto_off随机表情开关",
                     {
                         {"name", ai_vox::ParamSchema<std::string>{.default_value = "happy"}},
                     });
@@ -2321,18 +2328,28 @@ void loop() {
       } else if (matches("self.face.expression", "expression")) {
         std::string name = "happy";
         if (const auto p = mcp_tool_call_event->param<std::string>("name")) name = *p;
-        // Showing a face on a hidden face is no answer: bring the character back from chat mode.
-        // The camera view is left alone - the user opened it on purpose.
-        if (g_display->GetUiMode() == Display::UiMode::kChatText) {
-          g_display->SetUiMode(Display::UiMode::kRobotFace);
-        }
-        const bool ok = g_display->ShowExpression(name, 4000, true);
-        printf("on mcp tool call: face.expression %s -> %s\n", name.c_str(), ok ? "ok" : "unknown");
-        if (ok) {
+        // Switch for the random idle/listening expressions, carried on this tool so it costs a
+        // few bytes of tool description rather than a whole extra tool in tools/list.
+        if (name == "auto_on" || name == "auto_off") {
+          const bool on = name == "auto_on";
+          g_display->SetAmbientEnabled(on);
+          SaveDisplayFlag(kAmbientPrefsKey, on);
+          printf("on mcp tool call: face.expression random %s\n", on ? "on" : "off");
           engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
         } else {
-          engine.SendMcpCallError(mcp_tool_call_event->id,
-                                  "unknown name; use happy sad wink pout surprised angry shy thinking neutral");
+          // Showing a face on a hidden face is no answer: bring the character back from chat mode.
+          // The camera view is left alone - the user opened it on purpose.
+          if (g_display->GetUiMode() == Display::UiMode::kChatText) {
+            g_display->SetUiMode(Display::UiMode::kRobotFace);
+          }
+          const bool ok = g_display->ShowExpression(name, 4000, true);
+          printf("on mcp tool call: face.expression %s -> %s\n", name.c_str(), ok ? "ok" : "unknown");
+          if (ok) {
+            engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+          } else {
+            engine.SendMcpCallError(mcp_tool_call_event->id,
+                                    "unknown name; use happy sad wink pout surprised angry shy thinking neutral");
+          }
         }
       } else if (matches("self.screen.set_mode", "set_mode")) {
         if (g_display && g_display->InCameraView()) {

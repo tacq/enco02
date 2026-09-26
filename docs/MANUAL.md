@@ -27,7 +27,7 @@ The screen is a hand-painted K3 "elegant bob" character, drawn in full colour st
 | **Lip-sync with jaw** | The mouth and jaw follow the actual speaker output (not the network state), so the lips move exactly while audio plays and stop within 200 ms of silence |
 | **Hair breeze** | Bangs and side locks sway gently every 1.6–4.8 s |
 | **Emotion reactions** | Every AI reply carries a mood (21 kinds). The face shows the matching expression for 2.5 s after she stops talking |
-| **Random ambient expressions** | Idle: a calm expression every 10–25 s, held 2–3.6 s. Listening: an attentive one every 2.4–5 s, held 1.6–2.4 s |
+| **Random ambient expressions** | Idle: a calm expression every 10–25 s, held 2–3.6 s. Listening: an attentive one every 2.4–5 s, held 1.6–2.4 s. **On by default.** Say **"关闭随机表情"** to turn off, **"打开随机表情"** to turn back on (the setting survives reboots) |
 
 ### Expressions on demand (voice)
 
@@ -138,8 +138,10 @@ Needs the home bridge running on your Mac (see [§16](#16-home-bridge-on-the-mac
 | "向右歪头" / "右偏头" | Tilt right 10° | wink |
 | "向左转头" / "往左看" | Turn left 10° | surprised |
 | "向右转头" / "往右看" | Turn right 10° | surprised |
-| "摇头" / "摇头晃脑" / "不要不要" | Playful bobble & shake | laughing |
+| "摇头" / "摇头晃脑" / "不要不要" | Playful ~3 s shake: yaw ±28°, tilt ±17°, nod ±8° | laughing |
 | "头摆正" / "向前看" / "头复位" | Centre all axes | neutral |
+
+All moves ease in and out (cosine curve): soft start, soft stop, ~30°/s average, never faster than 0.45 s per move.
 
 Repeated commands within 2.5 s are ignored, so one sentence can't move the head twice.
 
