@@ -37789,6 +37789,7 @@ const enco_character_t enco_char_k3 = {
     .petal_frames = 0,
     .petal_sizes = 0,
     .petal_lane_l = 0, .petal_lane_r = 0,
+    .hair_flow = NULL,
 };
 
 #endif  // ENCO_CHAR_K3

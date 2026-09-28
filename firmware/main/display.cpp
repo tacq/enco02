@@ -72,7 +72,12 @@ static int8_t FindExpression(const enco_character_t* chr, const char* name) {
   return -1;
 }
 
-// Falling petals. They advance on the face timer (kFaceTickMs), so speeds are per 80ms tick, in
+// Continuous motion - falling petals and wind in the hair - runs on its own, faster timer. Both
+// move a fraction of a pixel per step, and 20 steps a second is what makes that read as gliding
+// rather than ticking.
+static constexpr uint32_t kMotionTickMs = 50;
+
+// Falling petals. They advance on the motion timer (kMotionTickMs), so speeds are per 50ms tick, in
 // 1/16 px. Big petals fall faster than small ones, which reads as depth. The sway is a gentle
 // side-to-side swing added at draw time; kPetalSway is one period of it, in px.
 static constexpr int8_t kPetalSway[16] = {0, 1, 2, 3, 3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1};
@@ -88,6 +93,72 @@ static lv_area_t AreaUnion(const lv_area_t& a, const lv_area_t& b) {
   u.x2 = std::max(a.x2, b.x2);
   u.y2 = std::max(a.y2, b.y2);
   return u;
+}
+
+// --- Wind in the hair ---------------------------------------------------------------------------
+// sin(2*pi*t), to ~0.1%. Called a few times per warped row, where newlib's sinf would cost more
+// than the warp itself.
+static inline float SinTurns(float t) {
+  t -= floorf(t + 0.5f);                  // [-0.5, 0.5)
+  float y = 8.0f * t - 16.0f * t * fabsf(t);  // parabola through the sine's zeros and peaks
+  return y + 0.225f * (y * fabsf(y) - y);  // one refinement step
+}
+
+// a + (b - a) * f / 32 per channel, for native RGB565. Green is moved to the top half so all three
+// channels can be scaled with one multiply without spilling into each other.
+static inline uint16_t Lerp565(uint16_t a, uint16_t b, uint32_t f) {
+  if (f == 0) {
+    return a;
+  }
+  const uint32_t ea = (a | (static_cast<uint32_t>(a) << 16)) & 0x07E0F81Fu;
+  const uint32_t eb = (b | (static_cast<uint32_t>(b) << 16)) & 0x07E0F81Fu;
+  const uint32_t r = ((ea * (32 - f) + eb * f) >> 5) & 0x07E0F81Fu;
+  return static_cast<uint16_t>(r | (r >> 16));
+}
+
+// Warps one side of one row in place. The sideways displacement is 0 at p0, `k` px at p1 and 0 at
+// p2, linear in between; each pixel in (p0, p2) is resampled from x + that displacement with 1/32 px
+// interpolation. `row` holds screen x ax1 .. ax1 + aw - 1 and [lo, hi] is the part to rewrite.
+//
+// [b0, b1] (if b0 <= b1) is body - shoulder, arm - lying inside the hair span. It is never moved,
+// and the displacement fades out linearly over the `feather` px next to it. Since |k| < feather the
+// displacement at distance `dist` stays below `dist`, so body pixels are never sampled either.
+//
+// No scratch row needed: within one side the displacement never changes sign, so every pixel reads
+// only from positions the sweep has not written yet as long as the sweep runs towards the reads -
+// left to right when sampling from the right (k > 0), right to left otherwise.
+static void WarpSpan(uint16_t* row, int ax1, int aw, int p0, int p1, int p2, int b0, int b1,
+                     int feather, float k, int lo, int hi) {
+  if (lo > hi || p1 <= p0 || p2 <= p1) {
+    return;
+  }
+  const bool body = b0 <= b1 && feather > 0;
+  const int32_t step1 = static_cast<int32_t>(k * 65536.0f / static_cast<float>(p1 - p0));
+  const int32_t step2 = static_cast<int32_t>(k * 65536.0f / static_cast<float>(p2 - p1));
+  const int xmax = ax1 + aw - 1;
+  auto px = [&](int x) {
+    int32_t d = x <= p1 ? (x - p0) * step1 : (p2 - x) * step2;
+    if (body) {
+      const int dist = x < b0 ? b0 - x : (x > b1 ? x - b1 : 0);
+      if (dist == 0) {
+        return;  // body pixel: left as is
+      }
+      if (dist < feather) {
+        d = d * dist / feather;  // |d| < 8 px in 16.16, so no overflow
+      }
+    }
+    const int32_t s = (x << 16) + d;  // 16.16 source position
+    int i = s >> 16;                  // arithmetic shift: floor, also for negatives
+    const uint32_t f = static_cast<uint32_t>(s >> 11) & 31;
+    const int i0 = std::min(xmax, std::max(ax1, i));
+    const int i1 = std::min(xmax, std::max(ax1, i + 1));
+    row[x - ax1] = Lerp565(row[i0 - ax1], row[i1 - ax1], f);
+  };
+  if (k > 0) {
+    for (int x = lo; x <= hi; x++) px(x);
+  } else {
+    for (int x = hi; x >= lo; x--) px(x);
+  }
 }
 
 static uint32_t AmbientGapTicks(uint8_t mode) {
@@ -216,6 +287,10 @@ Display::Display(esp_lcd_panel_io_handle_t panel_io,
   if (offset_x != 0 || offset_y != 0) {
     lv_display_set_offset(display_, offset_x, offset_y);
   }
+  // flush_cb areas include the panel offset; the hair warp works in LVGL screen coordinates.
+  disp_off_x_ = static_cast<int16_t>(offset_x);
+  disp_off_y_ = static_cast<int16_t>(offset_y);
+  lvgl_port_set_pre_flush_cb(OnPreFlush, this);
 }
 
 Display::~Display() {
@@ -454,6 +529,7 @@ void Display::BuildRobotFace() {
   next_blink_tick_ = kBlinkMinTicks;
   next_hair_tick_ = 14;
   face_timer_ = lv_timer_create(OnFaceTimer, kFaceTickMs, this);
+  motion_timer_ = lv_timer_create(OnMotionTimer, kMotionTickMs, this);
 }
 
 // Each retained message is an LVGL container plus a wrapped UTF-8 label. With the TLS session and
@@ -1932,15 +2008,15 @@ void Display::SpawnPetal(int index, bool anywhere) {
                          : -h - static_cast<int>(esp_random() % 90);
   p.x16 = static_cast<int16_t>(x * 16);
   p.y16 = static_cast<int16_t>(y * 16);
-  // 0.8-1.25 px per tick for small petals, 1.25-1.75 for big ones (10-22 px/s).
-  p.vy16 = static_cast<int8_t>(p.size ? 20 + esp_random() % 9 : 13 + esp_random() % 8);
+  // 0.5-0.75 px per tick for small petals, 0.75-1.1 for big ones (10-22 px/s).
+  p.vy16 = static_cast<int8_t>(p.size ? 12 + esp_random() % 6 : 8 + esp_random() % 5);
   // Mostly drifting outward, never more than 1/16 px per tick toward her face.
   const int drift = static_cast<int>(esp_random() % 4) - 1;  // -1..2
   p.vx16 = static_cast<int8_t>(left ? -drift : drift);
   p.frame = static_cast<uint8_t>(esp_random() % chr_->petal_frames);
-  p.spin = static_cast<uint8_t>(2 + esp_random() % 3);
+  p.spin = static_cast<uint8_t>(3 + esp_random() % 4);
   p.age = static_cast<uint8_t>(esp_random());
-  p.draw_x = static_cast<int16_t>(x + kPetalSway[(p.age >> 2) & 15]);
+  p.draw_x = static_cast<int16_t>(x + kPetalSway[(p.age >> 3) & 15]);
   p.draw_y = static_cast<int16_t>(y);
 }
 
@@ -1975,7 +2051,7 @@ void Display::UpdatePetals() {
     if (p.age % p.spin == 0) {
       p.frame = static_cast<uint8_t>((p.frame + 1) % frames);
     }
-    int x = (p.x16 >> 4) + kPetalSway[(p.age >> 2) & 15];
+    int x = (p.x16 >> 4) + kPetalSway[(p.age >> 3) & 15];
     int y = p.y16 >> 4;
     if (y >= bottom || x < -24 || x > ENCO_FACE_W + 8) {
       SpawnPetal(i, false);
@@ -2023,6 +2099,178 @@ void Display::OnPetalDraw(lv_event_t* e) {
     lv_draw_image_dsc_init(&img);
     img.src = dsc;
     lv_draw_image(layer, &img, &a);
+  }
+}
+
+void Display::OnMotionTimer(lv_timer_t* timer) {
+  auto* self = static_cast<Display*>(lv_timer_get_user_data(timer));
+  if (self == nullptr || self->ui_mode_ != UiMode::kRobotFace || self->face_image_ == nullptr) {
+    return;
+  }
+  // Same floor as the face timer: when memory is this scarce the audio pipeline comes first. The
+  // picture simply holds still - the warp keeps using the last wind state, so nothing tears.
+  if (esp_get_free_heap_size() < 12000) {
+    return;
+  }
+  self->UpdatePetals();
+  self->UpdateHairFlow();
+}
+
+// Advances the wind and marks the hair bands for repaint. The warp itself happens in
+// WarpHairChunk(), on the pixels LVGL has just rendered, so it needs no image memory of its own.
+//
+// The wind is a few slow waves layered so it never visibly repeats:
+//   billow  - a swell travelling down the hair (2.6s, 140px wavelength): the whole lock lifts and
+//             settles, lower strands a beat behind the upper ones;
+//   flutter - a quicker, shorter ripple (0.95s, 48px) along the strands;
+//   gust    - how hard it is blowing, drifting over ~7s;
+//   wind    - a slow sideways lean (11s): one side is blown out while the other is pressed in.
+void Display::UpdateHairFlow() {
+  const enco_hair_flow_t* f = chr_->hair_flow;
+  if (f == nullptr || face_container_ == nullptr || lv_obj_has_flag(face_container_, LV_OBJ_FLAG_HIDDEN)) {
+    return;
+  }
+  // Phases straight from the tick counter, each wrapped to its own period, so they stay exact no
+  // matter how long she has been running (a float seconds counter would lose precision in hours).
+  const uint32_t ms = lv_tick_get();
+  auto turn = [ms](uint32_t period) { return static_cast<float>(ms % period) / static_cast<float>(period); };
+  flow_gust_ = 0.65f + 0.35f * SinTurns(turn(6700)) * SinTurns(turn(2300) + 0.11f);
+  flow_wind_ = 0.55f * SinTurns(turn(11000));
+  flow_billow_ = turn(2600);
+  flow_flutter_ = turn(950);
+
+  // Repaint each side in three horizontal slabs hugging the band's outline, rather than one box:
+  // the bands are narrow up by her temples and widen towards the shoulders. Stops above the
+  // caption pill, which is never warped.
+  lv_area_t img;
+  lv_obj_get_coords(face_image_, &img);
+  lv_area_t box;
+  lv_obj_get_coords(face_container_, &box);
+  int32_t bottom = box.y2;
+  if (subtitle_box_ != nullptr && !lv_obj_has_flag(subtitle_box_, LV_OBJ_FLAG_HIDDEN)) {
+    lv_area_t pill;
+    lv_obj_get_coords(subtitle_box_, &pill);
+    bottom = std::min<int32_t>(bottom, pill.y1 - 4);
+  }
+  constexpr int kSlabs = 3;
+  for (int side = 0; side < 2; side++) {
+    for (int slab = 0; slab < kSlabs; slab++) {
+      const int r0 = f->rows * slab / kSlabs;
+      const int r1 = f->rows * (slab + 1) / kSlabs;
+      int lo = ENCO_FACE_W;
+      int hi = -1;
+      for (int r = r0; r < r1; r++) {
+        const int16_t* s = f->spans + r * 10 + side * 5;
+        lo = std::min<int>(lo, s[0] + 1);
+        hi = std::max<int>(hi, s[2] - 1);
+      }
+      lv_area_t a;
+      a.x1 = img.x1 + std::max(0, lo);
+      a.x2 = img.x1 + std::min(ENCO_FACE_W - 1, hi);
+      a.y1 = img.y1 + f->y0 + r0;
+      a.y2 = std::min<int32_t>(img.y1 + f->y0 + r1 - 1, bottom);
+      if (a.x1 <= a.x2 && a.y1 <= a.y2) {
+        lv_obj_invalidate_area(face_container_, &a);
+      }
+    }
+  }
+}
+
+void Display::OnPreFlush(const lv_area_t* area, uint8_t* px_map, void* ctx) {
+  auto* self = static_cast<Display*>(ctx);
+  if (self != nullptr) {
+    self->WarpHairChunk(area, reinterpret_cast<uint16_t*>(px_map));
+  }
+}
+
+// Called for every chunk LVGL sends to the panel (10 rows at most with our draw buffer), right
+// before the byte swap. Rows that cross a hair band are resampled sideways in place.
+void Display::WarpHairChunk(const lv_area_t* area, uint16_t* px) {
+  const enco_hair_flow_t* f = chr_->hair_flow;
+  if (f == nullptr || ui_mode_ != UiMode::kRobotFace || face_image_ == nullptr || face_container_ == nullptr ||
+      lv_obj_has_flag(face_container_, LV_OBJ_FLAG_HIDDEN)) {
+    return;
+  }
+  const int ax1 = area->x1 - disp_off_x_;
+  const int ay1 = area->y1 - disp_off_y_;
+  const int ax2 = area->x2 - disp_off_x_;
+  const int ay2 = area->y2 - disp_off_y_;
+  const int aw = ax2 - ax1 + 1;
+
+  lv_area_t img;
+  lv_obj_get_coords(face_image_, &img);
+  const int first = std::max<int>(ay1, img.y1 + f->y0);
+  const int last = std::min<int>(ay2, img.y1 + f->y0 + f->rows - 1);
+  if (first > last) {
+    return;
+  }
+
+  // Things drawn over the portrait that must not bend with the hair.
+  lv_area_t keep[3];
+  int n_keep = 0;
+  auto keep_out = [&](lv_obj_t* obj, int pad) {
+    if (obj != nullptr && !lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) {
+      lv_obj_get_coords(obj, &keep[n_keep]);
+      keep[n_keep].x1 -= pad;
+      keep[n_keep].y1 -= pad;
+      keep[n_keep].x2 += pad;
+      keep[n_keep].y2 += pad;
+      n_keep++;
+    }
+  };
+  keep_out(subtitle_box_, 4);  // border + outline ring
+  keep_out(alert_card_, 2);
+  keep_out(timer_panel_, 2);
+
+  const float unit = 1.0f / static_cast<float>(f->amp_unit);
+  for (int y = first; y <= last; y++) {
+    const int r = y - img.y1 - f->y0;
+    const uint8_t amp = f->amp[r];
+    if (amp == 0) {
+      continue;
+    }
+    const float a = amp * unit;
+    const float py = static_cast<float>(f->y0 + r);
+    const float billow = flow_billow_ - py * (1.0f / 140.0f);
+    const float flutter = flow_flutter_ - py * (1.0f / 48.0f);
+    // Outward displacement of each side's outer strands, in px (negative = blown inward).
+    const float out_l = a * (0.75f * flow_gust_ * (0.5f + 0.5f * SinTurns(billow)) +
+                             0.22f * SinTurns(flutter) - 0.5f * flow_wind_);
+    const float out_r = a * (0.75f * flow_gust_ * (0.5f + 0.5f * SinTurns(billow + 0.3f)) +
+                             0.22f * SinTurns(flutter + 0.38f) + 0.5f * flow_wind_);
+
+    // Per side: p0, p1, p2 (hair band), b0, b1 (body inside it; b0 > b1 when none).
+    const int16_t* s = f->spans + r * 10;
+    uint16_t* row = px + (y - ay1) * aw;
+    for (int side = 0; side < 2; side++) {
+      const int16_t* ss = s + side * 5;
+      const int p0 = img.x1 + ss[0];
+      const int p1 = img.x1 + ss[1];
+      const int p2 = img.x1 + ss[2];
+      const int b0 = img.x1 + ss[3];
+      const int b1 = img.x1 + ss[4];
+      // Left: sample from x + out (content moves left = outward). Right: from x - out.
+      const float k = side == 0 ? out_l : -out_r;
+      if (fabsf(k) < 0.03f) {
+        continue;
+      }
+      int lo = std::max(p0 + 1, ax1);
+      int hi = std::min(p2 - 1, ax2);
+      for (int i = 0; i < n_keep && lo <= hi; i++) {
+        const lv_area_t& e = keep[i];
+        if (y < e.y1 || y > e.y2 || e.x2 < lo || e.x1 > hi) {
+          continue;
+        }
+        if (e.x1 <= lo && e.x2 >= hi) {
+          lo = hi + 1;  // fully covered
+        } else if (e.x1 <= lo) {
+          lo = e.x2 + 1;
+        } else {
+          hi = e.x1 - 1;
+        }
+      }
+      WarpSpan(row, ax1, aw, p0, p1, p2, b0, b1, f->feather, k, lo, hi);
+    }
   }
 }
 
@@ -2139,8 +2387,7 @@ void Display::OnFaceTimer(lv_timer_t* timer) {
     self->ApplyHairFrame();
   }
 
-  // --- Falling petals ----------------------------------------------------------------------
-  self->UpdatePetals();
+  // Falling petals and the wind in her hair run on the motion timer (OnMotionTimer).
 
   // --- Mouth -------------------------------------------------------------------------------
   // Follows the amplifier, not the chat state: see core/audio_playback_signal.h. This is what

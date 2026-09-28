@@ -342,6 +342,24 @@ class Display {
   static void OnPetalDraw(lv_event_t* e);
   lv_obj_t* cam_avatar_ = nullptr;
 
+  // Continuous motion (petals, wind in the hair) on its own faster timer.
+  lv_timer_t* motion_timer_ = nullptr;
+  static void OnMotionTimer(lv_timer_t* timer);
+
+  // Wind in the long hair (enco_character_t::hair_flow). Nothing is stored per pixel: each motion
+  // tick advances the wind below and invalidates the hair bands, and WarpHairChunk() bends those
+  // rows sideways in the finished pixels on their way to the panel (a pre-flush hook in the LVGL
+  // port). Costs no heap and no image flash; the price is the SPI time of repainting the bands.
+  void UpdateHairFlow();
+  static void OnPreFlush(const lv_area_t* area, uint8_t* px_map, void* ctx);
+  void WarpHairChunk(const lv_area_t* area, uint16_t* px);
+  float flow_gust_ = 0.65f;   // wind strength, ~0.3..1
+  float flow_wind_ = 0.0f;    // sideways lean, -0.55..0.55 (+ = towards screen right)
+  float flow_billow_ = 0.0f;  // phases in turns [0, 1)
+  float flow_flutter_ = 0.0f;
+  int16_t disp_off_x_ = 0;    // panel offset LVGL adds to flush areas
+  int16_t disp_off_y_ = 0;
+
   ThemeColors current_theme_;
 };
 

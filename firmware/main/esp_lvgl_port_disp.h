@@ -127,6 +127,14 @@ lv_display_t *lvgl_port_add_disp_rgb(const lvgl_port_display_cfg_t *disp_cfg, co
  */
 esp_err_t lvgl_port_remove_disp(lv_display_t *disp);
 
+/**
+ * @brief Local addition (enco02): called with every rendered chunk right before it is byte-swapped
+ *        and sent to the panel, in native LVGL RGB565 and with the same area flush_cb receives.
+ *        The callback may rewrite the pixels in place. Runs in the LVGL task. NULL to remove.
+ */
+typedef void (*lvgl_port_pre_flush_cb_t)(const lv_area_t *area, uint8_t *px_map, void *user_ctx);
+void lvgl_port_set_pre_flush_cb(lvgl_port_pre_flush_cb_t cb, void *user_ctx);
+
 #ifdef __cplusplus
 }
 #endif

@@ -78,6 +78,11 @@ static bool lvgl_port_flush_dpi_vsync_ready_callback(esp_lcd_panel_handle_t pane
 #endif
 #endif
 static void lvgl_port_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_t *color_map);
+#if LVGL_PORT_HANDLE_FLUSH_READY
+/* Given by the SPI transfer-done ISR; LVGL's flush-wait sleeps on it (see lvgl_port_add_disp). */
+static SemaphoreHandle_t s_flush_done_sem = NULL;
+static void lvgl_port_flush_wait_callback(lv_display_t *disp);
+#endif
 static void lvgl_port_disp_size_update_callback(lv_event_t *e);
 static void lvgl_port_disp_rotation_update(lvgl_port_display_ctx_t *disp_ctx);
 static void lvgl_port_display_invalidate_callback(lv_event_t *e);
@@ -104,6 +109,16 @@ lv_display_t *lvgl_port_add_disp(const lvgl_port_display_cfg_t *disp_cfg)
         };
         /* Register done callback */
         esp_lcd_panel_io_register_event_callbacks(disp_ctx->io_handle, &cbs, disp);
+
+        /* Local addition (enco02): block on the transfer-done interrupt rather than letting LVGL
+         * spin on its flushing flag. At 20MHz SPI a 10-row chunk takes ~2ms to send; spinning
+         * burned that CPU for every chunk of every frame. */
+        if (s_flush_done_sem == NULL) {
+            s_flush_done_sem = xSemaphoreCreateBinary();
+        }
+        if (s_flush_done_sem != NULL) {
+            lv_display_set_flush_wait_cb(disp, lvgl_port_flush_wait_callback);
+        }
 #endif
 
         /* Apply rotation from initial display configuration */
@@ -413,7 +428,20 @@ static bool lvgl_port_flush_io_ready_callback(esp_lcd_panel_io_handle_t panel_io
     lv_display_t *disp_drv = (lv_display_t *)user_ctx;
     assert(disp_drv != NULL);
     lv_disp_flush_ready(disp_drv);
-    return false;
+    BaseType_t need_yield = pdFALSE;
+    if (s_flush_done_sem != NULL) {
+        xSemaphoreGiveFromISR(s_flush_done_sem, &need_yield);
+    }
+    return need_yield == pdTRUE;
+}
+
+static void lvgl_port_flush_wait_callback(lv_display_t *disp)
+{
+    (void)disp;
+    /* LVGL only calls this while a flush is still in flight. The semaphore was drained when that
+     * flush started, so a token here is its own completion. The timeout is a safety net only: a
+     * 10-row chunk is ~2ms on the wire. */
+    xSemaphoreTake(s_flush_done_sem, pdMS_TO_TICKS(100));
 }
 
 #if (CONFIG_IDF_TARGET_ESP32P4 && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0))
@@ -559,6 +587,15 @@ void lvgl_port_rotate_area(lv_display_t *disp, lv_area_t *area)
     }
 }
 
+static lvgl_port_pre_flush_cb_t s_pre_flush_cb = NULL;
+static void *s_pre_flush_ctx = NULL;
+
+void lvgl_port_set_pre_flush_cb(lvgl_port_pre_flush_cb_t cb, void *user_ctx)
+{
+    s_pre_flush_ctx = user_ctx;
+    s_pre_flush_cb = cb;
+}
+
 static void lvgl_port_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_t *color_map)
 {
     assert(drv != NULL);
@@ -566,6 +603,17 @@ static void lvgl_port_flush_callback(lv_display_t *drv, const lv_area_t *area, u
     assert(color_map != NULL);
     lvgl_port_display_ctx_t *disp_ctx = (lvgl_port_display_ctx_t *)lv_display_get_driver_data(drv);
     assert(disp_ctx != NULL);
+
+    if (s_pre_flush_cb != NULL) {
+        s_pre_flush_cb(area, color_map, s_pre_flush_ctx);
+    }
+#if LVGL_PORT_HANDLE_FLUSH_READY
+    /* Drop a completion left over from a flush LVGL never had to wait for (or from another user of
+     * the panel IO), so the wait below cannot return before this chunk is actually sent. */
+    if (s_flush_done_sem != NULL) {
+        xSemaphoreTake(s_flush_done_sem, 0);
+    }
+#endif
 
     int offsetx1 = area->x1;
     int offsetx2 = area->x2;

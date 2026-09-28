@@ -99,6 +99,7 @@ HAIR_LEVELS = [
 #       (x, y, w, h) boxes. They are filled from their surroundings (see inpaint()).
 #   petals - generate animated falling-petal sprites for this character.
 #   petal_lanes - (x0, x1): petals fall left of x0 and right of x1, i.e. clear of her face.
+#   hair_flow - optional runtime wind-in-the-hair bands (see the fox entry), or absent for none.
 CHARACTERS = {
     "k3": {
         "title": "K3 Elegant Bob (silver hair, white armour)",
@@ -158,6 +159,36 @@ CHARACTERS = {
         ],
         "petals": True,
         "petal_lanes": (70, 172),
+        # Her long side hair, blowing in the wind. No sprites: the firmware warps the rendered
+        # pixels of these two bands sideways every frame (see WarpHairChunk() in display.cpp), so
+        # the motion is continuous and sub-pixel instead of a handful of baked poses. Polylines are
+        # (y, x) points in 240x320 space, traced off a 3x/4x grid of the base:
+        #   *_edge - the outermost strands against the backdrop, where the sway is strongest;
+        #   *_in   - where her hair meets face, neck or dress: the sway fades to zero there, so
+        #            skin, dress and the eye/mouth sprites never move.
+        #   *_body - her bare shoulders, which sit *inside* the band with hair on both sides:
+        #            (y, x0, x1) rows of a shape that is held perfectly still. The sway fades out
+        #            over `feather` px towards it, so hair next to a shoulder is pushed off it or
+        #            settles against it rather than dragging the skin along.
+        # The backdrop is dragged along for `falloff` px beyond the edge so the silhouette moves
+        # without a seam. The amplitude eases in from nothing at y0 (her temples) to `amp` px at
+        # full_y, like hair pinned at the crown with loose ends; `floor` keeps the upper hair
+        # swaying a little too.
+        "hair_flow": {
+            "y0": 80, "full_y": 240, "amp": 4.0, "floor": 0.3, "falloff": 12, "feather": 8,
+            "left_edge": [(80, 50), (100, 47), (120, 36), (130, 32), (150, 30), (170, 26),
+                          (190, 18), (200, 10), (210, 3), (220, 0), (319, 0)],
+            "left_in": [(80, 84), (100, 85), (140, 85), (160, 88), (175, 92), (190, 92),
+                        (205, 88), (230, 86), (262, 86), (272, 70), (319, 68)],
+            "right_in": [(80, 156), (100, 157), (140, 157), (160, 156), (175, 150), (190, 150),
+                         (205, 154), (230, 158), (264, 160), (274, 176), (319, 176)],
+            "right_edge": [(80, 190), (100, 196), (120, 200), (140, 202), (160, 208), (175, 215),
+                           (190, 228), (200, 236), (210, 239), (319, 239)],
+            "left_body": [(206, 40, 44), (215, 22, 54), (230, 12, 56), (260, 12, 58),
+                          (290, 16, 52), (319, 22, 50)],
+            "right_body": [(208, 196, 200), (215, 188, 212), (230, 184, 218), (250, 184, 220),
+                           (270, 186, 216), (285, 192, 210), (294, 198, 204)],
+        },
     },
 }
 
@@ -588,6 +619,102 @@ def over(bg, rgba):
     return tuple(int(round(bg[k] + ((r, g, b)[k] - bg[k]) * t)) for k in range(3))
 
 
+# ---------------------------------------------------------------- wind in the hair
+#
+# The firmware animates long hair by warping already-rendered pixels (display.cpp, WarpHairChunk),
+# so all that ships is geometry: per row, where each side's sway fades in and out, what must stay
+# still, and how strong the sway is. 10 x int16 + 1 byte per row, ~5KB, instead of hundreds of KB
+# of pose sprites.
+
+HAIR_AMP_UNIT = 32          # amplitude table is in 1/32 px
+FLOW_SPAN = 5               # int16 per side per row: p0, p1, p2, body0, body1
+
+
+def polyline_at(points, y):
+    """Linear interpolation of a [(y, x), ...] polyline (sorted by y), clamped at both ends."""
+    if y <= points[0][0]:
+        return points[0][1]
+    for (y0, x0), (y1, x1) in zip(points, points[1:]):
+        if y <= y1:
+            return x0 + (x1 - x0) * (y - y0) / (y1 - y0)
+    return points[-1][1]
+
+
+def body_at(rows, y):
+    """(x0, x1) of a [(y, x0, x1), ...] shape at row y, or (1, 0) (empty) outside it."""
+    if not rows or y < rows[0][0] or y > rows[-1][0]:
+        return 1, 0
+    for (ya, a0, a1), (yb, b0, b1) in zip(rows, rows[1:]):
+        if y <= yb:
+            t = (y - ya) / (yb - ya)
+            return round(a0 + (b0 - a0) * t), round(a1 + (b1 - a1) * t)
+    return rows[-1][1], rows[-1][2]
+
+
+def hair_flow_table(spec):
+    """-> {y0, feather, amps, spans}: per portrait row from y0 down, the sway amplitude (1/32 px)
+    and, per side, (p0, p1, p2, body0, body1) in portrait x. The sway is 0 at p0 and p2, strongest
+    at p1, and fades to 0 over `feather` px towards the still [body0, body1] (empty if body0 >
+    body1). Left side: p0 = backdrop end, p1 = outer strands, p2 = face; right side mirrored."""
+    y0, full_y, amp, fall = spec["y0"], spec["full_y"], spec["amp"], spec["falloff"]
+    floor = spec.get("floor", 0.0)
+    amps, spans = [], []
+    for y in range(y0, H):
+        t = min(1.0, max(0.0, (y - y0) / (full_y - y0)))
+        ease = min(1.0, (y - y0) / 12)   # no hard shear line where the band starts
+        a = amp * (floor + (1 - floor) * t * t * (3 - 2 * t)) * ease
+        amps.append(min(255, round(a * HAIR_AMP_UNIT)))
+        le = round(polyline_at(spec["left_edge"], y))
+        li = round(polyline_at(spec["left_in"], y))
+        ri = round(polyline_at(spec["right_in"], y))
+        re = round(polyline_at(spec["right_edge"], y))
+        # The warp is only a proper (fold-free) mapping while the band is comfortably wider than
+        # the sway; the traced lines keep >30px, this just guards future edits.
+        assert li - le >= 3 * amp and re - ri >= 3 * amp, f"hair band too thin at y={y}"
+        lb = body_at(spec.get("left_body"), y)
+        rb = body_at(spec.get("right_body"), y)
+        spans.append((le - fall, le, li) + lb + (ri, re, re + fall) + rb)
+    return {"y0": y0, "feather": spec["feather"], "amps": amps, "spans": spans}
+
+
+def flow_weight(x, side, feather):
+    """Sway weight 0..1 of portrait column x for one side's (p0, p1, p2, b0, b1) - the firmware's
+    WarpSpan() computes exactly this."""
+    p0, p1, p2, b0, b1 = side
+    if not p0 < x < p2:
+        return 0.0
+    w = (x - p0) / (p1 - p0) if x <= p1 else (p2 - x) / (p2 - p1)
+    if b0 <= b1:
+        dist = b0 - x if x < b0 else (x - b1 if x > b1 else 0)
+        w *= min(dist, feather) / feather
+    return w
+
+
+def hair_flow_warp(rgb, table, u_left, u_right):
+    """Python twin of the firmware's per-row warp, for previews. u_* are outward displacements in
+    px at full amplitude (negative = blown inward)."""
+    out = list(rgb)
+    fe = table["feather"]
+    for r, sp in enumerate(table["spans"]):
+        y = table["y0"] + r
+        a = table["amps"][r] / HAIR_AMP_UNIT
+        row = rgb[y * W:(y + 1) * W]
+        left, right = sp[:FLOW_SPAN], sp[FLOW_SPAN:]
+        for x in range(W):
+            if left[0] < x < left[2]:
+                s = x + a * u_left * flow_weight(x, left, fe)
+            elif right[0] < x < right[2]:
+                s = x - a * u_right * flow_weight(x, right, fe)
+            else:
+                continue
+            i = math.floor(s)
+            f = s - i
+            c0 = row[min(W - 1, max(0, i))]
+            c1 = row[min(W - 1, max(0, i + 1))]
+            out[y * W + x] = tuple(round(p + (q - p) * f) for p, q in zip(c0, c1))
+    return out
+
+
 # ---------------------------------------------------------------- build + emit
 
 def build_character(cid, ch, outdir):
@@ -642,6 +769,7 @@ def build_character(cid, ch, outdir):
 
     thumb = finish(box_downscale(base_lin, W, H, ch["thumb_src"], THUMB_W, THUMB_H))
     petals = petal_sprites() if ch["petals"] else []
+    flow = hair_flow_table(ch["hair_flow"]) if ch.get("hair_flow") else None
 
     total = 0
     guard = f"ENCO_CHAR_{prefix.upper()}"
@@ -682,6 +810,21 @@ def build_character(cid, ch, outdir):
             for name, _, _, _ in petals:
                 fh.write(f"    &{sym}_{name},\n")
             fh.write("};\n")
+        if flow:
+            fy0, famps, fspans = flow["y0"], flow["amps"], flow["spans"]
+            fh.write(f"\n// Wind in the hair: {len(famps)} rows from y={fy0}, amplitude in 1/{HAIR_AMP_UNIT} px\n"
+                     f"static const uint8_t {sym}_flow_amp[{len(famps)}] = {{\n")
+            for i in range(0, len(famps), 20):
+                fh.write("    " + "".join(f"{v}," for v in famps[i:i + 20]) + "\n")
+            fh.write(f"}};\n\n// per row, left then right: p0, p1, p2, body0, body1\n"
+                     f"static const int16_t {sym}_flow_spans[{len(fspans) * 2 * FLOW_SPAN}] = {{\n")
+            for s in fspans:
+                fh.write("    " + ", ".join(str(v) for v in s) + ",\n")
+            fh.write(f"}};\n\nstatic const enco_hair_flow_t {sym}_flow = {{\n"
+                     f"    .y0 = {fy0},\n    .rows = {len(famps)},\n    .amp_unit = {HAIR_AMP_UNIT},\n"
+                     f"    .feather = {flow['feather']},\n"
+                     f"    .amp = {sym}_flow_amp,\n    .spans = {sym}_flow_spans,\n}};\n")
+            total += len(famps) * (1 + 4 * FLOW_SPAN)
 
         ex, ey, _, _ = rects["eyes"]
         mx, my, _, _ = rects["mouth"]
@@ -712,6 +855,7 @@ def build_character(cid, ch, outdir):
                  f"    .petal_frames = {PETAL_FRAMES if petals else 0},\n"
                  f"    .petal_sizes = {len(PETAL_SIZES) if petals else 0},\n"
                  f"    .petal_lane_l = {lane_l}, .petal_lane_r = {lane_r},\n"
+                 f"    .hair_flow = {'&' + sym + '_flow' if flow else 'NULL'},\n"
                  "};\n"
                  f"\n#endif  // {guard}\n")
 
@@ -729,6 +873,24 @@ def build_character(cid, ch, outdir):
         for _, r in hair_regions:
             comp = paste(comp, hair_frames[level_name], r)
         F.write_png_rgb(os.path.join(build, f"frame_hair_{level_name}.png"), comp, W, H)
+    if flow:
+        # The sway's extremes (strongest outward gust, blown inward), an exaggerated 3x gust that
+        # makes anything moving that should not obvious, and where it acts: red is full strength,
+        # fading to nothing at the backdrop, her face, dress and shoulders.
+        F.write_png_rgb(os.path.join(build, "frame_flow_out.png"), hair_flow_warp(base, flow, 1.25, 1.25), W, H)
+        F.write_png_rgb(os.path.join(build, "frame_flow_in.png"), hair_flow_warp(base, flow, -0.5, -0.5), W, H)
+        F.write_png_rgb(os.path.join(build, "frame_flow_out3x.png"), hair_flow_warp(base, flow, 3.0, 3.0), W, H)
+        fy0, famps, fspans = flow["y0"], flow["amps"], flow["spans"]
+        bands = [tuple(v // 2 for v in c) for c in base]
+        for r, sp in enumerate(fspans):
+            k = famps[r] / max(famps)
+            for x in range(W):
+                w = max(flow_weight(x, sp[:FLOW_SPAN], flow["feather"]),
+                        flow_weight(x, sp[FLOW_SPAN:], flow["feather"]))
+                if w > 0:
+                    c = bands[(fy0 + r) * W + x]
+                    bands[(fy0 + r) * W + x] = (min(255, c[0] + round(200 * w * k)), c[1], c[2])
+        F.write_png_rgb(os.path.join(build, "frame_flow_bands.png"), bands, W, H)
     if petals:
         # Every petal frame, 4x, over the backdrop colour, in one strip per size.
         sc = 4
@@ -774,6 +936,20 @@ typedef struct {
   const lv_image_dsc_t* mouth;
 } enco_face_expr_t;
 
+// Wind-in-the-hair geometry. Row r covers portrait row y0 + r. spans[r * 10 ..] holds, in portrait
+// x, the left side then the right side as (p0, p1, p2, body0, body1): the sideways sway is zero at
+// p0 and p2 (backdrop / face, neck, dress), strongest at p1 (the outer strands), linear in between,
+// and fades to zero over `feather` px towards [body0, body1] - a bare shoulder that must stay put
+// (none when body0 > body1). amp[r] / amp_unit is the row's sway amplitude in px.
+typedef struct {
+  int16_t y0;
+  uint16_t rows;
+  uint8_t amp_unit;
+  uint8_t feather;
+  const uint8_t* amp;
+  const int16_t* spans;
+} enco_hair_flow_t;
+
 // Everything display.cpp needs to draw and animate one character.
 typedef struct {
   const char* id;
@@ -807,6 +983,9 @@ typedef struct {
   uint8_t petal_frames;
   uint8_t petal_sizes;
   int16_t petal_lane_l, petal_lane_r;
+
+  // Wind in the long hair, warped at runtime (display.cpp WarpHairChunk). NULL: no flow.
+  const enco_hair_flow_t* hair_flow;
 } enco_character_t;
 
 %(externs)s

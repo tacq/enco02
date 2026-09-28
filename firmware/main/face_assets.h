@@ -31,6 +31,20 @@ typedef struct {
   const lv_image_dsc_t* mouth;
 } enco_face_expr_t;
 
+// Wind-in-the-hair geometry. Row r covers portrait row y0 + r. spans[r * 10 ..] holds, in portrait
+// x, the left side then the right side as (p0, p1, p2, body0, body1): the sideways sway is zero at
+// p0 and p2 (backdrop / face, neck, dress), strongest at p1 (the outer strands), linear in between,
+// and fades to zero over `feather` px towards [body0, body1] - a bare shoulder that must stay put
+// (none when body0 > body1). amp[r] / amp_unit is the row's sway amplitude in px.
+typedef struct {
+  int16_t y0;
+  uint16_t rows;
+  uint8_t amp_unit;
+  uint8_t feather;
+  const uint8_t* amp;
+  const int16_t* spans;
+} enco_hair_flow_t;
+
 // Everything display.cpp needs to draw and animate one character.
 typedef struct {
   const char* id;
@@ -64,6 +78,9 @@ typedef struct {
   uint8_t petal_frames;
   uint8_t petal_sizes;
   int16_t petal_lane_l, petal_lane_r;
+
+  // Wind in the long hair, warped at runtime (display.cpp WarpHairChunk). NULL: no flow.
+  const enco_hair_flow_t* hair_flow;
 } enco_character_t;
 
 #if ENCO_CHAR_K3
