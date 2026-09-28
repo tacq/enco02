@@ -290,7 +290,25 @@ def from565(v):
     return ((r5 << 3) | (r5 >> 2), (g6 << 2) | (g6 >> 4), (b5 << 3) | (b5 >> 2))
 
 
-def emit_c_rgb565(fh, name, rgb, w, h):
+def _emit_dsc(fh, name, body, w, h, cf, stride, static):
+    fh.write(f"static const LV_ATTRIBUTE_LARGE_CONST uint8_t {name}_map[] "
+             "__attribute__((aligned(4))) = {\n")
+    for i in range(0, len(body), 16):
+        fh.write("    " + "".join(f"0x{b:02x}," for b in body[i:i + 16]) + "\n")
+    fh.write("};\n\n")
+    fh.write(f"{'static ' if static else ''}const lv_image_dsc_t {name} = {{\n")
+    fh.write("    .header.magic = LV_IMAGE_HEADER_MAGIC,\n")
+    fh.write(f"    .header.cf = {cf},\n")
+    fh.write("    .header.flags = 0,\n")
+    fh.write(f"    .header.w = {w},\n")
+    fh.write(f"    .header.h = {h},\n")
+    fh.write(f"    .header.stride = {stride},\n")
+    fh.write(f"    .data_size = sizeof({name}_map),\n")
+    fh.write(f"    .data = {name}_map,\n")
+    fh.write("};\n")
+
+
+def emit_c_rgb565(fh, name, rgb, w, h, static=False):
     """Emit `rgb` (flat list of (r,g,b)) as a native little-endian RGB565 lv_image_dsc_t.
 
     LVGL's built-in bin decoder hands a variable RGB565 image straight to the renderer - the
@@ -301,19 +319,21 @@ def emit_c_rgb565(fh, name, rgb, w, h):
         v = to565(c)
         body += bytes((v & 0xFF, v >> 8))
     fh.write(f"\n// {name}: {w}x{h} RGB565, {len(body)} bytes\n")
-    fh.write(f"static const LV_ATTRIBUTE_LARGE_CONST uint8_t {name}_map[] "
-             "__attribute__((aligned(4))) = {\n")
-    for i in range(0, len(body), 16):
-        fh.write("    " + "".join(f"0x{b:02x}," for b in body[i:i + 16]) + "\n")
-    fh.write("};\n\n")
-    fh.write(f"const lv_image_dsc_t {name} = {{\n")
-    fh.write("    .header.magic = LV_IMAGE_HEADER_MAGIC,\n")
-    fh.write("    .header.cf = LV_COLOR_FORMAT_RGB565,\n")
-    fh.write("    .header.flags = 0,\n")
-    fh.write(f"    .header.w = {w},\n")
-    fh.write(f"    .header.h = {h},\n")
-    fh.write(f"    .header.stride = {w * 2},\n")
-    fh.write(f"    .data_size = sizeof({name}_map),\n")
-    fh.write(f"    .data = {name}_map,\n")
-    fh.write("};\n")
+    _emit_dsc(fh, name, body, w, h, "LV_COLOR_FORMAT_RGB565", w * 2, static)
+    return len(body)
+
+
+def emit_c_rgb565a8(fh, name, rgba, w, h, static=False):
+    """Emit `rgba` (flat list of (r,g,b,a)) as LVGL RGB565A8: the RGB565 plane, then an A8 plane.
+
+    Used for sprites with soft edges that are blended over whatever is underneath (the falling
+    petals), rather than the opaque crops the face overlays are.
+    """
+    body = bytearray()
+    for r, g, b, _ in rgba:
+        v = to565((r, g, b))
+        body += bytes((v & 0xFF, v >> 8))
+    body += bytes(a for _, _, _, a in rgba)
+    fh.write(f"\n// {name}: {w}x{h} RGB565A8, {len(body)} bytes\n")
+    _emit_dsc(fh, name, body, w, h, "LV_COLOR_FORMAT_RGB565A8", w * 2, static)
     return len(body)

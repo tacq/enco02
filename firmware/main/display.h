@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 
+#include "face_assets.h"
 #include "lvgl.h"
 
 class Display {
@@ -112,6 +113,14 @@ class Display {
   // once; the pixels themselves live in flash, so this costs well under 2KB of heap.
   void BuildRobotFace();
 
+  // Which character is drawn: "fox" or "k3" (see tools/face_assets, enco_character_t). Swaps the
+  // portrait and every sprite in place and clears any expression. Returns false - and changes
+  // nothing - for an id that is unknown or compiled out. Can be called before the face is built.
+  bool SetCharacter(const std::string& id);
+  const char* CharacterId() const { return chr_->id; }
+  // "fox" -> "k3" -> "fox" ..., over the characters compiled in. Returns the new id.
+  const char* NextCharacter();
+
   // Camera viewfinder.
   //
   // EnterCameraView() builds the HUD, remembers which mode to go back to, and
@@ -208,6 +217,29 @@ class Display {
   lv_obj_t* subtitle_box_ = nullptr;
   lv_obj_t* subtitle_label_ = nullptr;
 
+  // The character being drawn. Never null: the constructor points it at the default, the first
+  // character compiled in (kCharacters in display.cpp).
+  const enco_character_t* chr_ = nullptr;
+
+  // Falling petals, for characters that have them (enco_character_t::petals).
+  //
+  // One LVGL object draws all of them from its draw callback, rather than one image object per
+  // petal: an object costs ~430 bytes of heap here and this board has been logged at ~6KB free
+  // during TTS. Each tick only the few small rectangles a petal left and entered are invalidated,
+  // so LVGL repaints a handful of 16x16 patches from flash, not the portrait.
+  struct Petal {
+    int16_t x16, y16;      // top-left in face coordinates, 1/16 px
+    int8_t vx16, vy16;     // drift per face tick, 1/16 px
+    int16_t draw_x, draw_y;  // where it was last painted (face coordinates, incl. sway)
+    uint8_t size;          // sprite size index
+    uint8_t frame;         // tumble frame
+    uint8_t spin;          // ticks per tumble frame
+    uint8_t age;           // ticks alive, drives the sway and the tumble
+  };
+  static constexpr int kPetalCount = 6;
+  Petal petals_[kPetalCount] = {};
+  lv_obj_t* petal_layer_ = nullptr;
+
   lv_timer_t* face_timer_ = nullptr;
 
   std::string current_emotion_ = "neutral";
@@ -297,6 +329,18 @@ class Display {
   void ApplyMouthFrame();
   void ApplyHairFrame();
   void ApplyHeadOffset(int dx, int dy);
+
+  // Re-points the portrait, overlays and camera avatar at chr_ and resets the animation state.
+  void ApplyCharacter();
+  // Hair overlays and the petal layer exist only while the character needs them.
+  void EnsureHairOverlays();
+  void DestroyHairOverlays();
+  void EnsurePetalLayer();
+  void DestroyPetalLayer();
+  void SpawnPetal(int index, bool anywhere);
+  void UpdatePetals();
+  static void OnPetalDraw(lv_event_t* e);
+  lv_obj_t* cam_avatar_ = nullptr;
 
   ThemeColors current_theme_;
 };

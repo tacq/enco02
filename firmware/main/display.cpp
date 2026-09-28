@@ -49,13 +49,45 @@ static constexpr uint32_t kAmbientListenSpreadTicks = 35;  // up to a further 2.
 static const char* const kAmbientIdleFaces[] = {"happy", "wink", "pout", "shy", "surprised", "thinking", "sad"};
 static const char* const kAmbientListenFaces[] = {"thinking", "happy", "surprised", "shy", "wink"};
 
-static int8_t FindExpression(const char* name) {
-  for (int8_t i = 0; i < ENCO_FACE_EXPR_COUNT; i++) {
-    if (strcmp(name, enco_face_exprs[i].name) == 0) {
+// The characters compiled in (tools/face_assets, ENCO_CHAR_* in face_assets.h). The first one is
+// the default until a saved choice or SetCharacter() says otherwise: the fox leads so she is what a
+// fresh flash shows. K3 stays fully available - SetCharacter("k3") or "换角色" brings her back.
+static const enco_character_t* const kCharacters[] = {
+#if ENCO_CHAR_FOX
+    &enco_char_fox,
+#endif
+#if ENCO_CHAR_K3
+    &enco_char_k3,
+#endif
+};
+static constexpr size_t kCharacterCount = sizeof(kCharacters) / sizeof(kCharacters[0]);
+static_assert(kCharacterCount > 0, "face_assets.h: at least one ENCO_CHAR_* must be enabled");
+
+static int8_t FindExpression(const enco_character_t* chr, const char* name) {
+  for (int8_t i = 0; i < chr->expr_count; i++) {
+    if (strcmp(name, chr->exprs[i].name) == 0) {
       return i;
     }
   }
   return -1;
+}
+
+// Falling petals. They advance on the face timer (kFaceTickMs), so speeds are per 80ms tick, in
+// 1/16 px. Big petals fall faster than small ones, which reads as depth. The sway is a gentle
+// side-to-side swing added at draw time; kPetalSway is one period of it, in px.
+static constexpr int8_t kPetalSway[16] = {0, 1, 2, 3, 3, 3, 2, 1, 0, -1, -2, -3, -3, -3, -2, -1};
+
+// Rectangle helpers for the petal layer. LVGL 9.2 has these, but only in a private header.
+static bool AreasOverlap(const lv_area_t& a, const lv_area_t& b) {
+  return a.x1 <= b.x2 && b.x1 <= a.x2 && a.y1 <= b.y2 && b.y1 <= a.y2;
+}
+static lv_area_t AreaUnion(const lv_area_t& a, const lv_area_t& b) {
+  lv_area_t u;
+  u.x1 = std::min(a.x1, b.x1);
+  u.y1 = std::min(a.y1, b.y1);
+  u.x2 = std::max(a.x2, b.x2);
+  u.y2 = std::max(a.y2, b.y2);
+  return u;
 }
 
 static uint32_t AmbientGapTicks(uint8_t mode) {
@@ -124,6 +156,7 @@ Display::Display(esp_lcd_panel_io_handle_t panel_io,
           .user_text = SCI_FI_USER_TEXT,
           .assistant_text = SCI_FI_ASSISTANT_TEXT,
       } {
+  chr_ = kCharacters[0];
   // Clear screen to deep space black initially
   std::vector<uint16_t> buffer(width_, 0x0821);
   for (int y = 0; y < height_; y++) {
@@ -338,9 +371,9 @@ void Display::BuildRobotFace() {
   lv_obj_set_flex_grow(face_container_, 1);
   lv_obj_set_style_pad_all(face_container_, 0, 0);
   lv_obj_set_style_border_width(face_container_, 0, 0);
-  // Matches the portrait's backdrop (the builder snaps it to this exact colour), so the strip below
-  // the image is seamless with it.
-  lv_obj_set_style_bg_color(face_container_, lv_color_hex(0x0c1121), 0);
+  // Matches the portrait's backdrop (the builder snaps K3's to this exact colour), so the strip
+  // below the image is seamless with it.
+  lv_obj_set_style_bg_color(face_container_, lv_color_hex(chr_->bg_color), 0);
   lv_obj_set_style_bg_opa(face_container_, LV_OPA_COVER, 0);
   lv_obj_set_scrollbar_mode(face_container_, LV_SCROLLBAR_MODE_OFF);
   // The portrait is taller than the area left under the status bar; without this LVGL would make
@@ -352,37 +385,28 @@ void Display::BuildRobotFace() {
   }
 
   face_image_ = lv_image_create(face_container_);
-  lv_image_set_src(face_image_, &enco_face_base);
+  lv_image_set_src(face_image_, chr_->base);
   lv_obj_set_pos(face_image_, 0, 0);
 
   // All overlays are opaque crops of frames that are bit-identical to the base outside the changed
   // feature, so they composite over it with no seam. Hidden means "use whatever the base already
   // shows there". Hair is
   // created before the eyes and mouth so blinking and speaking always sit above it in z-order.
-  bangs_overlay_ = lv_image_create(face_container_);
-  lv_image_set_src(bangs_overlay_, &enco_face_bangs_lhalf);
-  lv_obj_set_pos(bangs_overlay_, ENCO_FACE_BANGS_X, ENCO_FACE_BANGS_Y);
-  lv_obj_add_flag(bangs_overlay_, LV_OBJ_FLAG_HIDDEN);
-
-  locks_l_overlay_ = lv_image_create(face_container_);
-  lv_image_set_src(locks_l_overlay_, &enco_face_locks_l_lhalf);
-  lv_obj_set_pos(locks_l_overlay_, ENCO_FACE_LOCKS_L_X, ENCO_FACE_LOCKS_L_Y);
-  lv_obj_add_flag(locks_l_overlay_, LV_OBJ_FLAG_HIDDEN);
-
-  locks_r_overlay_ = lv_image_create(face_container_);
-  lv_image_set_src(locks_r_overlay_, &enco_face_locks_r_lhalf);
-  lv_obj_set_pos(locks_r_overlay_, ENCO_FACE_LOCKS_R_X, ENCO_FACE_LOCKS_R_Y);
-  lv_obj_add_flag(locks_r_overlay_, LV_OBJ_FLAG_HIDDEN);
+  // (Only for a character that has hair-breeze frames - see EnsureHairOverlays().)
+  EnsureHairOverlays();
 
   eyes_overlay_ = lv_image_create(face_container_);
-  lv_image_set_src(eyes_overlay_, &enco_face_eyes_shut);
-  lv_obj_set_pos(eyes_overlay_, ENCO_FACE_EYES_X, ENCO_FACE_EYES_Y);
+  lv_image_set_src(eyes_overlay_, chr_->eyes_shut);
+  lv_obj_set_pos(eyes_overlay_, chr_->eyes_x, chr_->eyes_y);
   lv_obj_add_flag(eyes_overlay_, LV_OBJ_FLAG_HIDDEN);
 
   mouth_overlay_ = lv_image_create(face_container_);
-  lv_image_set_src(mouth_overlay_, &enco_face_mouth_small);
-  lv_obj_set_pos(mouth_overlay_, ENCO_FACE_MOUTH_X, ENCO_FACE_MOUTH_Y);
+  lv_image_set_src(mouth_overlay_, chr_->mouth_small);
+  lv_obj_set_pos(mouth_overlay_, chr_->mouth_x, chr_->mouth_y);
   lv_obj_add_flag(mouth_overlay_, LV_OBJ_FLAG_HIDDEN);
+
+  // Falling petals sit above the face sprites and below the caption pill.
+  EnsurePetalLayer();
 
   // The caption pill. This is the bottom half of the reference HUD, reduced to the part that
   // carries information: what she is saying, or - when nothing is happening - how to talk to her.
@@ -1402,8 +1426,9 @@ void Display::BuildCameraView() {
   lv_obj_clear_flag(avatar_box, LV_OBJ_FLAG_SCROLLABLE);
 
   auto* avatar = lv_image_create(avatar_box);
-  lv_image_set_src(avatar, &enco_face_thumb);
+  lv_image_set_src(avatar, chr_->thumb);
   lv_obj_set_pos(avatar, 0, 0);
+  cam_avatar_ = avatar;
 
   auto* avatar_tag = lv_label_create(cam_container_);
   lv_label_set_text(avatar_tag, "ENCO");
@@ -1485,6 +1510,7 @@ void Display::ExitCameraView() {
   cam_hint_box_ = nullptr;
   cam_hint_label_ = nullptr;
   cam_telemetry_label_ = nullptr;
+  cam_avatar_ = nullptr;
   cam_built_ = false;
   cam_capturing_ = false;
 
@@ -1562,12 +1588,7 @@ bool Display::ShowExpression(const std::string& name, uint32_t hold_ms, bool pin
   int8_t index = -1;
   const bool clear = name.empty() || name == "neutral" || name == "none";
   if (!clear) {
-    for (int8_t i = 0; i < ENCO_FACE_EXPR_COUNT; i++) {
-      if (name == enco_face_exprs[i].name) {
-        index = i;
-        break;
-      }
-    }
+    index = FindExpression(chr_, name.c_str());
     if (index < 0) {
       return false;
     }
@@ -1618,19 +1639,19 @@ void Display::ApplyHeadOffset(int dx, int dy) {
   head_offset_y_ = static_cast<int8_t>(dy);
   lv_obj_set_pos(face_image_, dx, dy);
   if (bangs_overlay_) {
-    lv_obj_set_pos(bangs_overlay_, ENCO_FACE_BANGS_X + dx, ENCO_FACE_BANGS_Y + dy);
+    lv_obj_set_pos(bangs_overlay_, chr_->bangs_x + dx, chr_->bangs_y + dy);
   }
   if (locks_l_overlay_) {
-    lv_obj_set_pos(locks_l_overlay_, ENCO_FACE_LOCKS_L_X + dx, ENCO_FACE_LOCKS_L_Y + dy);
+    lv_obj_set_pos(locks_l_overlay_, chr_->locks_l_x + dx, chr_->locks_l_y + dy);
   }
   if (locks_r_overlay_) {
-    lv_obj_set_pos(locks_r_overlay_, ENCO_FACE_LOCKS_R_X + dx, ENCO_FACE_LOCKS_R_Y + dy);
+    lv_obj_set_pos(locks_r_overlay_, chr_->locks_r_x + dx, chr_->locks_r_y + dy);
   }
   if (eyes_overlay_) {
-    lv_obj_set_pos(eyes_overlay_, ENCO_FACE_EYES_X + dx, ENCO_FACE_EYES_Y + dy);
+    lv_obj_set_pos(eyes_overlay_, chr_->eyes_x + dx, chr_->eyes_y + dy);
   }
   if (mouth_overlay_) {
-    lv_obj_set_pos(mouth_overlay_, ENCO_FACE_MOUTH_X + dx, ENCO_FACE_MOUTH_Y + dy);
+    lv_obj_set_pos(mouth_overlay_, chr_->mouth_x + dx, chr_->mouth_y + dy);
   }
 }
 
@@ -1655,9 +1676,9 @@ void Display::ApplyBlinkFrame() {
   }
   const lv_image_dsc_t* dsc = nullptr;  // Base portrait already has open eyes.
   if (blink_frame_ != 0) {
-    dsc = blink_frame_ == kBlinkFrameShut ? &enco_face_eyes_shut : &enco_face_eyes_half;
+    dsc = blink_frame_ == kBlinkFrameShut ? chr_->eyes_shut : chr_->eyes_half;
   } else if (expr_index_ >= 0) {
-    dsc = enco_face_exprs[expr_index_].eyes;
+    dsc = chr_->exprs[expr_index_].eyes;
   }
   SetSprite(eyes_overlay_, dsc, &eyes_src_);
 }
@@ -1668,7 +1689,7 @@ void Display::ApplyMouthFrame() {
   }
   // Between syllables, and whenever she is quiet, the mouth rests: on the base portrait's soft
   // smile, or on the active expression's mouth.
-  const lv_image_dsc_t* rest = expr_index_ >= 0 ? enco_face_exprs[expr_index_].mouth : nullptr;
+  const lv_image_dsc_t* rest = expr_index_ >= 0 ? chr_->exprs[expr_index_].mouth : nullptr;
   if (!mouth_open_) {
     SetSprite(mouth_overlay_, rest, &mouth_src_);
     return;
@@ -1677,23 +1698,21 @@ void Display::ApplyMouthFrame() {
   // The irregular pattern stops it looking like a metronome.
   static const uint8_t kMouthCycle[] = {1, 2, 1, 0, 2, 1, 2, 0};
   const uint8_t frame = kMouthCycle[(face_tick_ / 2) % (sizeof(kMouthCycle) / sizeof(kMouthCycle[0]))];
-  const lv_image_dsc_t* dsc = frame == 0 ? rest : (frame == 2 ? &enco_face_mouth_wide : &enco_face_mouth_small);
+  const lv_image_dsc_t* dsc = frame == 0 ? rest : (frame == 2 ? chr_->mouth_wide : chr_->mouth_small);
   SetSprite(mouth_overlay_, dsc, &mouth_src_);
 }
 
 void Display::ApplyHairFrame() {
-  if (bangs_overlay_ == nullptr || locks_l_overlay_ == nullptr || locks_r_overlay_ == nullptr) {
+  if (bangs_overlay_ == nullptr || locks_l_overlay_ == nullptr || locks_r_overlay_ == nullptr ||
+      chr_->bangs == nullptr || chr_->locks_l == nullptr || chr_->locks_r == nullptr) {
     return;
   }
 
   // Level -2..+2, where 0 means "hidden, the base portrait already shows the hair at rest". The
   // half steps exist purely so a sway never jumps the full 2-3px in one frame.
-  static const lv_image_dsc_t* const kBangs[5] = {
-      &enco_face_bangs_left, &enco_face_bangs_lhalf, nullptr, &enco_face_bangs_rhalf, &enco_face_bangs_right};
-  static const lv_image_dsc_t* const kLocksL[5] = {
-      &enco_face_locks_l_left, &enco_face_locks_l_lhalf, nullptr, &enco_face_locks_l_rhalf, &enco_face_locks_l_right};
-  static const lv_image_dsc_t* const kLocksR[5] = {
-      &enco_face_locks_r_left, &enco_face_locks_r_lhalf, nullptr, &enco_face_locks_r_rhalf, &enco_face_locks_r_right};
+  const lv_image_dsc_t* const* kBangs = chr_->bangs;
+  const lv_image_dsc_t* const* kLocksL = chr_->locks_l;
+  const lv_image_dsc_t* const* kLocksR = chr_->locks_r;
 
   auto set_part = [](lv_obj_t* obj, int8_t level, const lv_image_dsc_t* const* table) {
     const lv_image_dsc_t* dsc = table[level + 2];
@@ -1741,6 +1760,269 @@ void Display::ApplyHairFrame() {
     hair_level_locks_ = pose.locks;
     set_part(locks_l_overlay_, pose.locks, kLocksL);
     set_part(locks_r_overlay_, pose.locks, kLocksR);
+  }
+}
+
+bool Display::SetCharacter(const std::string& id) {
+  const enco_character_t* found = nullptr;
+  for (const enco_character_t* c : kCharacters) {
+    if (id == c->id) {
+      found = c;
+    }
+  }
+  if (found == nullptr) {
+    return false;
+  }
+  lvgl_port_lock(0);
+  if (found != chr_) {
+    // A switch briefly holds both characters' hair objects (~1.3KB) and LVGL aborts on a failed
+    // allocation, so refuse on a heap that is already on the floor - same bar as SetUiMode().
+    if (face_built_ && esp_get_free_heap_size() < 10000) {
+      printf("[display] character switch refused (free %u)\n", static_cast<unsigned>(esp_get_free_heap_size()));
+      lvgl_port_unlock();
+      return false;
+    }
+    chr_ = found;
+    ApplyCharacter();
+    printf("[display] character: %s\n", chr_->id);
+  }
+  lvgl_port_unlock();
+  return true;
+}
+
+const char* Display::NextCharacter() {
+  size_t i = 0;
+  while (i < kCharacterCount && kCharacters[i] != chr_) {
+    i++;
+  }
+  SetCharacter(kCharacters[(i + 1) % kCharacterCount]->id);
+  return chr_->id;
+}
+
+void Display::ApplyCharacter() {
+  // Whatever was showing is a sprite of the old character; drop it rather than map it across.
+  expr_index_ = -1;
+  expr_pinned_ = false;
+  expr_ambient_ = false;
+  blink_frame_ = current_emotion_ == "sleepy" ? kBlinkFrameShut : 0;
+  next_blink_tick_ = face_tick_ + kBlinkMinTicks;
+  hair_step_ = 0;
+  hair_level_bangs_ = 0;
+  hair_level_locks_ = 0;
+  next_hair_tick_ = face_tick_ + kHairMinGapTicks;
+
+  if (cam_avatar_ != nullptr) {
+    lv_image_set_src(cam_avatar_, chr_->thumb);
+  }
+  if (!face_built_) {
+    return;  // BuildRobotFace() will read chr_ when it runs.
+  }
+
+  lv_obj_set_style_bg_color(face_container_, lv_color_hex(chr_->bg_color), 0);
+  lv_image_set_src(face_image_, chr_->base);
+
+  DestroyHairOverlays();
+  EnsureHairOverlays();
+
+  // Sprite rectangles differ per character. Hide both overlays and forget what they showed, so the
+  // Apply*Frame() calls below re-point them from scratch.
+  lv_obj_set_pos(eyes_overlay_, chr_->eyes_x + head_offset_x_, chr_->eyes_y + head_offset_y_);
+  lv_obj_set_pos(mouth_overlay_, chr_->mouth_x + head_offset_x_, chr_->mouth_y + head_offset_y_);
+  lv_obj_add_flag(eyes_overlay_, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(mouth_overlay_, LV_OBJ_FLAG_HIDDEN);
+  eyes_src_ = nullptr;
+  mouth_src_ = nullptr;
+
+  DestroyPetalLayer();
+  EnsurePetalLayer();
+
+  ApplyBlinkFrame();
+  ApplyMouthFrame();
+}
+
+void Display::EnsureHairOverlays() {
+  if (face_container_ == nullptr || chr_->bangs == nullptr || chr_->locks_l == nullptr ||
+      chr_->locks_r == nullptr) {
+    return;
+  }
+  auto make = [this](lv_obj_t*& obj, const lv_image_dsc_t* const* table, int x, int y) {
+    if (obj == nullptr) {
+      obj = lv_image_create(face_container_);
+      // On a character switch the eyes and mouth already exist; hair has to sit underneath them.
+      if (eyes_overlay_ != nullptr) {
+        lv_obj_move_to_index(obj, lv_obj_get_index(eyes_overlay_));
+      }
+    }
+    lv_image_set_src(obj, table[1]);
+    lv_obj_set_pos(obj, x + head_offset_x_, y + head_offset_y_);
+    lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+  };
+  make(bangs_overlay_, chr_->bangs, chr_->bangs_x, chr_->bangs_y);
+  make(locks_l_overlay_, chr_->locks_l, chr_->locks_l_x, chr_->locks_l_y);
+  make(locks_r_overlay_, chr_->locks_r, chr_->locks_r_x, chr_->locks_r_y);
+  hair_level_bangs_ = 0;
+  hair_level_locks_ = 0;
+}
+
+void Display::DestroyHairOverlays() {
+  for (lv_obj_t** obj : {&bangs_overlay_, &locks_l_overlay_, &locks_r_overlay_}) {
+    if (*obj != nullptr) {
+      lv_obj_delete(*obj);
+      *obj = nullptr;
+    }
+  }
+}
+
+void Display::EnsurePetalLayer() {
+  if (face_container_ == nullptr || chr_->petals == nullptr || chr_->petal_frames == 0 ||
+      chr_->petal_sizes == 0) {
+    return;
+  }
+  if (petal_layer_ == nullptr) {
+    // A bare, style-less object the size of the portrait. It paints nothing itself; OnPetalDraw()
+    // draws the petals into whatever region LVGL is refreshing.
+    petal_layer_ = lv_obj_create(face_container_);
+    lv_obj_remove_style_all(petal_layer_);
+    lv_obj_set_size(petal_layer_, ENCO_FACE_W, ENCO_FACE_H);
+    lv_obj_set_pos(petal_layer_, 0, 0);
+    lv_obj_clear_flag(petal_layer_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(petal_layer_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(petal_layer_, OnPetalDraw, LV_EVENT_DRAW_MAIN, this);
+    // Above the face sprites, below the caption pill.
+    if (subtitle_box_ != nullptr) {
+      lv_obj_move_to_index(petal_layer_, lv_obj_get_index(subtitle_box_));
+    }
+  }
+  // Scatter the first batch over the whole height so the screen is not empty for the first
+  // few seconds while they fall in from the top.
+  for (int i = 0; i < kPetalCount; i++) {
+    SpawnPetal(i, true);
+  }
+  lv_obj_invalidate(petal_layer_);
+}
+
+void Display::DestroyPetalLayer() {
+  if (petal_layer_ != nullptr) {
+    lv_obj_delete(petal_layer_);  // deleting invalidates the area it covered
+    petal_layer_ = nullptr;
+  }
+}
+
+// Puts petal `index` at a random spot in its lane: even petals fall left of the face, odd ones to
+// the right. `anywhere` scatters it over the full height; otherwise it starts just above the top.
+void Display::SpawnPetal(int index, bool anywhere) {
+  Petal& p = petals_[index];
+  // One in three is a big (near) petal.
+  p.size = static_cast<uint8_t>(esp_random() % 3 == 0 ? 1 : 0);
+  if (p.size >= chr_->petal_sizes) {
+    p.size = chr_->petal_sizes - 1;
+  }
+  const lv_image_dsc_t* dsc = chr_->petals[p.size * chr_->petal_frames];
+  const int w = dsc->header.w;
+  const int h = dsc->header.h;
+  const bool left = (index & 1) == 0;
+  // The lane leaves room for the sway (kPetalSway, +-3px) and a little inward drift.
+  int x0 = left ? -w / 2 : chr_->petal_lane_r + 6;
+  int x1 = left ? chr_->petal_lane_l - w - 6 : ENCO_FACE_W - w / 2;
+  if (x1 < x0) {
+    x1 = x0;
+  }
+  const int x = x0 + static_cast<int>(esp_random() % static_cast<uint32_t>(x1 - x0 + 1));
+  const int y = anywhere ? static_cast<int>(esp_random() % ENCO_FACE_H) - h
+                         : -h - static_cast<int>(esp_random() % 90);
+  p.x16 = static_cast<int16_t>(x * 16);
+  p.y16 = static_cast<int16_t>(y * 16);
+  // 0.8-1.25 px per tick for small petals, 1.25-1.75 for big ones (10-22 px/s).
+  p.vy16 = static_cast<int8_t>(p.size ? 20 + esp_random() % 9 : 13 + esp_random() % 8);
+  // Mostly drifting outward, never more than 1/16 px per tick toward her face.
+  const int drift = static_cast<int>(esp_random() % 4) - 1;  // -1..2
+  p.vx16 = static_cast<int8_t>(left ? -drift : drift);
+  p.frame = static_cast<uint8_t>(esp_random() % chr_->petal_frames);
+  p.spin = static_cast<uint8_t>(2 + esp_random() % 3);
+  p.age = static_cast<uint8_t>(esp_random());
+  p.draw_x = static_cast<int16_t>(x + kPetalSway[(p.age >> 2) & 15]);
+  p.draw_y = static_cast<int16_t>(y);
+}
+
+void Display::UpdatePetals() {
+  if (petal_layer_ == nullptr || chr_->petals == nullptr) {
+    return;
+  }
+  lv_area_t origin;
+  lv_obj_get_coords(petal_layer_, &origin);
+  const int frames = chr_->petal_frames;
+  // Only the part of the portrait under the status bar is on screen.
+  const int bottom = face_container_ != nullptr ? lv_obj_get_height(face_container_) : ENCO_FACE_H;
+
+  auto area_of = [&](const Petal& p) {
+    const lv_image_dsc_t* dsc = chr_->petals[p.size * frames + p.frame];
+    lv_area_t a;
+    a.x1 = origin.x1 + p.draw_x;
+    a.y1 = origin.y1 + p.draw_y;
+    a.x2 = a.x1 + dsc->header.w - 1;
+    a.y2 = a.y1 + dsc->header.h - 1;
+    return a;
+  };
+
+  for (int i = 0; i < kPetalCount; i++) {
+    Petal& p = petals_[i];
+    lv_area_t before = area_of(p);
+    const uint8_t old_frame = p.frame;
+
+    p.x16 = static_cast<int16_t>(p.x16 + p.vx16);
+    p.y16 = static_cast<int16_t>(p.y16 + p.vy16);
+    p.age++;
+    if (p.age % p.spin == 0) {
+      p.frame = static_cast<uint8_t>((p.frame + 1) % frames);
+    }
+    int x = (p.x16 >> 4) + kPetalSway[(p.age >> 2) & 15];
+    int y = p.y16 >> 4;
+    if (y >= bottom || x < -24 || x > ENCO_FACE_W + 8) {
+      SpawnPetal(i, false);
+      x = p.draw_x;
+      y = p.draw_y;
+    }
+    if (x == p.draw_x && y == p.draw_y && p.frame == old_frame) {
+      continue;  // nothing visible changed; leave the pixels alone
+    }
+    p.draw_x = static_cast<int16_t>(x);
+    p.draw_y = static_cast<int16_t>(y);
+    lv_area_t after = area_of(p);
+    // One rectangle if the two overlap (the usual 1-2px step), two otherwise (a respawn).
+    if (AreasOverlap(before, after)) {
+      lv_area_t both = AreaUnion(before, after);
+      lv_obj_invalidate_area(petal_layer_, &both);
+    } else {
+      lv_obj_invalidate_area(petal_layer_, &before);
+      lv_obj_invalidate_area(petal_layer_, &after);
+    }
+  }
+}
+
+void Display::OnPetalDraw(lv_event_t* e) {
+  auto* self = static_cast<Display*>(lv_event_get_user_data(e));
+  if (self == nullptr || self->chr_->petals == nullptr) {
+    return;
+  }
+  lv_layer_t* layer = lv_event_get_layer(e);
+  lv_obj_t* obj = lv_event_get_current_target_obj(e);
+  lv_area_t origin;
+  lv_obj_get_coords(obj, &origin);
+  const int frames = self->chr_->petal_frames;
+  for (const Petal& p : self->petals_) {
+    const lv_image_dsc_t* dsc = self->chr_->petals[p.size * frames + p.frame];
+    lv_area_t a;
+    a.x1 = origin.x1 + p.draw_x;
+    a.y1 = origin.y1 + p.draw_y;
+    a.x2 = a.x1 + dsc->header.w - 1;
+    a.y2 = a.y1 + dsc->header.h - 1;
+    if (!AreasOverlap(a, layer->_clip_area)) {
+      continue;  // Most redraws (a blink, a mouth frame) touch none of the petals.
+    }
+    lv_draw_image_dsc_t img;
+    lv_draw_image_dsc_init(&img);
+    img.src = dsc;
+    lv_draw_image(layer, &img, &a);
   }
 }
 
@@ -1842,7 +2124,9 @@ void Display::OnFaceTimer(lv_timer_t* timer) {
   // --- Random hair breeze ------------------------------------------------------------------
   // One pose per tick rather than one every other tick: with the half-strength frames available
   // that halves the size of each visible jump instead of doubling the frame rate of a coarse one.
-  if (self->hair_step_ != 0) {
+  if (self->chr_->bangs == nullptr) {
+    // This character has no breeze frames.
+  } else if (self->hair_step_ != 0) {
     self->hair_step_++;
     if (self->hair_step_ > kHairPoseCount) {
       self->hair_step_ = 0;
@@ -1854,6 +2138,9 @@ void Display::OnFaceTimer(lv_timer_t* timer) {
     self->hair_step_ = 1;
     self->ApplyHairFrame();
   }
+
+  // --- Falling petals ----------------------------------------------------------------------
+  self->UpdatePetals();
 
   // --- Mouth -------------------------------------------------------------------------------
   // Follows the amplifier, not the chat state: see core/audio_playback_signal.h. This is what
@@ -1887,9 +2174,9 @@ void Display::OnFaceTimer(lv_timer_t* timer) {
     const char* const* pool = listening ? kAmbientListenFaces : kAmbientIdleFaces;
     const size_t n = listening ? sizeof(kAmbientListenFaces) / sizeof(kAmbientListenFaces[0])
                                : sizeof(kAmbientIdleFaces) / sizeof(kAmbientIdleFaces[0]);
-    int8_t pick = FindExpression(pool[esp_random() % n]);
+    int8_t pick = FindExpression(self->chr_, pool[esp_random() % n]);
     if (pick == self->last_ambient_expr_) {  // one re-roll keeps back-to-back repeats rare
-      pick = FindExpression(pool[esp_random() % n]);
+      pick = FindExpression(self->chr_, pool[esp_random() % n]);
     }
     if (pick >= 0) {
       self->expr_index_ = pick;

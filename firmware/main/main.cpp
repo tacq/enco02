@@ -175,7 +175,7 @@ constexpr uint32_t kDebugServeMinFreeHeap = 16000;
 // Testing switch: start the page automatically at standby and keep it up (no 10-min timeout, no
 // low-heap shutdown). Idle cost was measured at ~0.4 KB, and requests are held while she speaks.
 // Set back to false for everyday use.
-constexpr bool kDebugServerAlwaysOn = true;
+constexpr bool kDebugServerAlwaysOn = false;
 uint32_t g_debug_server_deadline_ms = 0;
 
 // Returns nullptr on success, otherwise a short reason suitable for the model to read out.
@@ -655,6 +655,64 @@ void LoadCaptionSetting() {
   }
   printf("[display] caption %s, random expressions %s, random head %s\n", caption ? "on" : "off",
          ambient ? "on" : "off", g_head_random ? "on" : "off");
+}
+
+// Which on-screen character (face_assets.h: "fox", "k3"). Missing = the display's default (fox).
+constexpr const char* kCharacterPrefsKey = "character";
+
+void LoadCharacterSetting() {
+  Preferences prefs;
+  String saved;
+  if (prefs.begin(kDisplayPrefsNamespace, true)) {
+    saved = prefs.getString(kCharacterPrefsKey, "");
+    prefs.end();
+  }
+  if (g_display && saved.length() > 0 && !g_display->SetCharacter(saved.c_str())) {
+    printf("[display] saved character '%s' not built in, keeping %s\n", saved.c_str(), g_display->CharacterId());
+  }
+}
+
+// "fox" / "k3" pick one, "char" cycles to the next. Returns the id now shown, or nullptr if the
+// switch was refused (unknown id, only one character built in, or heap too low right now).
+const char* SwitchCharacter(const std::string& which) {
+  if (g_display == nullptr) {
+    return nullptr;
+  }
+  const char* before = g_display->CharacterId();
+  const char* now = nullptr;
+  if (which == "char") {
+    now = g_display->NextCharacter();
+    if (now == before) {
+      return nullptr;
+    }
+  } else if (g_display->SetCharacter(which)) {
+    now = g_display->CharacterId();
+  } else {
+    return nullptr;
+  }
+  Preferences prefs;
+  if (prefs.begin(kDisplayPrefsNamespace, false)) {
+    prefs.putString(kCharacterPrefsKey, now);
+    prefs.end();
+  }
+  return now;
+}
+
+// Same idea as the volume fallback below: a bare "换个角色" is often answered conversationally
+// instead of as a tool call, so the user's own words switch it too.
+uint32_t g_last_character_exec_time = 0;
+bool CheckAndExecuteCharacterFallback(const std::string& query) {
+  if (millis() - g_last_character_exec_time < 2500) {
+    return false;
+  }
+  if (query.find("换角色") == std::string::npos && query.find("切换角色") == std::string::npos &&
+      query.find("换个角色") == std::string::npos && query.find("换人物") == std::string::npos) {
+    return false;
+  }
+  g_last_character_exec_time = millis();
+  const char* now = SwitchCharacter("char");
+  printf("[Voice Character Fallback] -> %s\n", now != nullptr ? now : "(refused)");
+  return true;
 }
 
 // The cloud model decides for itself whether to emit an MCP tool call, and for a bare "大声点" it
@@ -1238,7 +1296,12 @@ void SetHeadRandom(const bool on) {
 void IdleHeadTick(const uint32_t now_ms) {
   // Off by switch, or camera tracking owns the head, or a voice head command was just obeyed (a
   // "向左看" is not overridden for 4 s).
-  if (!g_head_random || CamLink::GetInstance().tracking_enabled() || millis() - g_last_motion_exec_time < 4000) {
+  if (CamLink::GetInstance().tracking_enabled()) {
+    // Keep the next one a full interval away, so none fires the moment tracking ends either.
+    g_next_idle_head_ms = now_ms + 6000;
+    return;
+  }
+  if (!g_head_random || millis() - g_last_motion_exec_time < 4000) {
     return;
   }
   if (g_next_idle_head_ms == 0) {
@@ -1431,7 +1494,7 @@ void InitMcpTools() {
   engine.AddMcpTool("self.audio_speaker.volume_down",
                     "Volume down one step (调低音量/小声一点/声音小点).", {});
 
-  engine.AddMcpTool("self.screen.set_mode", "Screen mode (切换屏幕): face表情 chat对话 toggle切换 debug_on/debug_off调试页面", {
+  engine.AddMcpTool("self.screen.set_mode", "Screen mode (切换屏幕): face表情 chat对话 toggle切换 debug_on/debug_off调试页面 fox/k3/char换角色", {
     {"mode", ai_vox::ParamSchema<std::string>{.default_value = "face"}},
   });
   engine.AddMcpTool("self.screen.caption", "Show/hide the caption bar under the face (打开字幕/关闭字幕).", {
@@ -1797,6 +1860,7 @@ void setup() {
   // Before the engine starts, so the first thing she says is already at the user's chosen level.
   LoadSavedVolume();
   LoadCaptionSetting();
+  LoadCharacterSetting();
 
   // Tool registration moved ahead of ConfigureWifi(): it has no network dependency, and the engine
   // singleton it builds is better allocated while the heap is still clean than after WiFi and TLS
@@ -2202,7 +2266,8 @@ void loop() {
             // Timer first, then volume, and only on what the user actually said. Each of these is
             // exclusive: a phrase that turned out to be a timer request is not also a head command,
             // so the first one to claim it wins.
-            if (!CheckAndExecuteTimerFallback(g_last_user_query) && !CheckAndExecuteVolumeFallback(g_last_user_query)) {
+            if (!CheckAndExecuteTimerFallback(g_last_user_query) && !CheckAndExecuteVolumeFallback(g_last_user_query) &&
+                !CheckAndExecuteCharacterFallback(g_last_user_query)) {
               CheckAndExecuteMotionFallback(g_last_user_query);
             }
             g_last_user_query.clear();
@@ -2534,6 +2599,15 @@ void loop() {
           StopDebugServer();
           printf("on mcp tool call: debug page off\n");
           engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        } else if (mode_ptr != nullptr && (*mode_ptr == "fox" || *mode_ptr == "k3" || *mode_ptr == "char")) {
+          g_last_character_exec_time = millis();  // The transcript fallback must not switch again.
+          const char* now = SwitchCharacter(*mode_ptr);
+          printf("on mcp tool call: character -> %s\n", now != nullptr ? now : "(refused)");
+          if (now == nullptr) {
+            engine.SendMcpCallError(mcp_tool_call_event->id, "character switch failed, try again");
+          } else {
+            engine.SendMcpCallResponse(mcp_tool_call_event->id, std::string("now showing ") + now);
+          }
         } else if (mode_ptr != nullptr && *mode_ptr == "toggle") {
           // Folded in from the old self.screen.toggle_mode tool to keep tools/list small.
           if (g_display && g_display->InCameraView()) {

@@ -7,74 +7,71 @@
 extern "C" {
 #endif
 
+// Which characters are compiled in. Each one costs roughly 0.3-0.4 MB of flash; override with
+// -D ENCO_CHAR_<ID>=0 to leave one out (its art and face_assets_<id>.c stay in the tree).
+#ifndef ENCO_CHAR_K3
+#define ENCO_CHAR_K3 1
+#endif
+#ifndef ENCO_CHAR_FOX
+#define ENCO_CHAR_FOX 1
+#endif
+
 #define ENCO_FACE_W 240
 #define ENCO_FACE_H 320
-
-// Overlay sprites are positioned at these offsets inside the base image.
-#define ENCO_FACE_EYES_X 62
-#define ENCO_FACE_EYES_Y 100
-#define ENCO_FACE_MOUTH_X 68
-#define ENCO_FACE_MOUTH_Y 158
-#define ENCO_FACE_BANGS_X 64
-#define ENCO_FACE_BANGS_Y 58
-#define ENCO_FACE_LOCKS_L_X 8
-#define ENCO_FACE_LOCKS_L_Y 104
-#define ENCO_FACE_LOCKS_R_X 152
-#define ENCO_FACE_LOCKS_R_Y 104
 
 // Pre-scaled bust for the camera HUD's side panel, baked at build time.
 #define ENCO_FACE_THUMB_W 82
 #define ENCO_FACE_THUMB_H 86
 
-extern const lv_image_dsc_t enco_face_base;
-extern const lv_image_dsc_t enco_face_thumb;
-
-// Blink, lip-sync and expression sprites. Eye sprites sit at ENCO_FACE_EYES_*,
-// mouth sprites at ENCO_FACE_MOUTH_*.
-extern const lv_image_dsc_t enco_face_eyes_half;
-extern const lv_image_dsc_t enco_face_eyes_shut;
-extern const lv_image_dsc_t enco_face_mouth_small;
-extern const lv_image_dsc_t enco_face_mouth_wide;
-extern const lv_image_dsc_t enco_face_expr_happy_eyes;
-extern const lv_image_dsc_t enco_face_expr_happy_mouth;
-extern const lv_image_dsc_t enco_face_expr_sad_eyes;
-extern const lv_image_dsc_t enco_face_expr_sad_mouth;
-extern const lv_image_dsc_t enco_face_expr_wink_eyes;
-extern const lv_image_dsc_t enco_face_expr_wink_mouth;
-extern const lv_image_dsc_t enco_face_expr_pout_eyes;
-extern const lv_image_dsc_t enco_face_expr_pout_mouth;
-extern const lv_image_dsc_t enco_face_expr_surprised_eyes;
-extern const lv_image_dsc_t enco_face_expr_surprised_mouth;
-extern const lv_image_dsc_t enco_face_expr_angry_eyes;
-extern const lv_image_dsc_t enco_face_expr_angry_mouth;
-extern const lv_image_dsc_t enco_face_expr_shy_eyes;
-extern const lv_image_dsc_t enco_face_expr_shy_mouth;
-extern const lv_image_dsc_t enco_face_expr_thinking_eyes;
-extern const lv_image_dsc_t enco_face_expr_thinking_mouth;
-
-// Hair sway frames, ordered from full-left to full-right.
-extern const lv_image_dsc_t enco_face_bangs_left;
-extern const lv_image_dsc_t enco_face_bangs_lhalf;
-extern const lv_image_dsc_t enco_face_bangs_rhalf;
-extern const lv_image_dsc_t enco_face_bangs_right;
-extern const lv_image_dsc_t enco_face_locks_l_left;
-extern const lv_image_dsc_t enco_face_locks_l_lhalf;
-extern const lv_image_dsc_t enco_face_locks_l_rhalf;
-extern const lv_image_dsc_t enco_face_locks_l_right;
-extern const lv_image_dsc_t enco_face_locks_r_left;
-extern const lv_image_dsc_t enco_face_locks_r_lhalf;
-extern const lv_image_dsc_t enco_face_locks_r_rhalf;
-extern const lv_image_dsc_t enco_face_locks_r_right;
-
-// Named facial expressions: an eyes sprite and a mouth sprite each.
+// A named facial expression: an eyes sprite and a mouth sprite. Eye sprites sit at the
+// character's eyes_x/eyes_y, mouth sprites at mouth_x/mouth_y.
 typedef struct {
   const char* name;
   const lv_image_dsc_t* eyes;
   const lv_image_dsc_t* mouth;
 } enco_face_expr_t;
 
-#define ENCO_FACE_EXPR_COUNT 8
-extern const enco_face_expr_t enco_face_exprs[ENCO_FACE_EXPR_COUNT];
+// Everything display.cpp needs to draw and animate one character.
+typedef struct {
+  const char* id;
+  const lv_image_dsc_t* base;   // full-screen ENCO_FACE_W x ENCO_FACE_H portrait
+  const lv_image_dsc_t* thumb;  // ENCO_FACE_THUMB_W x ENCO_FACE_THUMB_H camera-HUD bust
+  uint32_t bg_color;            // face container fill, matching the portrait's backdrop
+
+  // Blink, lip-sync and expression sprites (all opaque, positioned at the offsets below).
+  int16_t eyes_x, eyes_y;
+  int16_t mouth_x, mouth_y;
+  const lv_image_dsc_t* eyes_half;
+  const lv_image_dsc_t* eyes_shut;
+  const lv_image_dsc_t* mouth_small;
+  const lv_image_dsc_t* mouth_wide;
+  const enco_face_expr_t* exprs;
+  uint8_t expr_count;
+
+  // Hair breeze. Each table holds 5 frames indexed by level + 2 (level -2 full-left .. +2
+  // full-right); [2] is NULL because the base portrait already shows the hair at rest. NULL tables
+  // mean the character has no breeze.
+  int16_t bangs_x, bangs_y;
+  int16_t locks_l_x, locks_l_y;
+  int16_t locks_r_x, locks_r_y;
+  const lv_image_dsc_t* const* bangs;
+  const lv_image_dsc_t* const* locks_l;
+  const lv_image_dsc_t* const* locks_r;
+
+  // Falling petals: petal_sizes x petal_frames RGB565A8 sprites, size-major, one tumble cycle per
+  // size. They fall left of petal_lane_l and right of petal_lane_r, clear of her face. NULL: none.
+  const lv_image_dsc_t* const* petals;
+  uint8_t petal_frames;
+  uint8_t petal_sizes;
+  int16_t petal_lane_l, petal_lane_r;
+} enco_character_t;
+
+#if ENCO_CHAR_K3
+extern const enco_character_t enco_char_k3;  // K3 Elegant Bob (silver hair, white armour)
+#endif
+#if ENCO_CHAR_FOX
+extern const enco_character_t enco_char_fox;  // Fox (pink fox-girl, crimson dress)
+#endif
 
 #ifdef __cplusplus
 }
