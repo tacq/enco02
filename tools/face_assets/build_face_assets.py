@@ -100,6 +100,7 @@ HAIR_LEVELS = [
 #   petals - generate animated falling-petal sprites for this character.
 #   petal_lanes - (x0, x1): petals fall left of x0 and right of x1, i.e. clear of her face.
 #   hair_flow - optional runtime wind-in-the-hair bands (see the fox entry), or absent for none.
+#   ears - optional runtime twitching-ear rigs with their ornaments (see the fox entry).
 CHARACTERS = {
     "k3": {
         "title": "K3 Elegant Bob (silver hair, white armour)",
@@ -179,16 +180,59 @@ CHARACTERS = {
             "left_edge": [(80, 50), (100, 47), (120, 36), (130, 32), (150, 30), (170, 26),
                           (190, 18), (200, 10), (210, 3), (220, 0), (319, 0)],
             "left_in": [(80, 84), (100, 85), (140, 85), (160, 88), (175, 92), (190, 92),
-                        (205, 88), (230, 86), (262, 86), (272, 70), (319, 68)],
+                        (205, 88), (230, 86), (250, 86), (258, 70), (319, 68)],
             "right_in": [(80, 156), (100, 157), (140, 157), (160, 156), (175, 150), (190, 150),
-                         (205, 154), (230, 158), (264, 160), (274, 176), (319, 176)],
+                         (205, 154), (230, 158), (250, 160), (260, 176), (319, 176)],
             "right_edge": [(80, 190), (100, 196), (120, 200), (140, 202), (160, 208), (175, 215),
                            (190, 228), (200, 236), (210, 239), (319, 239)],
-            "left_body": [(206, 40, 44), (215, 22, 54), (230, 12, 56), (260, 12, 58),
-                          (290, 16, 52), (319, 22, 50)],
-            "right_body": [(208, 196, 200), (215, 188, 212), (230, 184, 218), (250, 184, 220),
-                           (270, 186, 216), (285, 192, 210), (294, 198, 204)],
+            # From the chest down (the sides of her bust, the drape under her arms) the body masks
+            # widen right up to the dress, so down there only the outermost strands still sway.
+            "left_body": [(206, 40, 44), (215, 22, 54), (230, 12, 56), (250, 12, 60), (262, 10, 70),
+                          (319, 8, 70)],
+            "right_body": [(208, 196, 200), (215, 188, 212), (230, 184, 218), (250, 180, 220),
+                           (262, 176, 224), (319, 176, 232)],
         },
+        # Her fox ears, twitching at runtime (see WarpEarsChunk() in display.cpp). Traced off a 5x
+        # grid of the base, (x, y) in 240x320 space:
+        #   poly  - the ear, down to where hair covers its root;
+        #   base  - the root line: below it the motion fades out over base_fade px of hair;
+        #   pivot - what the ear turns about; tip - its tip (the tip lags the root, bending it);
+        #   out   - -1: "outward" turns the tip left (her ear on screen left), +1: right;
+        #   margin - px of backdrop around the ear dragged along, so the outline moves seamlessly;
+        #   deco  - ornaments on the ear: a polygon, the point it hangs from, how much it hangs
+        #           plumb rather than turning with the ear (0..1), and its swing (Hz, damping).
+        "ears": [
+            {
+                "poly": [(47, -2), (53, -2), (62, 12), (72, 23), (82, 31), (92, 37), (97, 42),
+                         (92, 53), (52, 58), (47, 50)],
+                "base": [(52, 58), (92, 53)],
+                "pivot": (74, 52), "tip": (50, 1), "out": -1, "margin": 22, "base_fade": 14,
+                "deco": [
+                    # red flower pinned at the ear's root: rides with it, a stiff little jiggle
+                    {"poly": [(44, 58), (56, 50), (80, 50), (88, 62), (86, 84), (72, 90), (54, 88),
+                              (44, 76)],
+                     "anchor": (68, 72), "hang": 0.0, "hz": 6.0, "zeta": 0.3},
+                    # pearl strings hanging from it: a slow pendulum
+                    {"poly": [(39, 91), (52, 89), (69, 90), (68, 116), (57, 117), (39, 104)],
+                     "anchor": (64, 89), "hang": 0.85, "hz": 2.2, "zeta": 0.12},
+                ],
+            },
+            {
+                "poly": [(197, -2), (202, -2), (201, 20), (198, 40), (196, 58), (148, 52),
+                         (149, 40), (155, 37), (165, 30), (175, 24), (185, 18), (191, 12)],
+                "base": [(148, 52), (196, 58)],
+                "pivot": (173, 54), "tip": (199, 1), "out": 1, "margin": 22, "base_fade": 14,
+                "deco": [
+                    # hook earring at the root of the ear
+                    {"poly": [(178, 57), (196, 57), (197, 83), (179, 83)],
+                     "anchor": (187, 60), "hang": 0.7, "hz": 3.0, "zeta": 0.15},
+                    # bead chain threaded down the lock beside it
+                    {"poly": [(158, 67), (171, 67), (183, 84), (189, 108), (191, 136), (179, 136),
+                              (172, 110), (167, 92), (157, 77)],
+                     "anchor": (164, 70), "hang": 0.9, "hz": 1.8, "zeta": 0.12},
+                ],
+            },
+        ],
     },
 }
 
@@ -715,6 +759,149 @@ def hair_flow_warp(rgb, table, u_left, u_right):
     return out
 
 
+# ---------------------------------------------------------------- ear twitch
+#
+# Each ear is a bone rotating about its root (display.cpp WarpEarsChunk). Nothing but weights
+# ships: per pixel of the ear's box, how much it follows the ear (1 on the ear, easing to 0 over
+# `margin` px of backdrop around it and `base_fade` px of hair below its root), and which ornament
+# it belongs to, if any. Ornaments ride on the ear but have their own angle - a pendulum for things
+# that dangle - so a bead string swings back to plumb after a flick instead of turning rigidly.
+# The firmware resamples the base portrait in flash through these, so it can move pixels across
+# rows (a true rotation), which the row-by-row hair warp cannot.
+
+EAR_DECO_FEATHER = 4        # px over which an ornament's own swing fades into its surroundings
+EAR_DECO_MAX = 4            # ornament index lives in the top 2 bits of the deco map
+
+
+def _inside(poly, x, y):
+    c = False
+    for (x0, y0), (x1, y1) in zip(poly, poly[1:] + poly[:1]):
+        if (y0 > y) != (y1 > y) and x < x0 + (x1 - x0) * (y - y0) / (y1 - y0):
+            c = not c
+    return c
+
+
+def _poly_dist(poly, x, y):
+    """0 inside `poly`, else the distance to its outline."""
+    if _inside(poly, x, y):
+        return 0.0
+    best = 1e9
+    for (x0, y0), (x1, y1) in zip(poly, poly[1:] + poly[:1]):
+        dx, dy = x1 - x0, y1 - y0
+        t = max(0.0, min(1.0, ((x - x0) * dx + (y - y0) * dy) / (dx * dx + dy * dy)))
+        best = min(best, math.hypot(x - x0 - t * dx, y - y0 - t * dy))
+    return best
+
+
+def _fall(t):
+    """1 at t <= 0 easing to 0 at t >= 1 (cosine: no slope kink at either end)."""
+    return 1.0 if t <= 0 else (0.0 if t >= 1 else 0.5 + 0.5 * math.cos(math.pi * t))
+
+
+def ear_rig(spec):
+    """-> dict with the ear's box, bone geometry, ornaments and per-pixel maps (see enco_ear_t)."""
+    poly, margin, bfade = spec["poly"], spec["margin"], spec["base_fade"]
+    (bx0, by0), (bx1, by1) = spec["base"]
+    tx, ty = spec["tip"]
+    # Unit normal of the root line, pointing away from the tip: "below the root".
+    nx, ny = -(by1 - by0), bx1 - bx0
+    n = math.hypot(nx, ny)
+    nx, ny = nx / n, ny / n
+    if (tx - bx0) * nx + (ty - by0) * ny > 0:
+        nx, ny = -nx, -ny
+    decos = spec.get("deco", [])
+    assert len(decos) <= EAR_DECO_MAX
+    wmap, dmap = {}, {}
+    pts = [(x, y, margin) for x, y in poly]
+    pts += [(x, y, EAR_DECO_FEATHER) for dc in decos for x, y in dc["poly"]]
+    sx0 = max(0, int(min(x - m for x, _, m in pts)) - 1)
+    sx1 = min(W - 1, int(max(x + m for x, _, m in pts)) + 1)
+    sy0 = max(0, int(min(y - m for _, y, m in pts)) - 1)
+    sy1 = min(H - 1, int(max(y + m for _, y, m in pts)) + 1)
+    for y in range(sy0, sy1 + 1):
+        for x in range(sx0, sx1 + 1):
+            d = _poly_dist(poly, x, y)
+            if d >= margin:
+                w = 0.0
+            else:
+                below = (x - bx0) * nx + (y - by0) * ny
+                w = _fall(d / margin) * _fall(below / bfade)
+            best, bi = 0.0, 0
+            for i, dc in enumerate(decos):
+                dd = _poly_dist(dc["poly"], x, y)
+                wd = _fall(dd / EAR_DECO_FEATHER)
+                if wd > best:
+                    best, bi = wd, i
+            wv, dv = round(w * 255), round(best * 63)
+            if wv or dv:
+                wmap[(x, y)] = wv
+                dmap[(x, y)] = (bi << 6) | dv if dv else 0
+    xs = [p[0] for p in wmap]
+    ys = [p[1] for p in wmap]
+    x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+    bw, bh = x1 - x0 + 1, y1 - y0 + 1
+    assert bw <= 255 and bh <= 255, "ear box too big for uint8"
+    weight = [wmap.get((x0 + i % bw, y0 + i // bw), 0) for i in range(bw * bh)]
+    deco_map = [dmap.get((x0 + i % bw, y0 + i // bw), 0) for i in range(bw * bh)]
+    return {"box": (x0, y0, bw, bh), "pivot": spec["pivot"], "tip": spec["tip"], "out": spec["out"],
+            "deco": decos, "weight": weight, "deco_map": deco_map}
+
+
+def _rot(vx, vy, a):
+    c, s = math.cos(a), math.sin(a)
+    return c * vx - s * vy, s * vx + c * vy
+
+
+def ear_warp(rgb, rigs, out_base, out_tip, deco_angles):
+    """Python twin of the firmware's ear warp, for previews. out_* are outward angles in radians
+    (base and tip of the bone, same for both ears); deco_angles[e][i] are the ornaments' absolute
+    screen angles."""
+    out = list(rgb)
+
+    def sample(sx, sy):
+        sx = min(W - 1.0, max(0.0, sx))
+        sy = min(H - 1.0, max(0.0, sy))
+        ix, iy = min(W - 2, int(sx)), min(H - 2, int(sy))
+        fx, fy = sx - ix, sy - iy
+        p = [rgb[(iy + j) * W + ix + i] for j in (0, 1) for i in (0, 1)]
+        return tuple(round((p[0][k] * (1 - fx) + p[1][k] * fx) * (1 - fy) +
+                           (p[2][k] * (1 - fx) + p[3][k] * fx) * fy) for k in range(3))
+
+    for e, rig in enumerate(rigs):
+        bx, by, bw, bh = rig["box"]
+        cx, cy = rig["pivot"]
+        tx, ty = rig["tip"]
+        ln = math.hypot(tx - cx, ty - cy)
+        ux, uy = (tx - cx) / ln, (ty - cy) / ln
+        sb, st = rig["out"] * out_base, rig["out"] * out_tip
+        dparams = []
+        for i, dc in enumerate(rig["deco"]):
+            ax, ay = dc["anchor"]
+            s = max(0.0, min(1.0, ((ax - cx) * ux + (ay - cy) * uy) / ln))
+            th = sb + (st - sb) * s
+            rx, ry = _rot(ax - cx, ay - cy, th)
+            dparams.append((ax, ay, cx + rx, cy + ry, deco_angles[e][i]))
+        for j in range(bh):
+            for i in range(bw):
+                wv, dv = rig["weight"][j * bw + i], rig["deco_map"][j * bw + i]
+                if not wv and not dv & 63:
+                    continue
+                x, y = bx + i, by + j
+                s = max(0.0, min(1.0, ((x - cx) * ux + (y - cy) * uy) / ln))
+                th = sb + (st - sb) * s
+                ex, ey = _rot(x - cx, y - cy, -th)
+                we, wd = wv / 255, (dv & 63) / 63
+                dx = (1 - wd) * we * (cx + ex - x)
+                dy = (1 - wd) * we * (cy + ey - y)
+                if wd:
+                    ax, ay, fx, fy, phi = dparams[dv >> 6]
+                    qx, qy = _rot(x - fx, y - fy, -phi)
+                    dx += wd * (ax + qx - x)
+                    dy += wd * (ay + qy - y)
+                out[y * W + x] = sample(x + dx, y + dy)
+    return out
+
+
 # ---------------------------------------------------------------- build + emit
 
 def build_character(cid, ch, outdir):
@@ -770,6 +957,7 @@ def build_character(cid, ch, outdir):
     thumb = finish(box_downscale(base_lin, W, H, ch["thumb_src"], THUMB_W, THUMB_H))
     petals = petal_sprites() if ch["petals"] else []
     flow = hair_flow_table(ch["hair_flow"]) if ch.get("hair_flow") else None
+    ears = [ear_rig(e) for e in ch.get("ears", [])]
 
     total = 0
     guard = f"ENCO_CHAR_{prefix.upper()}"
@@ -825,6 +1013,31 @@ def build_character(cid, ch, outdir):
                      f"    .feather = {flow['feather']},\n"
                      f"    .amp = {sym}_flow_amp,\n    .spans = {sym}_flow_spans,\n}};\n")
             total += len(famps) * (1 + 4 * FLOW_SPAN)
+        for e, rig in enumerate(ears):
+            bx, by, bw, bh = rig["box"]
+            for key, what in (("weight", "follows the ear, 0..255"),
+                              ("deco_map", "ornament index << 6 | its weight 0..63")):
+                data = rig[key]
+                fh.write(f"\n// ear {e} {key}: {bw}x{bh} at ({bx},{by}), how much each pixel {what}\n"
+                         f"static const uint8_t {sym}_ear{e}_{key}[{len(data)}] = {{\n")
+                for i in range(0, len(data), 24):
+                    fh.write("    " + "".join(f"{v}," for v in data[i:i + 24]) + "\n")
+                fh.write("};\n")
+                total += len(data)
+        if ears:
+            fh.write(f"\nstatic const enco_ear_t {sym}_ears[{len(ears)}] = {{\n")
+            for e, rig in enumerate(ears):
+                bx, by, bw, bh = rig["box"]
+                decos = "".join(
+                    f"{{{d['anchor'][0]}, {d['anchor'][1]}, {round(d['hang'] * 255)}, "
+                    f"{round(d['hz'] * 10)}, {round(d['zeta'] * 100)}}}, " for d in rig["deco"])
+                fh.write(f"    {{.box_x = {bx}, .box_y = {by}, .box_w = {bw}, .box_h = {bh},\n"
+                         f"     .pivot_x = {rig['pivot'][0]}, .pivot_y = {rig['pivot'][1]},"
+                         f" .tip_x = {rig['tip'][0]}, .tip_y = {rig['tip'][1]},\n"
+                         f"     .out_sign = {rig['out']}, .deco_count = {len(rig['deco'])},"
+                         f" .deco = {{{decos}}},\n"
+                         f"     .weight = {sym}_ear{e}_weight, .deco_map = {sym}_ear{e}_deco_map}},\n")
+            fh.write("};\n")
 
         ex, ey, _, _ = rects["eyes"]
         mx, my, _, _ = rects["mouth"]
@@ -856,6 +1069,8 @@ def build_character(cid, ch, outdir):
                  f"    .petal_sizes = {len(PETAL_SIZES) if petals else 0},\n"
                  f"    .petal_lane_l = {lane_l}, .petal_lane_r = {lane_r},\n"
                  f"    .hair_flow = {'&' + sym + '_flow' if flow else 'NULL'},\n"
+                 f"    .ears = {sym + '_ears' if ears else 'NULL'},\n"
+                 f"    .ear_count = {len(ears)},\n"
                  "};\n"
                  f"\n#endif  // {guard}\n")
 
@@ -891,6 +1106,26 @@ def build_character(cid, ch, outdir):
                     c = bands[(fy0 + r) * W + x]
                     bands[(fy0 + r) * W + x] = (min(255, c[0] + round(200 * w * k)), c[1], c[2])
         F.write_png_rgb(os.path.join(build, "frame_flow_bands.png"), bands, W, H)
+    if ears:
+        # Both ears flicked outward (tip lagging behind), perked inward, and where the rig acts:
+        # red = follows the ear, green = an ornament's own swing.
+        deg = math.pi / 180
+        swing = [[r["out"] * (1 - d["hang"]) * 12 * deg + r["out"] * d["hang"] * -6 * deg
+                  for d in r["deco"]] for r in ears]
+        F.write_png_rgb(os.path.join(build, "frame_ears_out.png"),
+                        ear_warp(base, ears, 12 * deg, 16 * deg, swing), W, H)
+        F.write_png_rgb(os.path.join(build, "frame_ears_in.png"),
+                        ear_warp(base, ears, -7 * deg, -9 * deg, [[0.0] * len(r["deco"]) for r in ears]), W, H)
+        emap = [tuple(v // 2 for v in c) for c in base]
+        for r in ears:
+            bx, by, bw, bh = r["box"]
+            for j in range(bh):
+                for i in range(bw):
+                    wv, dv = r["weight"][j * bw + i], r["deco_map"][j * bw + i]
+                    c = emap[(by + j) * W + bx + i]
+                    emap[(by + j) * W + bx + i] = (min(255, c[0] + wv * 200 // 255),
+                                                   min(255, c[1] + (dv & 63) * 200 // 63), c[2])
+        F.write_png_rgb(os.path.join(build, "frame_ears_map.png"), emap, W, H)
     if petals:
         # Every petal frame, 4x, over the backdrop colour, in one strip per size.
         sc = 4
@@ -950,6 +1185,33 @@ typedef struct {
   const int16_t* spans;
 } enco_hair_flow_t;
 
+// An ornament riding on an ear (a flower, an earring, a bead string). It is carried along with the
+// ear's root but turns about `x, y` by an angle of its own: a damped spring that pulls it towards
+// the ear's angle, or - by `hang` / 255 - towards hanging plumb. hz10 / 10 is the swing frequency,
+// zeta100 / 100 the damping ratio.
+typedef struct {
+  int16_t x, y;
+  uint8_t hang;
+  uint8_t hz10;
+  uint8_t zeta100;
+} enco_ear_deco_t;
+
+// One ear: a bone turning about its root (pivot) towards its tip. weight[] (box_w x box_h, from
+// box_x, box_y) is how much each pixel follows the ear, 0..255; deco_map[] is (ornament << 6) |
+// how much it follows that ornament instead, 0..63. out_sign turns "outward" (positive) into a
+// screen rotation: -1 for her left-on-screen ear (tip goes left), +1 for the other.
+typedef struct {
+  int16_t box_x, box_y;
+  uint8_t box_w, box_h;
+  int16_t pivot_x, pivot_y;
+  int16_t tip_x, tip_y;
+  int8_t out_sign;
+  uint8_t deco_count;
+  enco_ear_deco_t deco[4];
+  const uint8_t* weight;
+  const uint8_t* deco_map;
+} enco_ear_t;
+
 // Everything display.cpp needs to draw and animate one character.
 typedef struct {
   const char* id;
@@ -986,6 +1248,10 @@ typedef struct {
 
   // Wind in the long hair, warped at runtime (display.cpp WarpHairChunk). NULL: no flow.
   const enco_hair_flow_t* hair_flow;
+
+  // Twitching ears, warped at runtime (display.cpp WarpEarsChunk). NULL / 0: none.
+  const enco_ear_t* ears;
+  uint8_t ear_count;
 } enco_character_t;
 
 %(externs)s

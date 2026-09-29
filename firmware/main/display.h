@@ -108,6 +108,18 @@ class Display {
   bool CaptionEnabled() const { return caption_enabled_; }
   // Random idle/listening expressions (see OnFaceTimer). Off drops one that is showing right now.
   void SetAmbientEnabled(bool enabled);
+  // 抖耳朵: a cute ear shake followed by a flick of each ear, for a character with ears (the fox).
+  // Returns false if the current character has none.
+  bool TwitchEars();
+  bool HasEars() const { return chr_->ear_count > 0; }
+  // One kick of an ear script: from at_ms for hold_ms, push the chosen ears `deg` outward
+  // (negative: perk inward). The ear springs do the rest - overshoot, settle, tip lag.
+  struct EarStep {
+    uint16_t at_ms;
+    uint16_t hold_ms;
+    uint8_t ears;  // bit 0: ear 0, bit 1: ear 1
+    int8_t deg;
+  };
   void LookDirection(const char* dir);
   // Creates the handful of LVGL objects that make up the bitmap character. Safe to call more than
   // once; the pixels themselves live in flash, so this costs well under 2KB of heap.
@@ -359,6 +371,41 @@ class Display {
   float flow_flutter_ = 0.0f;
   int16_t disp_off_x_ = 0;    // panel offset LVGL adds to flush areas
   int16_t disp_off_y_ = 0;
+
+  // Twitching ears (enco_character_t::ears). Same trick as the hair, but a real rotation, so the
+  // warp resamples the base portrait in flash rather than the chunk being flushed. Each ear is a
+  // damped spring (overshoots and settles like a real flick) with the tip on a softer spring of its
+  // own so it whips a beat behind the root, and its ornaments swing as pendulums hung from it.
+  // What drives the springs: a mood pose from the current expression (perked when surprised,
+  // drooping when sad, ...) plus short scripted kicks - 抖耳朵, idle twitches, expression accents.
+  struct Ear {
+    float base = 0, base_v = 0;  // outward angle of the root, rad
+    float tip = 0, tip_v = 0;    // of the tip
+    float deco[4] = {}, deco_v[4] = {};  // ornaments, screen angle (+ = clockwise)
+    float anchor_vx[4] = {};     // ornament anchors' horizontal velocity, px/s (pendulum drive)
+    float anchor_x[4] = {};
+    float pose = 0;              // eased mood pose, rad
+    float drawn[6] = {};         // state last painted, to repaint only while something moves
+    // Per-frame warp constants (UpdateEars -> WarpEarsChunk), portrait coordinates.
+    bool active = false;
+    float sb = 0, st = 0;        // screen angles of root and tip
+    float fx[4] = {}, fy[4] = {};    // where each ornament's anchor has been carried to
+    float dcos[4] = {}, dsin[4] = {};  // cos / sin of each ornament's angle
+  };
+  static constexpr int kMaxEars = 2;
+  Ear ears_[kMaxEars];
+  const EarStep* ear_script_ = nullptr;
+  uint8_t ear_script_len_ = 0;
+  uint8_t ear_script_mirror_ = 0;  // swap the ears
+  float ear_script_gain_ = 1.0f;
+  uint32_t ear_script_t0_ = 0;
+  uint32_t ear_last_ms_ = 0;
+  uint32_t ear_next_idle_ms_ = 0;
+  int8_t ear_last_expr_ = -1;
+  void StartEarScript(const EarStep* steps, uint8_t len, float gain, bool mirror);
+  void ResetEars();
+  void UpdateEars();
+  void WarpEarsChunk(const lv_area_t* area, uint16_t* px);
 
   ThemeColors current_theme_;
 };

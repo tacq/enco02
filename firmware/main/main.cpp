@@ -715,6 +715,39 @@ bool CheckAndExecuteCharacterFallback(const std::string& query) {
   return true;
 }
 
+// 抖耳朵. Run straight off the user's words (see the chat handler) so the ears move while she is
+// still thinking of a reply; the MCP path (face.expression ears) shares the debounce, so a model
+// that also calls the tool does not make her do it twice.
+uint32_t g_last_ears_exec_time = 0;
+bool TwitchEarsNow(bool from_tool) {
+  if (g_display == nullptr) {
+    return false;
+  }
+  if (millis() - g_last_ears_exec_time < 4000) {
+    return g_display->HasEars();  // already doing it
+  }
+  if (g_display->GetUiMode() == Display::UiMode::kChatText) {
+    g_display->SetUiMode(Display::UiMode::kRobotFace);
+  }
+  const bool ok = g_display->TwitchEars();
+  if (ok) {
+    g_last_ears_exec_time = millis();
+  }
+  printf("[ears] %s -> %s\n", from_tool ? "tool" : "voice", ok ? "twitch" : "no ears on this character");
+  return ok;
+}
+
+bool CheckAndExecuteEarsFallback(const std::string& query) {
+  static const char* kWords[] = {"抖耳朵", "抖抖耳朵", "动耳朵", "动动耳朵", "摇耳朵", "耳朵动", "耳朵抖"};
+  for (const char* w : kWords) {
+    if (query.find(w) != std::string::npos) {
+      TwitchEarsNow(false);
+      return true;
+    }
+  }
+  return false;
+}
+
 // The cloud model decides for itself whether to emit an MCP tool call, and for a bare "大声点" it
 // frequently just answers conversationally instead. Matching the user's own transcript is what
 // makes these commands actually reliable.
@@ -1505,7 +1538,7 @@ void InitMcpTools() {
   // param, terse text: every tool adds to the tools/list payload sent at session start.
   engine.AddMcpTool("self.face.expression",
                     "Make a facial expression (做表情). name: happy开心 sad难过 wink眨眼 pout嘟嘴卖萌 "
-                    "surprised惊讶 angry生气 shy害羞 thinking思考 neutral恢复 auto_on/auto_off随机表情开关",
+                    "surprised惊讶 angry生气 shy害羞 thinking思考 neutral恢复 ears抖耳朵 auto_on/auto_off随机表情开关",
                     {
                         {"name", ai_vox::ParamSchema<std::string>{.default_value = "happy"}},
                     });
@@ -2299,6 +2332,7 @@ void loop() {
           if (CheckAndExecuteTimerFallback(chat_message_event->content)) {
             g_last_user_query.clear();
           }
+          CheckAndExecuteEarsFallback(chat_message_event->content);
           if (chat_message_event->content.find("退下") != std::string::npos ||
               chat_message_event->content.find("去休息") != std::string::npos ||
               chat_message_event->content.find("待命") != std::string::npos) {
@@ -2566,6 +2600,14 @@ void loop() {
           SaveDisplayFlag(kAmbientPrefsKey, on);
           printf("on mcp tool call: face.expression random %s\n", on ? "on" : "off");
           engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        } else if (name == "ears") {
+          const bool ok = TwitchEarsNow(true);
+          printf("on mcp tool call: face.expression ears -> %s\n", ok ? "ok" : "no ears");
+          if (ok) {
+            engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+          } else {
+            engine.SendMcpCallError(mcp_tool_call_event->id, "this character has no ears; switch to fox");
+          }
         } else {
           // Showing a face on a hidden face is no answer: bring the character back from chat mode.
           // The camera view is left alone - the user opened it on purpose.

@@ -7,6 +7,7 @@
 #include <string.h>
 #include "sdkconfig.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_err.h"
 #include "esp_check.h"
 #include "freertos/FreeRTOS.h"
@@ -435,13 +436,17 @@ static bool lvgl_port_flush_io_ready_callback(esp_lcd_panel_io_handle_t panel_io
     return need_yield == pdTRUE;
 }
 
+uint32_t lvgl_port_prof_wait_us = 0;
+uint32_t lvgl_port_prof_chunks = 0;
 static void lvgl_port_flush_wait_callback(lv_display_t *disp)
 {
     (void)disp;
     /* LVGL only calls this while a flush is still in flight. The semaphore was drained when that
      * flush started, so a token here is its own completion. The timeout is a safety net only: a
      * 10-row chunk is ~2ms on the wire. */
+    const int64_t t0 = esp_timer_get_time();
     xSemaphoreTake(s_flush_done_sem, pdMS_TO_TICKS(100));
+    lvgl_port_prof_wait_us += (uint32_t)(esp_timer_get_time() - t0);
 }
 
 #if (CONFIG_IDF_TARGET_ESP32P4 && ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0))
@@ -604,6 +609,7 @@ static void lvgl_port_flush_callback(lv_display_t *drv, const lv_area_t *area, u
     lvgl_port_display_ctx_t *disp_ctx = (lvgl_port_display_ctx_t *)lv_display_get_driver_data(drv);
     assert(disp_ctx != NULL);
 
+    lvgl_port_prof_chunks++;
     if (s_pre_flush_cb != NULL) {
         s_pre_flush_cb(area, color_map, s_pre_flush_ctx);
     }

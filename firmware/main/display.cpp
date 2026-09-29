@@ -1,3 +1,4 @@
+#include <esp_attr.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_random.h>
@@ -16,6 +17,140 @@
 #include "core/audio_playback_signal.h"
 #include "display.h"
 #include "video_sink.h"
+
+// Animation profiler: every 5 s, how long LVGL frames take, how many pixels go to the panel and
+// what the warps cost. Off by default; -D ENCO_ANIM_PROFILE=1 to measure.
+#ifndef ENCO_ANIM_PROFILE
+#define ENCO_ANIM_PROFILE 0
+#endif
+#if ENCO_ANIM_PROFILE
+#include <esp_timer.h>
+#include "display/lv_display_private.h"
+extern "C" uint32_t lvgl_port_prof_wait_us;
+extern "C" uint32_t lvgl_port_prof_chunks;
+static struct {
+  int64_t window_us, refr_start_us;
+  uint32_t frames, refr_us, refr_max_us, px, hair_us, ear_us, ticks, tick_gap_max, last_tick_ms;
+  uint32_t layout_us, areas, areas_max, inv_px, full, renders;
+} g_prof;
+static uint32_t g_obj_us[4];
+static void ProfRefr(lv_event_t* e) {
+  const int64_t now = esp_timer_get_time();
+  if (lv_event_get_code(e) == LV_EVENT_REFR_START) {
+    g_prof.refr_start_us = now;
+    return;
+  }
+  if (lv_event_get_code(e) == LV_EVENT_RENDER_START) {
+    lv_display_t* d = lv_display_get_default();
+    g_prof.layout_us += static_cast<uint32_t>(now - g_prof.refr_start_us);
+    g_prof.renders++;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < d->inv_p; i++) {
+      if (d->inv_area_joined[i]) continue;
+      n++;
+      g_prof.inv_px += lv_area_get_size(&d->inv_areas[i]);
+      if (lv_area_get_size(&d->inv_areas[i]) >= 240u * 300u) g_prof.full++;
+    }
+    g_prof.areas += n;
+    g_prof.areas_max = std::max(g_prof.areas_max, static_cast<uint32_t>(d->inv_p));
+    return;
+  }
+  if (g_prof.refr_start_us == 0) {
+    return;
+  }
+  const uint32_t d = static_cast<uint32_t>(now - g_prof.refr_start_us);
+  g_prof.refr_start_us = 0;
+  g_prof.frames++;
+  g_prof.refr_us += d;
+  g_prof.refr_max_us = std::max(g_prof.refr_max_us, d);
+}
+static void ProfTick() {
+  const uint32_t ms = lv_tick_get();
+  if (g_prof.last_tick_ms != 0) {
+    g_prof.tick_gap_max = std::max(g_prof.tick_gap_max, ms - g_prof.last_tick_ms);
+  }
+  g_prof.last_tick_ms = ms;
+  g_prof.ticks++;
+  const int64_t now = esp_timer_get_time();
+  if (g_prof.window_us == 0) {
+    g_prof.window_us = now;
+  }
+  if (now - g_prof.window_us >= 5000000) {
+    const float s = (now - g_prof.window_us) * 1e-6f;
+    printf("[anim] spi wait %.1f ms/s, %.1f chunks/frame\n", lvgl_port_prof_wait_us / 1000.0f / s,
+           g_prof.frames ? static_cast<float>(lvgl_port_prof_chunks) / g_prof.frames : 0.0f);
+    printf("[anim] renders %u, layout %.1f ms/s, areas/render %.1f (max inv_p %u), inv kpx/render %.1f, full %u\n",
+           static_cast<unsigned>(g_prof.renders), g_prof.layout_us / 1000.0f / s,
+           g_prof.renders ? static_cast<float>(g_prof.areas) / g_prof.renders : 0.0f,
+           static_cast<unsigned>(g_prof.areas_max),
+           g_prof.renders ? g_prof.inv_px / 1000.0f / g_prof.renders : 0.0f, static_cast<unsigned>(g_prof.full));
+    lvgl_port_prof_wait_us = 0;
+    lvgl_port_prof_chunks = 0;
+    printf("[anim] draw ms/s: image %.1f petals %.1f face-tree %.1f screen-tree %.1f\n", g_obj_us[0] / 1000.0f / s,
+           g_obj_us[1] / 1000.0f / s, g_obj_us[2] / 1000.0f / s, g_obj_us[3] / 1000.0f / s);
+    memset(g_obj_us, 0, sizeof(g_obj_us));
+    {
+      // CPU share per task over the window (run-time counters are esp_timer microseconds).
+      static TaskStatus_t st[28];
+      static struct { UBaseType_t num; uint32_t rt; } prev[28];
+      static int n_prev = 0;
+      uint32_t total = 0;
+      const UBaseType_t n = uxTaskGetSystemState(st, 28, &total);
+      printf("[anim] cpu:");
+      for (UBaseType_t i = 0; i < n; i++) {
+        uint32_t before = st[i].ulRunTimeCounter;
+        for (int j = 0; j < n_prev; j++) {
+          if (prev[j].num == st[i].xTaskNumber) before = prev[j].rt;
+        }
+        const float pct = (st[i].ulRunTimeCounter - before) / (s * 1e6f) * 100.0f;
+        if (pct >= 2.0f) printf(" %s(p%u,c%d)=%.0f%%", st[i].pcTaskName, (unsigned)st[i].uxCurrentPriority,
+                                (int)st[i].xCoreID, pct);
+      }
+      printf("\n");
+      n_prev = static_cast<int>(n);
+      for (UBaseType_t i = 0; i < n; i++) {
+        prev[i].num = st[i].xTaskNumber;
+        prev[i].rt = st[i].ulRunTimeCounter;
+      }
+    }
+    printf("[anim] %.1f fps, frame avg %.1f max %.1f ms, %u kpx/s, hair %.1f ear %.1f ms/s, "
+           "motion ticks %.1f/s gap max %u ms\n",
+           g_prof.frames / s, g_prof.frames ? g_prof.refr_us / 1000.0f / g_prof.frames : 0.0f,
+           g_prof.refr_max_us / 1000.0f, static_cast<unsigned>(g_prof.px / s / 1000), g_prof.hair_us / 1000.0f / s,
+           g_prof.ear_us / 1000.0f / s, g_prof.ticks / s, static_cast<unsigned>(g_prof.tick_gap_max));
+    const int64_t w = now;
+    memset(&g_prof, 0, sizeof(g_prof));
+    g_prof.window_us = w;
+    g_prof.last_tick_ms = ms;
+  }
+}
+#define PROF_TIME(field, stmt)                          \
+  do {                                                  \
+    const int64_t _t0 = esp_timer_get_time();           \
+    stmt;                                               \
+    g_prof.field += static_cast<uint32_t>(esp_timer_get_time() - _t0); \
+  } while (0)
+// Per-object draw time: [0] portrait image, [1] petal layer, [2] face container incl. children,
+// [3] whole screen tree.
+static int64_t g_obj_t0[4];
+static void ProfObj(lv_event_t* e) {
+  const int i = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
+  const lv_event_code_t c = lv_event_get_code(e);
+  if (c == LV_EVENT_DRAW_MAIN_BEGIN) {
+    g_obj_t0[i] = esp_timer_get_time();
+  } else if (g_obj_t0[i] != 0) {
+    g_obj_us[i] += static_cast<uint32_t>(esp_timer_get_time() - g_obj_t0[i]);
+    g_obj_t0[i] = 0;
+  }
+}
+static void ProfWatch(lv_obj_t* obj, int i, bool children) {
+  lv_obj_add_event_cb(obj, ProfObj, LV_EVENT_DRAW_MAIN_BEGIN, reinterpret_cast<void*>(static_cast<intptr_t>(i)));
+  lv_obj_add_event_cb(obj, ProfObj, children ? LV_EVENT_DRAW_POST_END : LV_EVENT_DRAW_MAIN_END,
+                      reinterpret_cast<void*>(static_cast<intptr_t>(i)));
+}
+#else
+#define PROF_TIME(field, stmt) stmt
+#endif
 
 LV_FONT_DECLARE(font_puhui_16_4);
 LV_FONT_DECLARE(font_awesome_30_4);
@@ -98,7 +233,7 @@ static lv_area_t AreaUnion(const lv_area_t& a, const lv_area_t& b) {
 // --- Wind in the hair ---------------------------------------------------------------------------
 // sin(2*pi*t), to ~0.1%. Called a few times per warped row, where newlib's sinf would cost more
 // than the warp itself.
-static inline float SinTurns(float t) {
+static inline __attribute__((always_inline)) float SinTurns(float t) {
   t -= floorf(t + 0.5f);                  // [-0.5, 0.5)
   float y = 8.0f * t - 16.0f * t * fabsf(t);  // parabola through the sine's zeros and peaks
   return y + 0.225f * (y * fabsf(y) - y);  // one refinement step
@@ -106,7 +241,7 @@ static inline float SinTurns(float t) {
 
 // a + (b - a) * f / 32 per channel, for native RGB565. Green is moved to the top half so all three
 // channels can be scaled with one multiply without spilling into each other.
-static inline uint16_t Lerp565(uint16_t a, uint16_t b, uint32_t f) {
+static inline __attribute__((always_inline)) uint16_t Lerp565(uint16_t a, uint16_t b, uint32_t f) {
   if (f == 0) {
     return a;
   }
@@ -127,8 +262,8 @@ static inline uint16_t Lerp565(uint16_t a, uint16_t b, uint32_t f) {
 // No scratch row needed: within one side the displacement never changes sign, so every pixel reads
 // only from positions the sweep has not written yet as long as the sweep runs towards the reads -
 // left to right when sampling from the right (k > 0), right to left otherwise.
-static void WarpSpan(uint16_t* row, int ax1, int aw, int p0, int p1, int p2, int b0, int b1,
-                     int feather, float k, int lo, int hi) {
+static void IRAM_ATTR WarpSpan(uint16_t* row, int ax1, int aw, int p0, int p1, int p2, int b0, int b1,
+                              int feather, float k, int lo, int hi) {
   if (lo > hi || p1 <= p0 || p2 <= p1) {
     return;
   }
@@ -136,7 +271,7 @@ static void WarpSpan(uint16_t* row, int ax1, int aw, int p0, int p1, int p2, int
   const int32_t step1 = static_cast<int32_t>(k * 65536.0f / static_cast<float>(p1 - p0));
   const int32_t step2 = static_cast<int32_t>(k * 65536.0f / static_cast<float>(p2 - p1));
   const int xmax = ax1 + aw - 1;
-  auto px = [&](int x) {
+  auto px = [&](int x) __attribute__((always_inline)) {
     int32_t d = x <= p1 ? (x - p0) * step1 : (p2 - x) * step2;
     if (body) {
       const int dist = x < b0 ? b0 - x : (x > b1 ? x - b1 : 0);
@@ -241,6 +376,11 @@ Display::Display(esp_lcd_panel_io_handle_t panel_io,
 
   lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
   port_cfg.task_priority = 2;
+  // Core 0. With the character animating, rendering keeps this task busy nearly all the time, and
+  // on core 1 it sat above Arduino's loopTask (pinned there at priority 1), which pumps the voice
+  // engine's events. Core 0 otherwise only runs the Wi-Fi stack, which outranks it anyway, and was
+  // measured >90% idle.
+  port_cfg.task_affinity = 0;
   port_cfg.timer_period_ms = 20;
   // Measured on-device with the RGB565 portrait: peak 7,312 bytes while talking (LVGL's built-in
   // image decoder path runs deeper than the old streaming I4 one, and the vendor default of 7168
@@ -252,8 +392,12 @@ Display::Display(esp_lcd_panel_io_handle_t panel_io,
       .io_handle = panel_io,
       .panel_handle = panel,
       .control_handle = nullptr,
-      .buffer_size = static_cast<uint32_t>(width * 10),
-      .double_buffer = false,
+      // Two half-size buffers rather than one of width * 10: same 4.8 KB of DMA memory, but LVGL
+      // renders (and the pre-flush warps run) on one while the other is still going out over SPI.
+      // With a single buffer the CPU sat idle for every transfer - about a fifth of each second
+      // once the hair is moving.
+      .buffer_size = static_cast<uint32_t>(width * 5),
+      .double_buffer = true,
       .trans_size = 0,
       .hres = static_cast<uint32_t>(width),
       .vres = static_cast<uint32_t>(height),
@@ -291,6 +435,11 @@ Display::Display(esp_lcd_panel_io_handle_t panel_io,
   disp_off_x_ = static_cast<int16_t>(offset_x);
   disp_off_y_ = static_cast<int16_t>(offset_y);
   lvgl_port_set_pre_flush_cb(OnPreFlush, this);
+#if ENCO_ANIM_PROFILE
+  lv_display_add_event_cb(display_, ProfRefr, LV_EVENT_REFR_START, nullptr);
+  lv_display_add_event_cb(display_, ProfRefr, LV_EVENT_RENDER_START, nullptr);
+  lv_display_add_event_cb(display_, ProfRefr, LV_EVENT_REFR_READY, nullptr);
+#endif
 }
 
 Display::~Display() {
@@ -482,6 +631,12 @@ void Display::BuildRobotFace() {
 
   // Falling petals sit above the face sprites and below the caption pill.
   EnsurePetalLayer();
+#if ENCO_ANIM_PROFILE
+  ProfWatch(face_image_, 0, false);
+  if (petal_layer_ != nullptr) ProfWatch(petal_layer_, 1, false);
+  ProfWatch(face_container_, 2, true);
+  ProfWatch(lv_screen_active(), 3, true);
+#endif
 
   // The caption pill. This is the bottom half of the reference HUD, reduced to the part that
   // carries information: what she is saying, or - when nothing is happening - how to talk to her.
@@ -1886,6 +2041,7 @@ void Display::ApplyCharacter() {
   hair_level_bangs_ = 0;
   hair_level_locks_ = 0;
   next_hair_tick_ = face_tick_ + kHairMinGapTicks;
+  ResetEars();
 
   if (cam_avatar_ != nullptr) {
     lv_image_set_src(cam_avatar_, chr_->thumb);
@@ -2112,8 +2268,14 @@ void Display::OnMotionTimer(lv_timer_t* timer) {
   if (esp_get_free_heap_size() < 12000) {
     return;
   }
-  self->UpdatePetals();
+  // Hair and ears first: LVGL drops a newly invalidated area that lies inside one it already has,
+  // so petals drifting through the hair bands then cost nothing extra.
   self->UpdateHairFlow();
+  self->UpdateEars();
+  self->UpdatePetals();
+#if ENCO_ANIM_PROFILE
+  ProfTick();
+#endif
 }
 
 // Advances the wind and marks the hair bands for repaint. The warp itself happens in
@@ -2139,9 +2301,13 @@ void Display::UpdateHairFlow() {
   flow_billow_ = turn(2600);
   flow_flutter_ = turn(950);
 
-  // Repaint each side in three horizontal slabs hugging the band's outline, rather than one box:
-  // the bands are narrow up by her temples and widen towards the shoulders. Stops above the
-  // caption pill, which is never warped.
+  // Repaint each side in horizontal slabs hugging the band's outline, rather than one box: the
+  // bands are narrow up by her temples and widen towards the shoulders. Lower down, where a still
+  // shoulder or arm lies inside the band, a slab is split into the hair outside it and the hair
+  // inside it - WarpSpan() never changes body pixels, so there is nothing new to show there.
+  // Rows with no amplitude are never warped and are left out too. Stops above the caption pill,
+  // which is never warped. At most 2 sides x 5 slabs x 2 boxes = 20 areas, well within LVGL's
+  // 32-area invalidation buffer alongside the petals (overflowing it repaints the whole screen).
   lv_area_t img;
   lv_obj_get_coords(face_image_, &img);
   lv_area_t box;
@@ -2152,25 +2318,47 @@ void Display::UpdateHairFlow() {
     lv_obj_get_coords(subtitle_box_, &pill);
     bottom = std::min<int32_t>(bottom, pill.y1 - 4);
   }
-  constexpr int kSlabs = 3;
+  const int last_row = std::min<int>(f->rows - 1, bottom - img.y1 - f->y0);
+  constexpr int kSlabs = 5;
+  auto invalidate = [&](int lo, int hi, int r0, int r1) {
+    lv_area_t a;
+    a.x1 = img.x1 + std::max(0, lo);
+    a.x2 = img.x1 + std::min(ENCO_FACE_W - 1, hi);
+    a.y1 = img.y1 + f->y0 + r0;
+    a.y2 = img.y1 + f->y0 + r1;
+    if (a.x1 <= a.x2 && a.y1 <= a.y2) {
+      lv_obj_invalidate_area(face_container_, &a);
+    }
+  };
   for (int side = 0; side < 2; side++) {
     for (int slab = 0; slab < kSlabs; slab++) {
-      const int r0 = f->rows * slab / kSlabs;
-      const int r1 = f->rows * (slab + 1) / kSlabs;
-      int lo = ENCO_FACE_W;
-      int hi = -1;
-      for (int r = r0; r < r1; r++) {
+      const int s0 = f->rows * slab / kSlabs;
+      const int s1 = std::min(f->rows * (slab + 1) / kSlabs - 1, last_row);
+      // Outer box: from p0 to the body's near edge; inner box: from the body's far edge to p2
+      // (rows without body count towards both, so each box still covers their whole span).
+      int olo = ENCO_FACE_W, ohi = -1, ilo = ENCO_FACE_W, ihi = -1;
+      int r0 = -1, r1 = -1;
+      for (int r = s0; r <= s1; r++) {
+        if (f->amp[r] == 0) {
+          continue;
+        }
         const int16_t* s = f->spans + r * 10 + side * 5;
-        lo = std::min<int>(lo, s[0] + 1);
-        hi = std::max<int>(hi, s[2] - 1);
+        const bool body = s[3] <= s[4] && f->feather > 0;
+        olo = std::min<int>(olo, s[0] + 1);
+        ohi = std::max<int>(ohi, body ? s[3] - 1 : s[2] - 1);
+        ilo = std::min<int>(ilo, body ? s[4] + 1 : s[0] + 1);
+        ihi = std::max<int>(ihi, s[2] - 1);
+        if (r0 < 0) r0 = r;
+        r1 = r;
       }
-      lv_area_t a;
-      a.x1 = img.x1 + std::max(0, lo);
-      a.x2 = img.x1 + std::min(ENCO_FACE_W - 1, hi);
-      a.y1 = img.y1 + f->y0 + r0;
-      a.y2 = std::min<int32_t>(img.y1 + f->y0 + r1 - 1, bottom);
-      if (a.x1 <= a.x2 && a.y1 <= a.y2) {
-        lv_obj_invalidate_area(face_container_, &a);
+      if (r0 < 0) {
+        continue;
+      }
+      if (ohi + 1 >= ilo) {
+        invalidate(std::min(olo, ilo), std::max(ohi, ihi), r0, r1);  // they touch: one box
+      } else {
+        invalidate(olo, ohi, r0, r1);
+        invalidate(ilo, ihi, r0, r1);
       }
     }
   }
@@ -2179,13 +2367,19 @@ void Display::UpdateHairFlow() {
 void Display::OnPreFlush(const lv_area_t* area, uint8_t* px_map, void* ctx) {
   auto* self = static_cast<Display*>(ctx);
   if (self != nullptr) {
-    self->WarpHairChunk(area, reinterpret_cast<uint16_t*>(px_map));
+    // Ears first: they compare against the untouched portrait to spot overlays (see there).
+    PROF_TIME(ear_us, self->WarpEarsChunk(area, reinterpret_cast<uint16_t*>(px_map)));
+    PROF_TIME(hair_us, self->WarpHairChunk(area, reinterpret_cast<uint16_t*>(px_map)));
+#if ENCO_ANIM_PROFILE
+    g_prof.px += static_cast<uint32_t>((area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1));
+#endif
   }
 }
 
-// Called for every chunk LVGL sends to the panel (10 rows at most with our draw buffer), right
+// Called for every chunk LVGL sends to the panel (at most 5 full-width rows' worth of pixels with
+// our draw buffers), right
 // before the byte swap. Rows that cross a hair band are resampled sideways in place.
-void Display::WarpHairChunk(const lv_area_t* area, uint16_t* px) {
+void IRAM_ATTR Display::WarpHairChunk(const lv_area_t* area, uint16_t* px) {
   const enco_hair_flow_t* f = chr_->hair_flow;
   if (f == nullptr || ui_mode_ != UiMode::kRobotFace || face_image_ == nullptr || face_container_ == nullptr ||
       lv_obj_has_flag(face_container_, LV_OBJ_FLAG_HIDDEN)) {
@@ -2270,6 +2464,390 @@ void Display::WarpHairChunk(const lv_area_t* area, uint16_t* px) {
         }
       }
       WarpSpan(row, ax1, aw, p0, p1, p2, b0, b1, f->feather, k, lo, hi);
+    }
+  }
+}
+
+// --- Twitching ears ------------------------------------------------------------------------------
+//
+// The motion follows how fox- and cat-eared characters are animated to read as cute and alive:
+//  - a twitch is a flick, not a sweep: a very fast push (held ~60-70 ms) and a springy return
+//    that overshoots a little past rest before it settles;
+//  - the tip trails the root, so the ear bends and whips rather than turning like a board;
+//  - the two ears are rarely in lockstep - one leads and the other follows a few tens of ms later,
+//    and single or double flicks of one ear read as more alive than both at once;
+//  - the ears carry the mood: perked (tips in) when alert or surprised, splayed and drooping when
+//    sad or shy, pinned back when cross, one tilted when thinking, perked while listening;
+//  - dangling ornaments hang plumb and keep swinging after the ear stops (secondary motion).
+
+using EarStep = Display::EarStep;
+
+// 抖耳朵: a quick shake of both ears (the second trailing by 30 ms), a flick of each, then a perk.
+static const EarStep kEarShake[] = {
+    {0, 60, 1, 11},    {30, 60, 2, 11},   {120, 60, 1, -7}, {150, 60, 2, -7},
+    {240, 60, 1, 10},  {270, 60, 2, 10},  {360, 60, 1, -6}, {390, 60, 2, -6},
+    {480, 55, 1, 8},   {510, 55, 2, 8},   {600, 50, 3, -3},
+    {950, 70, 1, 12},  {1250, 70, 2, 12}, {1600, 110, 3, -6},
+};
+static const EarStep kEarFlick[] = {{0, 70, 1, 10}};
+static const EarStep kEarDoubleFlick[] = {{0, 60, 1, 10}, {170, 60, 1, 8}};
+static const EarStep kEarBoth[] = {{0, 70, 1, 9}, {40, 70, 2, 9}};
+static const EarStep kEarAlternate[] = {{0, 70, 1, 10}, {220, 70, 2, 10}};
+static const EarStep kEarPerk[] = {{0, 90, 3, -8}};
+#define EAR_SCRIPT(s) s, static_cast<uint8_t>(sizeof(s) / sizeof(s[0]))
+
+constexpr float kDeg = 0.01745329f;
+constexpr float kEarMaxOut = 0.30f;      // rad either way; the rig's margins are sized for this
+constexpr float kEarTipMaxBend = 0.12f;  // rad the tip may trail the root
+constexpr float kEarRootHz = 7.0f, kEarRootZeta = 0.35f;  // snappy, ~30% overshoot
+constexpr float kEarTipHz = 5.0f, kEarTipZeta = 0.3f;
+constexpr float kEarPendulumPx = 60.0f;  // how hard an ornament is swung by its anchor's jerk
+constexpr float kTwoPi = 6.2831853f;
+
+// Mood poses: outward degrees for (ear 0, ear 1) and how quickly the ears settle into them.
+struct EarPose {
+  const char* expr;
+  int8_t out0, out1;
+  uint16_t tau_ms;
+};
+static const EarPose kEarPoses[] = {
+    {"happy", -3, -3, 120}, {"surprised", -7, -7, 40}, {"sad", 14, 14, 450},  {"angry", 11, 11, 90},
+    {"shy", 8, 8, 220},     {"thinking", 7, -2, 260},  {"pout", 5, 5, 160},   {"wink", 0, 0, 150},
+};
+
+// One semi-implicit Euler step of a damped spring pulling `x` towards `target`.
+static inline void EarSpring(float& x, float& v, float target, float hz, float zeta, float h) {
+  const float w = kTwoPi * hz;
+  v += (w * w * (target - x) - 2.0f * zeta * w * v) * h;
+  x += v * h;
+}
+
+void Display::ResetEars() {
+  for (auto& e : ears_) {
+    e = Ear{};
+  }
+  ear_script_ = nullptr;
+  ear_last_ms_ = 0;
+  ear_last_expr_ = -1;
+  ear_next_idle_ms_ = lv_tick_get() + 6000 + esp_random() % 6000;
+}
+
+void Display::StartEarScript(const EarStep* steps, uint8_t len, float gain, bool mirror) {
+  ear_script_ = steps;
+  ear_script_len_ = len;
+  ear_script_gain_ = gain;
+  ear_script_mirror_ = mirror ? 1 : 0;
+  ear_script_t0_ = lv_tick_get();
+}
+
+bool Display::TwitchEars() {
+  lvgl_port_lock(0);
+  const bool ok = chr_->ear_count > 0;
+  if (ok) {
+    StartEarScript(EAR_SCRIPT(kEarShake), 1.0f, false);
+    ear_next_idle_ms_ = lv_tick_get() + 8000 + esp_random() % 6000;
+  }
+  lvgl_port_unlock();
+  return ok;
+}
+
+// Advances the ear springs by the time since the last tick and repaints the ears if they moved.
+void Display::UpdateEars() {
+  const int n = std::min<int>(chr_->ear_count, kMaxEars);
+  if (n == 0 || face_container_ == nullptr || lv_obj_has_flag(face_container_, LV_OBJ_FLAG_HIDDEN)) {
+    return;
+  }
+  const uint32_t now = lv_tick_get();
+  uint32_t dt_ms = now - ear_last_ms_;
+  if (ear_last_ms_ == 0) {
+    // First tick (boot, new character): ornament anchors start where the art has them.
+    for (int e = 0; e < n; e++) {
+      for (int i = 0; i < chr_->ears[e].deco_count && i < 4; i++) {
+        ears_[e].anchor_x[i] = chr_->ears[e].deco[i].x;
+        ears_[e].anchor_vx[i] = 0;
+      }
+    }
+    dt_ms = kMotionTickMs;
+  }
+  ear_last_ms_ = now;
+  if (dt_ms > 200) {
+    dt_ms = kMotionTickMs;  // back from a pause (chat mode, low heap): carry on, don't leap
+  }
+
+  // Mood pose from the expression on screen, with a little accent when it changes.
+  float pose[kMaxEars] = {0, 0};
+  uint16_t tau_ms = 200;
+  const char* expr = expr_index_ >= 0 ? chr_->exprs[expr_index_].name : nullptr;
+  if (expr != nullptr) {
+    for (const auto& p : kEarPoses) {
+      if (strcmp(p.expr, expr) == 0) {
+        pose[0] = p.out0 * kDeg;
+        pose[1] = p.out1 * kDeg;
+        tau_ms = p.tau_ms;
+        break;
+      }
+    }
+  } else if (current_emotion_ == "sleepy") {
+    pose[0] = pose[1] = 10 * kDeg;
+    tau_ms = 600;
+  } else if (ambient_mode_ == 2) {
+    pose[0] = pose[1] = -3 * kDeg;  // listening: perked, all ears
+    tau_ms = 150;
+  }
+  if (expr_index_ != ear_last_expr_) {
+    ear_last_expr_ = expr_index_;
+    if (expr != nullptr && ear_script_ == nullptr) {
+      const bool mirror = esp_random() & 1;
+      if (strcmp(expr, "happy") == 0) {
+        StartEarScript(EAR_SCRIPT(kEarPerk), 0.8f, false);
+      } else if (strcmp(expr, "surprised") == 0) {
+        StartEarScript(EAR_SCRIPT(kEarPerk), 1.2f, false);
+      } else if (strcmp(expr, "wink") == 0) {
+        StartEarScript(EAR_SCRIPT(kEarFlick), 1.0f, mirror);
+      } else if (strcmp(expr, "pout") == 0) {
+        StartEarScript(EAR_SCRIPT(kEarDoubleFlick), 0.9f, mirror);
+      } else if (strcmp(expr, "shy") == 0) {
+        StartEarScript(EAR_SCRIPT(kEarFlick), 0.6f, mirror);
+      }
+    }
+  }
+
+  // Now and then, an idle twitch - mostly one ear, never the same pattern on a clock.
+  if (ear_script_ == nullptr && static_cast<int32_t>(now - ear_next_idle_ms_) >= 0) {
+    const uint32_t r = esp_random() % 100;
+    const bool mirror = esp_random() & 1;
+    const float gain = 0.7f + static_cast<float>(esp_random() % 31) * 0.01f;
+    if (r < 45) {
+      StartEarScript(EAR_SCRIPT(kEarFlick), gain, mirror);
+    } else if (r < 70) {
+      StartEarScript(EAR_SCRIPT(kEarDoubleFlick), gain, mirror);
+    } else if (r < 85) {
+      StartEarScript(EAR_SCRIPT(kEarBoth), gain, mirror);
+    } else {
+      StartEarScript(EAR_SCRIPT(kEarAlternate), gain, mirror);
+    }
+    ear_next_idle_ms_ = now + 5000 + esp_random() % 9000;
+  }
+
+  // Integrate in ~5 ms steps: the kicks are only 60-70 ms long and the springs are stiff.
+  const int steps = std::max<int>(1, (dt_ms + 4) / 5);
+  const float h = static_cast<float>(dt_ms) * 0.001f / static_cast<float>(steps);
+  const float pose_k = std::min(1.0f, h * 1000.0f / static_cast<float>(tau_ms));
+  uint32_t script_end = 0;
+  for (int k = 0; k < steps; k++) {
+    float kick[kMaxEars] = {0, 0};
+    if (ear_script_ != nullptr) {
+      const uint32_t t = now - dt_ms + static_cast<uint32_t>((k + 1) * dt_ms / steps) - ear_script_t0_;
+      for (int s = 0; s < ear_script_len_; s++) {
+        const EarStep& st = ear_script_[s];
+        script_end = std::max<uint32_t>(script_end, st.at_ms + st.hold_ms);
+        if (t >= st.at_ms && t < static_cast<uint32_t>(st.at_ms + st.hold_ms)) {
+          const uint8_t m = ear_script_mirror_ ? static_cast<uint8_t>(((st.ears & 1) << 1) | ((st.ears >> 1) & 1))
+                                               : st.ears;
+          for (int e = 0; e < n; e++) {
+            if (m & (1 << e)) {
+              kick[e] += st.deg * kDeg * ear_script_gain_;
+            }
+          }
+        }
+      }
+    }
+    for (int e = 0; e < n; e++) {
+      Ear& E = ears_[e];
+      const enco_ear_t& r = chr_->ears[e];
+      E.pose += (pose[e] - E.pose) * pose_k;
+      const float target = std::min(kEarMaxOut, std::max(-kEarMaxOut, E.pose + kick[e]));
+      EarSpring(E.base, E.base_v, target, kEarRootHz, kEarRootZeta, h);
+      E.base = std::min(kEarMaxOut, std::max(-kEarMaxOut, E.base));
+      EarSpring(E.tip, E.tip_v, E.base, kEarTipHz, kEarTipZeta, h);
+      E.tip = std::min(E.base + kEarTipMaxBend, std::max(E.base - kEarTipMaxBend, E.tip));
+
+      // Ornaments: a spring towards the ear's angle - or, by `hang`, towards plumb - swung by the
+      // sideways jerk of the point they hang from.
+      const float sb = r.out_sign * E.base;
+      const float st = r.out_sign * E.tip;
+      const float lx = static_cast<float>(r.tip_x - r.pivot_x);
+      const float ly = static_cast<float>(r.tip_y - r.pivot_y);
+      const float inv_l2 = 1.0f / (lx * lx + ly * ly);
+      for (int i = 0; i < r.deco_count && i < 4; i++) {
+        const enco_ear_deco_t& d = r.deco[i];
+        const float vx = static_cast<float>(d.x - r.pivot_x);
+        const float vy = static_cast<float>(d.y - r.pivot_y);
+        const float s = std::min(1.0f, std::max(0.0f, (vx * lx + vy * ly) * inv_l2));
+        const float th = sb + (st - sb) * s;
+        const float x = r.pivot_x + cosf(th) * vx - sinf(th) * vy;
+        const float vel = (x - E.anchor_x[i]) / h;
+        const float acc = (vel - E.anchor_vx[i]) / h;
+        E.anchor_x[i] = x;
+        E.anchor_vx[i] = vel;
+        const float hang = d.hang * (1.0f / 255.0f);
+        const float w = kTwoPi * d.hz10 * 0.1f;
+        const float z = d.zeta100 * 0.01f;
+        // Anchor jerked right -> the ornament's lower end lags left -> clockwise (+).
+        E.deco_v[i] += (w * w * ((1.0f - hang) * sb - E.deco[i]) - 2.0f * z * w * E.deco_v[i] +
+                        acc / kEarPendulumPx) * h;
+        E.deco[i] = std::min(0.4f, std::max(-0.4f, E.deco[i] + E.deco_v[i] * h));
+      }
+    }
+  }
+  if (ear_script_ != nullptr && now - ear_script_t0_ > script_end + 20) {
+    ear_script_ = nullptr;
+  }
+
+  // Warp constants for WarpEarsChunk(), and a repaint if anything visibly moved.
+  lv_area_t img;
+  lv_obj_get_coords(face_image_, &img);
+  lv_area_t clip;
+  lv_obj_get_coords(face_container_, &clip);
+  for (int e = 0; e < n; e++) {
+    Ear& E = ears_[e];
+    const enco_ear_t& r = chr_->ears[e];
+    E.sb = r.out_sign * E.base;
+    E.st = r.out_sign * E.tip;
+    float state[6] = {E.sb, E.st, 0, 0, 0, 0};
+    float biggest = std::max(fabsf(E.sb), fabsf(E.st));
+    const float lx = static_cast<float>(r.tip_x - r.pivot_x);
+    const float ly = static_cast<float>(r.tip_y - r.pivot_y);
+    const float inv_l2 = 1.0f / (lx * lx + ly * ly);
+    for (int i = 0; i < r.deco_count && i < 4; i++) {
+      const enco_ear_deco_t& d = r.deco[i];
+      const float vx = static_cast<float>(d.x - r.pivot_x);
+      const float vy = static_cast<float>(d.y - r.pivot_y);
+      const float s = std::min(1.0f, std::max(0.0f, (vx * lx + vy * ly) * inv_l2));
+      const float th = E.sb + (E.st - E.sb) * s;
+      E.fx[i] = r.pivot_x + cosf(th) * vx - sinf(th) * vy;
+      E.fy[i] = r.pivot_y + sinf(th) * vx + cosf(th) * vy;
+      E.dcos[i] = cosf(E.deco[i]);
+      E.dsin[i] = sinf(E.deco[i]);
+      state[2 + i] = E.deco[i];
+      biggest = std::max(biggest, fabsf(E.deco[i]));
+    }
+    E.active = biggest > 0.002f;
+    float moved = 0;
+    for (int j = 0; j < 6; j++) {
+      moved = std::max(moved, fabsf(state[j] - E.drawn[j]));
+    }
+    if (moved > 0.0006f) {
+      memcpy(E.drawn, state, sizeof(state));
+      lv_area_t a;
+      a.x1 = std::max<int32_t>(clip.x1, img.x1 + r.box_x);
+      a.y1 = std::max<int32_t>(clip.y1, img.y1 + r.box_y);
+      a.x2 = std::min<int32_t>(clip.x2, img.x1 + r.box_x + r.box_w - 1);
+      a.y2 = std::min<int32_t>(clip.y2, img.y1 + r.box_y + r.box_h - 1);
+      if (a.x1 <= a.x2 && a.y1 <= a.y2) {
+        lv_obj_invalidate_area(face_container_, &a);
+      }
+    }
+  }
+}
+
+// Rotates the ears inside one flushed chunk. Unlike the hair, a rotation moves pixels across rows,
+// and a chunk only holds a few of them - so the source is the base portrait in flash, which is always
+// all there. Anything drawn over the portrait (a falling petal, a card) shows up as a pixel that
+// differs from the portrait at that spot, and is left alone.
+void IRAM_ATTR Display::WarpEarsChunk(const lv_area_t* area, uint16_t* px) {
+  const int n = std::min<int>(chr_->ear_count, kMaxEars);
+  if (n == 0 || ui_mode_ != UiMode::kRobotFace || face_image_ == nullptr || face_container_ == nullptr ||
+      lv_obj_has_flag(face_container_, LV_OBJ_FLAG_HIDDEN)) {
+    return;
+  }
+  bool any = false;
+  for (int e = 0; e < n; e++) {
+    any = any || ears_[e].active;
+  }
+  if (!any) {
+    return;
+  }
+  const int ax1 = area->x1 - disp_off_x_;
+  const int ay1 = area->y1 - disp_off_y_;
+  const int ax2 = area->x2 - disp_off_x_;
+  const int ay2 = area->y2 - disp_off_y_;
+  const int aw = ax2 - ax1 + 1;
+  lv_area_t img;
+  lv_obj_get_coords(face_image_, &img);
+  lv_area_t clip;
+  lv_obj_get_coords(face_container_, &clip);
+  const uint16_t* base = reinterpret_cast<const uint16_t*>(chr_->base->data);
+  constexpr int W = ENCO_FACE_W;
+  constexpr int H = ENCO_FACE_H;
+
+  for (int e = 0; e < n; e++) {
+    const Ear& E = ears_[e];
+    if (!E.active) {
+      continue;
+    }
+    const enco_ear_t& r = chr_->ears[e];
+    const int x_lo = std::max<int>(std::max<int>(ax1, clip.x1), img.x1 + r.box_x);
+    const int x_hi = std::min<int>(std::min<int>(ax2, clip.x2), img.x1 + r.box_x + r.box_w - 1);
+    const int y_lo = std::max<int>(std::max<int>(ay1, clip.y1), img.y1 + r.box_y);
+    const int y_hi = std::min<int>(std::min<int>(ay2, clip.y2), img.y1 + r.box_y + r.box_h - 1);
+    if (x_lo > x_hi || y_lo > y_hi) {
+      continue;
+    }
+    const float cx = r.pivot_x;
+    const float cy = r.pivot_y;
+    const float lx = static_cast<float>(r.tip_x - r.pivot_x);
+    const float ly = static_cast<float>(r.tip_y - r.pivot_y);
+    const float inv_l2 = 1.0f / (lx * lx + ly * ly);
+    const float bend = E.st - E.sb;
+    for (int y = y_lo; y <= y_hi; y++) {
+      const int py = y - img.y1;  // portrait coordinates from here on
+      if (py < 0 || py >= H) {
+        continue;
+      }
+      const int bi = (py - r.box_y) * r.box_w - r.box_x;
+      const uint8_t* wrow = r.weight + bi;
+      const uint8_t* drow = r.deco_map + bi;
+      uint16_t* row = px + (y - ay1) * aw - ax1;
+      const uint16_t* brow = base + py * W;
+      const float vy = static_cast<float>(py) - cy;
+      for (int x = x_lo; x <= x_hi; x++) {
+        const int pxx = x - img.x1;
+        if (pxx < 0 || pxx >= W) {
+          continue;
+        }
+        const uint8_t wv = wrow[pxx];
+        const uint8_t dv = drow[pxx];
+        if (wv == 0 && (dv & 63) == 0) {
+          continue;
+        }
+        if (row[x] != brow[pxx]) {
+          continue;  // something is drawn over her here
+        }
+        const float vx = static_cast<float>(pxx) - cx;
+        const float s = std::min(1.0f, std::max(0.0f, (vx * lx + vy * ly) * inv_l2));
+        const float th = E.sb + bend * s;
+        const float th2 = th * th;
+        const float c = 1.0f - 0.5f * th2;                  // cos, sin to < 0.1% at 0.4 rad
+        const float sn = th * (1.0f - th2 * (1.0f / 6.0f));
+        const float wd = (dv & 63) * (1.0f / 63.0f);
+        const float k = (1.0f - wd) * wv * (1.0f / 255.0f);
+        // Where this pixel comes from: turned back about the root by the local bend angle...
+        float sx = pxx + k * (cx + c * vx + sn * vy - pxx);
+        float sy = py + k * (cy - sn * vx + c * vy - py);
+        if (wd > 0.0f) {
+          // ...or about the ornament's carried anchor by the ornament's own angle.
+          const int j = dv >> 6;
+          const enco_ear_deco_t& d = r.deco[j];
+          const float qx = pxx - E.fx[j];
+          const float qy = py - E.fy[j];
+          sx += wd * (d.x + E.dcos[j] * qx + E.dsin[j] * qy - pxx);
+          sy += wd * (d.y - E.dsin[j] * qx + E.dcos[j] * qy - py);
+        }
+        sx = std::min(static_cast<float>(W - 1), std::max(0.0f, sx));
+        sy = std::min(static_cast<float>(H - 1), std::max(0.0f, sy));
+        const int qx32 = static_cast<int>(sx * 32.0f);
+        const int qy32 = static_cast<int>(sy * 32.0f);
+        const int ix = qx32 >> 5;
+        const int iy = qy32 >> 5;
+        const int ix1 = std::min(ix + 1, W - 1);
+        const int iy1 = std::min(iy + 1, H - 1);
+        const uint32_t fx = qx32 & 31;
+        const uint32_t fy = qy32 & 31;
+        const uint16_t* s0 = base + iy * W;
+        const uint16_t* s1 = base + iy1 * W;
+        row[x] = Lerp565(Lerp565(s0[ix], s0[ix1], fx), Lerp565(s1[ix], s1[ix1], fx), fy);
+      }
     }
   }
 }

@@ -45,6 +45,33 @@ typedef struct {
   const int16_t* spans;
 } enco_hair_flow_t;
 
+// An ornament riding on an ear (a flower, an earring, a bead string). It is carried along with the
+// ear's root but turns about `x, y` by an angle of its own: a damped spring that pulls it towards
+// the ear's angle, or - by `hang` / 255 - towards hanging plumb. hz10 / 10 is the swing frequency,
+// zeta100 / 100 the damping ratio.
+typedef struct {
+  int16_t x, y;
+  uint8_t hang;
+  uint8_t hz10;
+  uint8_t zeta100;
+} enco_ear_deco_t;
+
+// One ear: a bone turning about its root (pivot) towards its tip. weight[] (box_w x box_h, from
+// box_x, box_y) is how much each pixel follows the ear, 0..255; deco_map[] is (ornament << 6) |
+// how much it follows that ornament instead, 0..63. out_sign turns "outward" (positive) into a
+// screen rotation: -1 for her left-on-screen ear (tip goes left), +1 for the other.
+typedef struct {
+  int16_t box_x, box_y;
+  uint8_t box_w, box_h;
+  int16_t pivot_x, pivot_y;
+  int16_t tip_x, tip_y;
+  int8_t out_sign;
+  uint8_t deco_count;
+  enco_ear_deco_t deco[4];
+  const uint8_t* weight;
+  const uint8_t* deco_map;
+} enco_ear_t;
+
 // Everything display.cpp needs to draw and animate one character.
 typedef struct {
   const char* id;
@@ -81,6 +108,10 @@ typedef struct {
 
   // Wind in the long hair, warped at runtime (display.cpp WarpHairChunk). NULL: no flow.
   const enco_hair_flow_t* hair_flow;
+
+  // Twitching ears, warped at runtime (display.cpp WarpEarsChunk). NULL / 0: none.
+  const enco_ear_t* ears;
+  uint8_t ear_count;
 } enco_character_t;
 
 #if ENCO_CHAR_K3
