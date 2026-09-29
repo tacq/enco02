@@ -161,6 +161,26 @@ class CamLink {
   void HandleLine(const char* line);
   void ApplyTracking(int dx, int dy, int conf, int lean = 0);
 
+  // Face tracking. The cam's face detector reports a few times a second rather than every 80ms, so
+  // instead of ApplyTracking()'s per-report step it aims a glide at where the face should end up and
+  // lets the servo controller ease there on its own clock - smooth between sparse reports.
+  // `age_ms` is how old the picture behind the report is; the aim is taken from where the head was
+  // pointing then (see AnglesAt()).
+  void ApplyFaceTracking(int dx, int dy, int conf, int roll, uint32_t age_ms);
+
+  // Short history of where the head pointed (yaw / pitch servo angles), sampled every
+  // kAngleHistStepMs from Poll() while tracking, and a lookup into it.
+  void RecordAngles(uint32_t now);
+  void AnglesAt(uint32_t t, float* yaw, float* pitch) const;
+
+  // Reads one binary face packet (A5 F1 already consumed), checks its CRC and hands it on.
+  void ReceiveFacePacket();
+
+  // Bookkeeping for anything that arrived from the cam: presence, and for tracking reports the
+  // armed-state resync and the vision-request retry that used to hang off 'T' lines.
+  void NoteCamAlive();
+  void NoteTrackingReport();
+
   // Aims the roll servo so the head tilts with the finger's lean (degrees, + = tip to the right).
   void MirrorLean(int lean);
 
@@ -219,12 +239,28 @@ class CamLink {
   bool recentred_ = false;
 
   // Where the roll glide was last aimed (ServoController::kDefaultAngle = upright), and which way a
-  // lean maps onto it. +1: finger tip to the right of the picture -> roll angle up.
+  // lean maps onto it. +1: finger tip / head top to the right of the picture -> roll angle up.
   float roll_target_ = 90.0f;
-  int8_t roll_dir_ = 1;
+  int8_t roll_dir_ = -1;
 
   // The old face-tracking cam firmware sends 4-field T lines; say so once rather than per line.
   bool legacy_warned_ = false;
+
+  // Face packets: last sequence number and counters for the periodic log line.
+  uint8_t face_seq_ = 0;
+  uint32_t face_ok_ = 0;
+  uint32_t face_bad_ = 0;
+  uint32_t face_last_ms_ = 0;
+  uint32_t face_period_ms_ = 0;  // smoothed interval between face packets
+
+  // 40 x 20ms = 800ms of head angles, comfortably more than a face report's age (~150-300ms).
+  static constexpr uint8_t kAngleHistLen = 40;
+  static constexpr uint32_t kAngleHistStepMs = 20;
+  uint32_t angle_hist_ms_[kAngleHistLen] = {0};
+  float angle_hist_yaw_[kAngleHistLen] = {0};
+  float angle_hist_pitch_[kAngleHistLen] = {0};
+  uint8_t angle_hist_head_ = 0;
+  uint8_t angle_hist_n_ = 0;
 
   // Tracking is suspended for the duration of a look so the head holds still
   // for the photo; this remembers whether to switch it back on afterwards.
@@ -261,7 +297,8 @@ class CamLink {
   void LearnAxis(bool yaw, int offset, float applied_deg, bool at_limit, uint32_t now);
   void LoadTrackDirs();
   void SaveTrackDirs();
-  int8_t yaw_dir_ = -1;   // yaw angle up = head turns LEFT, so a subject on the right (dx > 0) needs yaw DOWN
+  // Defaults for the face-tracking cam build (see kDefaultYawDir in cam_link.cpp); NVS overrides.
+  int8_t yaw_dir_ = 1;
   int8_t pitch_dir_ = 1;  // pitch angle up = look down, subject below (dy > 0) needs pitch UP
   AxisLearn yaw_learn_;
   AxisLearn pitch_learn_;

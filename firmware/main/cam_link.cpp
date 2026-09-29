@@ -146,8 +146,8 @@ constexpr float kLeanRetargetDeg = 2.0f;
 // expression, not a correction, and nothing is waiting on it.
 constexpr float kLeanGlideScale = 0.6f;
 
-// Finger out of sight this long: glide back to the neutral pose, once, and wait there - which is
-// also where the user is most likely to raise it again.
+// Face (or, in finger builds, finger) out of sight this long: glide back to the neutral pose, once,
+// and wait there - which is also where the user is most likely to reappear.
 constexpr uint32_t kFingerLostRecentreMs = 4000;
 constexpr float kRecentreGlideScale = 0.6f;
 // Armed by the gesture (not by voice or the web page) and no finger for this long: the user has
@@ -160,11 +160,64 @@ constexpr uint32_t kGestureIdleOffMs = 20000;
 constexpr uint32_t kPresenceTimeoutMs = 8000;
 constexpr uint32_t kPingIntervalMs = 3000;
 
+// Default yaw and roll directions for the face-tracking camera firmware, and the NVS keys they are
+// saved under. Both are the reverse of what the finger build used: measured live (2026-09-28), the
+// head turned to ITS left when the user moved to their left (away from them - it should turn to its
+// right, towards them), and tilted the same way as the user instead of mirroring. Both axes flipping
+// together is what a horizontally mirrored picture does; the Arduino 2.0.x camera driver the face
+// build moved to evidently delivers the OV2640's picture the other way round. New keys, so a value
+// saved for the finger build cannot bring the old sense back; the web page's flip buttons still work
+// and are saved under these keys.
+constexpr int8_t kDefaultYawDir = 1;
+constexpr int8_t kDefaultRollDir = -1;
+constexpr const char* kYawDirKey = "ydir_f";
+constexpr const char* kRollDirKey = "rdir_f";
+
 // Video framing. The magic is two bytes because a single 0xA5 can occur as
 // line noise on a floating RX pin, and a false positive costs a whole frame.
 constexpr uint8_t kFrameMagic0 = 0xA5;
 constexpr uint8_t kFrameMagic1 = 0x5A;
 constexpr size_t kFrameHeaderRest = 8;  // len, w, h, crc - the magic is already read
+
+// Face packet: A5 F1 | seq dx dy roll conf size | crc16 (see SendFacePacket() in the cam's
+// cam_main.cpp). Fixed length, so there is nothing to parse - eight bytes read straight into place.
+constexpr uint8_t kFaceMagic1 = 0xF1;
+constexpr size_t kFacePacketRest = 9;  // seq dx dy roll conf size age crc16
+
+// Face tracking (ApplyFaceTracking). Degrees of head turn per unit of frame offset: the OV2640's
+// lens sees ~65 deg across and ~50 deg down, and dx/dy span -100..100 of that.
+constexpr float kFaceYawDegPerUnit = 0.33f;
+constexpr float kFacePitchDegPerUnit = 0.25f;
+// Fraction of the measured correction aimed for per report.
+//
+// This used to be ~0.5, because a report describes a picture one detection old and the head had
+// usually moved some of the way since: aiming for the whole offset from where the head is NOW
+// double-counts that movement, overshoots, then hunts. So it crept up on the face over 2-3 reports -
+// the slow settle the user noticed. Now each report carries the picture's age and the aim is taken
+// from where the head was pointing WHEN THE PICTURE WAS TAKEN (latency compensation, see
+// AnglesAt()): target = angle_then + offset. That target is right regardless of how far the head has
+// moved since, so nearly all of the offset can be corrected at once. Not quite 1.0: the degrees-
+// per-unit figures above are the lens' nominal field of view, not a calibration.
+//
+// Pitch gets a narrower deadband: a vertical unit is fewer degrees than a horizontal one, and the
+// picture is only 3/4 as tall as it is wide, so a face drifts off the top or bottom much sooner.
+constexpr float kFaceYawGain = 0.85f;
+constexpr float kFacePitchGain = 0.9f;
+constexpr int kFaceYawDeadband = kDeadband;  // = the cam's kCentredBand
+constexpr int kFacePitchDeadband = 7;
+// Glide speed as a fraction of the axis' tuned speed; the servo controller scales its acceleration
+// with it too, so this is how quickly the head gets going as well as its top speed.
+constexpr float kFaceYawGlideScale = 1.5f;
+constexpr float kFacePitchGlideScale = 1.8f;
+// Reports older than this are not compensated beyond it: something stalled, and the angle history
+// does not reach further back anyway.
+constexpr uint32_t kFaceMaxAgeMs = 600;
+
+// Where the head waits while tracking is on but no face is in view: 20 deg heads-up (pitch angle
+// DOWN = look up). This is a desktop robot, and the user's face is almost always above it, so
+// looking straight ahead would leave most faces at or past the top of the picture. Used when
+// tracking is switched on and when a lost face sends the head back.
+constexpr float kTrackHomePitch = ServoController::kDefaultAngle - 20.0f;
 
 // A 240x176 JPEG at quality 14 is 5-7KB, which is 65-80ms at 921600. 400ms is
 // long enough to absorb a slow frame and short enough that a truncated one does
@@ -262,7 +315,13 @@ void CamLink::SetTrackingEnabled(bool enabled) {
   // The tracker yields to animations, so a random idle animation still playing would hold it off.
   // Tracking wins: end it now (the head stays where it is and tracking takes over from there).
   if (enabled) {
-    ServoController::GetInstance().StopAnimation();
+    auto& servos = ServoController::GetInstance();
+    servos.StopAnimation();
+    // Heads up first (see kTrackHomePitch), so the user's face is in the picture to begin with.
+    // The first face report simply re-aims this glide from wherever the head has got to.
+    servos.GlideTo(ServoController::kPinServo0, kTrackHomePitch, kRecentreGlideScale);
+    servos.GlideTo(ServoController::kPinServo1, ServoController::kDefaultAngle, kRecentreGlideScale);
+    roll_target_ = ServoController::kDefaultAngle;
     // Start the lost-finger clocks now, so switching tracking on with no finger in view waits the
     // full grace period before SuperviseTracking() recentres or disarms, rather than firing at once.
     last_finger_ms_ = millis();
@@ -597,7 +656,7 @@ void CamLink::SuperviseTracking(uint32_t now) {
   const uint32_t since = now - last_finger_ms_;
 
   if (armed_by_gesture_ && since >= kGestureIdleOffMs) {
-    printf("[track] armed by gesture, no finger for %us -> tracking off\n",
+    printf("[track] armed by gesture, nothing seen for %us -> tracking off\n",
            static_cast<unsigned>(kGestureIdleOffMs / 1000));
     SetTrackingEnabled(false);
     return;
@@ -619,9 +678,9 @@ void CamLink::SuperviseTracking(uint32_t now) {
   pitch_learn_.active = false;
   roll_target_ = ServoController::kDefaultAngle;
   servos.GlideTo(ServoController::kPinServo2, ServoController::kServo2DefaultAngle, kRecentreGlideScale);
-  servos.GlideTo(ServoController::kPinServo0, ServoController::kDefaultAngle, kRecentreGlideScale);
+  servos.GlideTo(ServoController::kPinServo0, kTrackHomePitch, kRecentreGlideScale);
   servos.GlideTo(ServoController::kPinServo1, ServoController::kDefaultAngle, kRecentreGlideScale);
-  printf("[track] no finger for %us -> back to centre\n", static_cast<unsigned>(kFingerLostRecentreMs / 1000));
+  printf("[track] face gone for %us -> back to centre\n", static_cast<unsigned>(kFingerLostRecentreMs / 1000));
 }
 
 void CamLink::LearnAxis(bool yaw, int offset, float applied_deg, bool at_limit, uint32_t now) {
@@ -694,9 +753,9 @@ void CamLink::LearnAxis(bool yaw, int offset, float applied_deg, bool at_limit, 
 void CamLink::LoadTrackDirs() {
   Preferences prefs;
   if (prefs.begin("track", true)) {
-    const int8_t y = prefs.getChar("ydir_m", yaw_dir_);
+    const int8_t y = prefs.getChar(kYawDirKey, yaw_dir_);
     const int8_t p = prefs.getChar("pdir_m", pitch_dir_);
-    const int8_t r = prefs.getChar("rdir", roll_dir_);
+    const int8_t r = prefs.getChar(kRollDirKey, roll_dir_);
     prefs.end();
     yaw_dir_ = y < 0 ? -1 : 1;
     pitch_dir_ = p < 0 ? -1 : 1;
@@ -708,9 +767,9 @@ void CamLink::LoadTrackDirs() {
 void CamLink::SaveTrackDirs() {
   Preferences prefs;
   if (prefs.begin("track", false)) {
-    prefs.putChar("ydir_m", yaw_dir_);
+    prefs.putChar(kYawDirKey, yaw_dir_);
     prefs.putChar("pdir_m", pitch_dir_);
-    prefs.putChar("rdir", roll_dir_);
+    prefs.putChar(kRollDirKey, roll_dir_);
     prefs.end();
   }
 }
@@ -739,9 +798,9 @@ void CamLink::FlipTrackDir(char axis) {
 }
 
 void CamLink::ResetTrackDirs() {
-  yaw_dir_ = -1;
+  yaw_dir_ = kDefaultYawDir;
   pitch_dir_ = 1;
-  roll_dir_ = 1;
+  roll_dir_ = kDefaultRollDir;
   yaw_learn_ = AxisLearn{};
   pitch_learn_ = AxisLearn{};
   yaw_speed_ = 0.0f;
@@ -1104,7 +1163,7 @@ void CamLink::ReceiveVideoFrame() {
   }
 }
 
-void CamLink::HandleLine(const char* line) {
+void CamLink::NoteCamAlive() {
   last_rx_ms_ = millis();
   if (!present_) {
     present_ = true;
@@ -1114,6 +1173,176 @@ void CamLink::HandleLine(const char* line) {
     tracking_armed_ = tracking_enabled_;
     SendVisionEndpoint();
   }
+}
+
+void CamLink::NoteTrackingReport() {
+  // The cam only reports while it believes tracking is armed. If we are not, the two boards
+  // disagree - seen live after the main board rebooted mid-gesture: the cam had armed itself
+  // and sent "G 1" into a board that was still booting. Recording what the cam evidently thinks
+  // lets Poll()'s resync tell it "A 0".
+  if (!tracking_enabled_) {
+    tracking_armed_ = true;
+  }
+  // RunVision() on the cam board is synchronous and blocks loop(), so a tracking report arriving
+  // >700ms after we sent 'V' proves the cam is idle in loop() and missed our 'V' command (e.g.
+  // while re-initialising its sensor after F 0).
+  if (look_pending_ && look_cmd_[0] != '\0' && look_retries_ < 2 && (millis() - look_last_tx_ms_ > 700)) {
+    ++look_retries_;
+    look_last_tx_ms_ = millis();
+    printf("cam link: cam idle while look pending -> retry #%u: %s\n", static_cast<unsigned>(look_retries_), look_cmd_);
+    SendVisionEndpoint();
+    SendCommand(look_cmd_);
+  }
+}
+
+void CamLink::ReceiveFacePacket() {
+  uint8_t p[kFacePacketRest];
+  for (size_t i = 0; i < kFacePacketRest; ++i) {
+    const int b = ReadByteTimed(5);  // the whole packet is 0.9ms on the wire at 115200
+    if (b < 0) {
+      ++face_bad_;
+      return;
+    }
+    p[i] = static_cast<uint8_t>(b);
+  }
+  const uint16_t crc = Crc16Update(0xFFFF, p, 7);
+  if ((static_cast<uint16_t>(p[7]) | (static_cast<uint16_t>(p[8]) << 8)) != crc) {
+    ++face_bad_;
+    return;
+  }
+  NoteCamAlive();
+  NoteTrackingReport();
+
+  const uint32_t now = millis();
+  if (face_last_ms_ != 0) {
+    const uint32_t gap = now - face_last_ms_;
+    if (gap < 2000) {
+      face_period_ms_ = (face_period_ms_ == 0) ? gap : (face_period_ms_ * 3 + gap) / 4;
+    }
+  }
+  face_last_ms_ = now;
+  face_seq_ = p[0];
+  ++face_ok_;
+  // Age: the cam's own figure (picture taken -> packet sent, 4ms units) plus the ~1ms the packet
+  // spent on the wire.
+  ApplyFaceTracking(static_cast<int8_t>(p[1]), static_cast<int8_t>(p[2]), p[4], static_cast<int8_t>(p[3]),
+                    static_cast<uint32_t>(p[6]) * 4 + 1);
+}
+
+void CamLink::RecordAngles(uint32_t now) {
+  if (angle_hist_n_ != 0 && now - angle_hist_ms_[(angle_hist_head_ + kAngleHistLen - 1) % kAngleHistLen] < kAngleHistStepMs) {
+    return;
+  }
+  auto& servos = ServoController::GetInstance();
+  angle_hist_ms_[angle_hist_head_] = now;
+  angle_hist_yaw_[angle_hist_head_] = servos.GetAngle(ServoController::kPinServo2);
+  angle_hist_pitch_[angle_hist_head_] = servos.GetAngle(ServoController::kPinServo0);
+  angle_hist_head_ = (angle_hist_head_ + 1) % kAngleHistLen;
+  if (angle_hist_n_ < kAngleHistLen) {
+    ++angle_hist_n_;
+  }
+}
+
+void CamLink::AnglesAt(uint32_t t, float* yaw, float* pitch) const {
+  auto& servos = ServoController::GetInstance();
+  *yaw = servos.GetAngle(ServoController::kPinServo2);
+  *pitch = servos.GetAngle(ServoController::kPinServo0);
+  // Newest to oldest: the first sample at or before t, interpolated with the one after it.
+  float next_yaw = *yaw;
+  float next_pitch = *pitch;
+  uint32_t next_ms = millis();
+  for (uint8_t i = 0; i < angle_hist_n_; ++i) {
+    const uint8_t idx = (angle_hist_head_ + kAngleHistLen - 1 - i) % kAngleHistLen;
+    const uint32_t ms = angle_hist_ms_[idx];
+    if (static_cast<int32_t>(ms - t) <= 0) {
+      const uint32_t span = next_ms - ms;
+      const float f = span > 0 ? static_cast<float>(t - ms) / static_cast<float>(span) : 0.0f;
+      *yaw = angle_hist_yaw_[idx] + (next_yaw - angle_hist_yaw_[idx]) * f;
+      *pitch = angle_hist_pitch_[idx] + (next_pitch - angle_hist_pitch_[idx]) * f;
+      return;
+    }
+    next_yaw = angle_hist_yaw_[idx];
+    next_pitch = angle_hist_pitch_[idx];
+    next_ms = ms;
+    // Older than the whole history: the oldest sample is the best there is.
+    *yaw = next_yaw;
+    *pitch = next_pitch;
+  }
+}
+
+void CamLink::ApplyFaceTracking(int dx, int dy, int conf, int roll, uint32_t age_ms) {
+  if (!tracking_enabled_ || conf < kMinConf) {
+    return;
+  }
+  const uint32_t now = millis();
+  // The face is in view: SuperviseTracking()'s lost-subject clocks start over.
+  last_finger_ms_ = now;
+  recentred_ = false;
+  auto& servos = ServoController::GetInstance();
+  if (servos.IsAnimating()) {
+    return;
+  }
+  last_track_msg_ms_ = now;
+  if (static_cast<int32_t>(manual_until_ms_ - now) > 0) {
+    return;
+  }
+  // Mirror: the head tilts the way the face's image tilts, i.e. the user tilting to their left gets
+  // the robot tilting to ITS right. roll_dir_ (web page flip button) reverses it.
+  MirrorLean(roll);
+
+  // The step controller is not used for faces; keep its state at rest so CoastTracking() stays out.
+  yaw_speed_ = 0.0f;
+  pitch_speed_ = 0.0f;
+
+  // Soft deadband, as in ApplyTracking(): measured from the edge of the band, so the aim passes
+  // through zero continuously instead of jumping when the face crosses it.
+  auto past = [](int offset, int band) -> float {
+    if (offset >= band) {
+      return static_cast<float>(offset - band);
+    }
+    if (offset <= -band) {
+      return static_cast<float>(offset + band);
+    }
+    return 0.0f;
+  };
+  // Aim from where the head was pointing when the picture was taken (see kFaceYawGain). Clamped to
+  // the axis' own limits here as well as inside the servo controller - this is the one path that
+  // moves the head unattended.
+  float yaw_then = 0.0f;
+  float pitch_then = 0.0f;
+  AnglesAt(now - (age_ms > kFaceMaxAgeMs ? kFaceMaxAgeMs : age_ms), &yaw_then, &pitch_then);
+  auto aim = [&servos](int pin, float then, float correction, float lo, float hi, float glide) -> float {
+    if (correction == 0.0f) {
+      // Inside the deadband: let any glide already under way finish.
+      return servos.GetAngle(pin);
+    }
+    float target = then + correction;
+    if (target < lo) {
+      target = lo;
+    } else if (target > hi) {
+      target = hi;
+    }
+    servos.GlideTo(pin, target, glide);
+    return target;
+  };
+  const float yaw_to = aim(ServoController::kPinServo2, yaw_then,
+                           yaw_dir_ * past(dx, kFaceYawDeadband) * kFaceYawDegPerUnit * kFaceYawGain,
+                           ServoController::kServo2MinAngle, ServoController::kServo2MaxAngle, kFaceYawGlideScale);
+  const float pitch_to = aim(ServoController::kPinServo0, pitch_then,
+                             pitch_dir_ * past(dy, kFacePitchDeadband) * kFacePitchDegPerUnit * kFacePitchGain,
+                             ServoController::kServo0MinAngle, ServoController::kServo0MaxAngle, kFacePitchGlideScale);
+
+  static uint32_t last_trace_ms = 0;
+  if (now - last_trace_ms >= 500) {
+    last_trace_ms = now;
+    printf("[track] face dx %d dy %d roll %d conf %d age %ums -> yaw %.1f pitch %.1f (every %ums, %u ok %u bad)\n",
+           dx, dy, roll, conf, static_cast<unsigned>(age_ms), yaw_to, pitch_to, static_cast<unsigned>(face_period_ms_),
+           static_cast<unsigned>(face_ok_), static_cast<unsigned>(face_bad_));
+  }
+}
+
+void CamLink::HandleLine(const char* line) {
+  NoteCamAlive();
 
   switch (line[0]) {
     case 'T': {
@@ -1125,32 +1354,14 @@ void CamLink::HandleLine(const char* line) {
       int kind = 0;
       const int n = sscanf(line + 1, "%d %d %d %d %d", &dx, &dy, &conf, &lean, &kind);
       if (n >= 5) {
-        // The cam only sends T while it believes tracking is armed. If we are not, the two boards
-        // disagree - seen live after the main board rebooted mid-gesture: the cam had armed itself
-        // and sent "G 1" into a board that was still booting. Recording what the cam evidently thinks
-        // lets Poll()'s resync tell it "A 0", after which a raised finger arms both sides again.
-        if (!tracking_enabled_) {
-          tracking_armed_ = true;
-        }
+        NoteTrackingReport();
         if (kind == 1) {
           ApplyTracking(dx, dy, conf, lean);
         }
       } else if (n >= 3 && !legacy_warned_) {
         // Four fields is the old face tracker, whose output the head no longer follows.
         legacy_warned_ = true;
-        printf("cam link: camera runs the old face-tracking firmware - flash enco02_cam for finger tracking\n");
-      }
-      // RunVision() on the cam board is synchronous and blocks loop(), so receiving
-      // a 'T' line >700ms after we sent 'V' proves the cam is idle in loop() and
-      // missed our 'V' command (e.g. while re-initialising its sensor after F 0).
-      if (look_pending_ && look_cmd_[0] != '\0' && look_retries_ < 2 &&
-          (millis() - look_last_tx_ms_ > 700)) {
-        ++look_retries_;
-        look_last_tx_ms_ = millis();
-        printf("cam link: cam idle while look pending -> retry #%u: %s\n",
-               static_cast<unsigned>(look_retries_), look_cmd_);
-        SendVisionEndpoint();
-        SendCommand(look_cmd_);
+        printf("cam link: camera runs the old text face-tracking firmware - flash enco02_cam\n");
       }
       break;
     }
@@ -1225,6 +1436,11 @@ void CamLink::Poll() {
   // than on arriving messages, because the cam stops sending precisely when
   // the head is arriving at centre.
   CoastTracking();
+  // Where the head points, every ~20ms, so a face report can be aimed from where the head was when
+  // its picture was taken. Only worth the cycles while tracking.
+  if (tracking_enabled_) {
+    RecordAngles(millis());
+  }
 
   while (Serial2.available() > 0) {
     const int c = Serial2.read();
@@ -1242,6 +1458,11 @@ void CamLink::Poll() {
         line_len_ = 0;  // a frame cannot arrive mid-line; if it did, that line was junk
         line_corrupt_ = false;
         ReceiveVideoFrame();
+      } else if (c2 == kFaceMagic1) {
+        // The cam only sends these between lines, never inside one.
+        line_len_ = 0;
+        line_corrupt_ = false;
+        ReceiveFacePacket();
       }
       // A lone 0xA5 is noise. Both bytes are dropped: they are not ASCII, so
       // they could only corrupt a line anyway.

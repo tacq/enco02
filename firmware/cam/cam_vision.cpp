@@ -1,7 +1,7 @@
 #include "cam_vision.h"
 
 #include <HTTPClient.h>
-#include <NetworkClientSecure.h>
+#include <WiFiClientSecure.h>
 #include <WiFi.h>
 #include <esp_camera.h>
 #include <mbedtls/base64.h>
@@ -24,8 +24,8 @@
 // itself and hands back a sentence. The largest thing the main board ever holds
 // is that sentence.
 
-// The root store the Arduino core embeds. Declared as a pair so its length can
-// be computed: setCACertBundle() wants an explicit size.
+// The root store the Arduino core embeds (x509_crt_bundle, linked in from its mbedtls library).
+// Declared as a pair so its length can be computed: 3.x's setCACertBundle() wants an explicit size.
 extern const uint8_t rootca_crt_bundle_start[] asm("_binary_x509_crt_bundle_start");
 extern const uint8_t rootca_crt_bundle_end[] asm("_binary_x509_crt_bundle_end");
 
@@ -241,14 +241,14 @@ constexpr char kBoundary[] = "----ESP32_CAMERA_BOUNDARY";
 
 // Runs one POST, choosing TLS or plaintext from the url scheme.
 //
-// The two client classes cannot share a declaration - NetworkClientSecure has
+// The two client classes cannot share a declaration - WiFiClientSecure has
 // to outlive the request - so the request body lives in a lambda that takes the
 // base class and each branch supplies its own stack object. No heap, no
 // duplicated request code, and no TLS context constructed for a plain http URL.
 //
 // Returns the HTTP status, or a negative HTTPClient error.
 int PostBody(const char* url, const char* content_type, const uint8_t* body, size_t body_len, String* reply) {
-  auto run = [&](NetworkClient& client) -> int {
+  auto run = [&](WiFiClient& client) -> int {
     HTTPClient http;
     http.setTimeout(kHttpTimeoutMs);
     http.setConnectTimeout(kHttpTimeoutMs);
@@ -277,16 +277,20 @@ int PostBody(const char* url, const char* content_type, const uint8_t* body, siz
   };
 
   if (strncmp(url, "https://", 8) == 0) {
-    NetworkClientSecure client;
+    WiFiClientSecure client;
     // Validate against the bundled root store rather than setInsecure(). A
     // bearer token travels in a header on this connection; skipping validation
     // would hand it to anyone able to MITM the Wi-Fi.
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
     client.setCACertBundle(rootca_crt_bundle_start, static_cast<size_t>(rootca_crt_bundle_end - rootca_crt_bundle_start));
+#else
+    client.setCACertBundle(rootca_crt_bundle_start);  // 2.0.x reads the size from the bundle itself
+#endif
     client.setTimeout(kHttpTimeoutMs / 1000);
     return run(client);
   }
 
-  NetworkClient client;
+  WiFiClient client;
   client.setTimeout(kHttpTimeoutMs / 1000);
   return run(client);
 }

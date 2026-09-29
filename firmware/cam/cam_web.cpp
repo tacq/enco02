@@ -5,6 +5,7 @@
 #include <esp_camera.h>
 #include <img_converters.h>
 
+#include "cam_face.h"
 #include "cam_remote.h"
 #include "cam_vision.h"
 
@@ -66,6 +67,8 @@ inline void PutPixel(uint8_t* buf, int w, int h, int x, int y, uint16_t c) {
 //     (the kind that can switch tracking on by itself), amber for a rougher
 //     sighting that is only followed because tracking already had it.
 //   - The white cross is the point the head is trying to bring to the middle.
+//   - Face builds: a green box round the face and a cyan line between the eyes
+//     (its slope is the tilt the roll servo mirrors).
 void DrawOverlay(uint8_t* buf, int w, int h, const TrackSample& s) {
   constexpr uint16_t kBox = Pack565(150, 150, 150);
   const int bx0 = w * (100 - 12) / 200;
@@ -79,6 +82,40 @@ void DrawOverlay(uint8_t* buf, int w, int h, const TrackSample& s) {
   for (int y = by0; y <= by1; y += 2) {
     PutPixel(buf, w, h, bx0, y, kBox);
     PutPixel(buf, w, h, bx1, y, kBox);
+  }
+
+  constexpr uint16_t kCross = Pack565(255, 255, 255);
+  const int cx = (s.dx + 100) * w / 200;
+  const int cy = (s.dy + 100) * h / 200;
+
+  if (s.conf > 0 && s.kind == 2) {
+    constexpr uint16_t kFace = Pack565(40, 240, 80);
+    constexpr uint16_t kEyes = Pack565(40, 220, 255);
+    for (int x = s.box_x0; x <= s.box_x1; ++x) {
+      PutPixel(buf, w, h, x, s.box_y0, kFace);
+      PutPixel(buf, w, h, x, s.box_y1, kFace);
+    }
+    for (int y = s.box_y0; y <= s.box_y1; ++y) {
+      PutPixel(buf, w, h, s.box_x0, y, kFace);
+      PutPixel(buf, w, h, s.box_x1, y, kFace);
+    }
+    const int ex = s.base_x - s.tip_x;
+    const int ey = s.base_y - s.tip_y;
+    int n = abs(ex) > abs(ey) ? abs(ex) : abs(ey);
+    if (n < 1) {
+      n = 1;
+    }
+    for (int t = 0; t <= n; ++t) {
+      const int x = s.tip_x + ex * t / n;
+      const int y = s.tip_y + ey * t / n;
+      PutPixel(buf, w, h, x, y, kEyes);
+      PutPixel(buf, w, h, x, y + 1, kEyes);
+    }
+    for (int d = -6; d <= 6; ++d) {
+      PutPixel(buf, w, h, cx + d, cy, kCross);
+      PutPixel(buf, w, h, cx, cy + d, kCross);
+    }
+    return;
   }
 
   if (s.conf == 0 || s.kind != 1) {
@@ -103,9 +140,6 @@ void DrawOverlay(uint8_t* buf, int w, int h, const TrackSample& s) {
     PutPixel(buf, w, h, x + 1, y, col);
   }
 
-  constexpr uint16_t kCross = Pack565(255, 255, 255);
-  const int cx = (s.dx + 100) * w / 200;
-  const int cy = (s.dy + 100) * h / 200;
   for (int d = -6; d <= 6; ++d) {
     PutPixel(buf, w, h, cx + d, cy, kCross);
     PutPixel(buf, w, h, cx, cy + d, kCross);
@@ -165,7 +199,7 @@ bool GrabAnnotatedJpeg(JpegFrame* out, Look look, bool analyse, int quality) {
   }
 
   if (analyse) {
-    g_last_sample = cam_tracker::Analyse(fb->buf, fb->width, fb->height);
+    g_last_sample = AnalyseFrame(fb->buf, fb->width, fb->height);
     if (g_sink != nullptr) {
       g_sink(g_last_sample);
     }
@@ -212,6 +246,9 @@ constexpr char kIndexHtml[] PROGMEM = R"HTML(<!doctype html>
 <img id="v" src="/stream" alt="stream">
 <div class="legend">
   grey box = main board &plusmn;12% deadband &middot;
+  FACE tracking (default build): green box = the face being followed, cyan line = eye line (its tilt
+  is mirrored by the roll servo), white cross = point the head centres. The skin mask and the text
+  below about fingers apply to finger-tracking builds only.<br>
   green line = clean single finger (can switch tracking on) &middot;
   amber = rough sighting, followed only once tracking has it &middot;
   white cross = point the head centres &middot;
@@ -295,9 +332,11 @@ async function pollStatus() {
     if (extActive && !wasExt) nextSnapshot(0);
     if (!extActive && wasExt) reloadStream();
     const finger = j.conf > 0
-      ? (j.gesture ? 'clean' : 'rough') + ' conf=' + j.conf + ' at dx=' + j.dx + ' dy=' + j.dy +
-        ' lean=' + j.roll + 'deg' +
-        (extActive ? ' (from hand tracker)' : ' tip=(' + j.tip_x + ',' + j.tip_y + ') width=' + j.w + 'px')
+      ? (j.kind === 2
+          ? 'face conf=' + j.conf + ' at dx=' + j.dx + ' dy=' + j.dy + ' tilt=' + j.roll + 'deg width=' + j.w + 'px'
+          : (j.gesture ? 'clean' : 'rough') + ' conf=' + j.conf + ' at dx=' + j.dx + ' dy=' + j.dy +
+            ' lean=' + j.roll + 'deg' +
+            (extActive ? ' (from hand tracker)' : ' tip=(' + j.tip_x + ',' + j.tip_y + ') width=' + j.w + 'px'))
       : 'none';
     document.getElementById('st').textContent =
       'ip: ' + j.ip + '   heap: ' + j.heap + '   psram: ' + j.psram + '\n' +
@@ -307,7 +346,8 @@ async function pollStatus() {
       '   bright layer: ' + (j.split > 0 ? 'luma >= ' + j.split : 'none') + '\n' +
       'hand tracker: ' + (extActive ? 'steering' : 'not connected') +
       '   samples ok=' + j.ext_ok + ' rejected=' + j.ext_bad + '\n' +
-      'finger: ' + finger;
+      (j.face ? 'face detect: ' + j.face_ms + 'ms (avg ' + j.face_avg_ms + 'ms)   tracking armed: ' + j.armed + '\n' : '') +
+      (j.face ? 'target: ' : 'finger: ') + finger;
   } catch (_) {}
 }
 setInterval(pollStatus, 2000);
@@ -326,7 +366,7 @@ void HandleStatus() {
   int gain_r = 256;
   int gain_b = 256;
   cam_tracker::Gains(&gain_r, &gain_b);
-  char buf[720];
+  char buf[900];
   // link_rx / link_cmds / link_age_ms answer "is the main board reaching us?"
   // over WiFi, with no serial adapter attached. The cam being silent looks
   // identical from the main board whether the fault is our transmit line or
@@ -360,7 +400,7 @@ void HandleStatus() {
            "\"tip_x\":%d,\"tip_y\":%d,\"base_x\":%d,\"base_y\":%d,\"w\":%u,"
            "\"link_rx\":%u,\"link_cmds\":%u,\"link_age_ms\":%ld,"
            "\"armed\":%d,\"track_key\":%d,\"ext\":%d,\"ext_ok\":%u,\"ext_bad\":%u,\"ext_age_ms\":%ld,"
-           "\"sensor\":\"%s\",\"res\":\"%dx%d\"}",
+           "\"sensor\":\"%s\",\"res\":\"%dx%d\",\"face\":%d,\"face_ms\":%u,\"face_avg_ms\":%u}",
            WiFi.localIP().toString().c_str(), static_cast<unsigned>(ESP.getFreeHeap()),
            static_cast<unsigned>(ESP.getFreePsram()),
            cam_vision::HasEndpoint() ? "server (xiaozhi)" : "config-key", vf, hm, g_ae_level, gain_r, gain_b,
@@ -372,7 +412,8 @@ void HandleStatus() {
            static_cast<unsigned>(g_link_rx_bytes), static_cast<unsigned>(g_link_cmds), link_age,
            g_tracking_armed ? 1 : 0, cam_remote::Enabled() ? 1 : 0, cam_remote::Active(now) ? 1 : 0,
            static_cast<unsigned>(cam_remote::AcceptedCount()), static_cast<unsigned>(cam_remote::RejectedCount()),
-           cam_remote::LastAcceptedAgeMs(now), fmt, res_w, res_h);
+           cam_remote::LastAcceptedAgeMs(now), fmt, res_w, res_h, CAM_FINGER_TRACKING ? 0 : 1,
+           static_cast<unsigned>(cam_face::LastInferMs()), static_cast<unsigned>(cam_face::AvgInferMs()));
   g_server.send(200, "application/json", buf);
 }
 
@@ -400,7 +441,7 @@ void HandleConfigure() {
         }
       }
     }
-    cam_tracker::Reset();
+    ResetTracker();
   }
   if (g_server.hasArg("ae") && g_exposure != nullptr) {
     // Allow-list rather than toInt(): anything but -2..2 is ignored, not
@@ -493,6 +534,10 @@ void StopStreamClient() {
 // its handler returns, so nothing else ever reads from this socket.
 void HandleStream() {
   const bool tracker = g_server.arg("tracker") == "1";
+  if (tracker && !CAM_FINGER_TRACKING) {
+    g_server.send(503, "text/plain", "hand tracker disabled: this build tracks faces on the camera itself");
+    return;
+  }
   if (tracker && !cam_remote::Enabled()) {
     g_server.send(503, "text/plain", "hand tracker disabled: no CAM_TRACK_KEY in cam_config.h");
     return;

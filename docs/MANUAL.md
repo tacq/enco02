@@ -80,35 +80,31 @@ Hold something up and ask. The ESP32‑CAM in her head takes a photo, has it rec
 
 ---
 
-## ★★★★☆ 3. Head tracking: she follows your finger
+## ★★★★☆ 3. Head tracking: she follows your face
 
-Hold up **one finger** (the rest of the hand in a fist) and the 3‑axis head follows it. Yaw (转头) and pitch (抬头/低头) keep the fingertip in the middle of the picture. Roll (歪头) tilts the head the same way the finger leans.
+Once tracking is on, the 3‑axis head follows your face. Yaw (转头) and pitch (抬头/低头) keep your face in the middle of the picture. Roll (歪头) mirrors your head tilt: tilt your head to your left and she tilts to *her* right, like a mirror.
 
 | How | Action |
 |---|---|
-| **Hold up one finger** to the camera for ~1 s | Tracking on (the status bar shows **跟踪开启**) |
-| Say **"开启跟踪" / "跟着我"**, or press **📷 跟踪** on the web page | Tracking on |
+| Say **"开启跟踪" / "跟着我"**, or press **📷 跟踪** on the web page | Tracking on (the status bar shows **跟踪开启**) |
 | Say **"别看我了" / "停止跟踪"**, or press the button again | Tracking off |
 
-- Tracking is **off after every boot**.
+- Tracking is **off after every boot**. A face coming into view never switches it on by itself.
 - Turning tracking on stops any running animation, and random animations stay paused while it is on.
 - It pauses during a head gesture and for 4 s after any head command, so "向左转头" isn't immediately undone.
-- **Finger gone:** after 4 s the head glides back to the neutral pose and waits. If the gesture turned tracking on, tracking turns itself off after 20 s with no finger and random animations resume. Tracking turned on by voice or the web page stays on until you turn it off.
-- **Roll is open loop.** The camera is not on the roll stage, so tilting the head does not rotate the picture and cannot be checked by the camera. The head simply tilts by as much as the finger leans past ~6°, up to ±20°.
-- **Self-calibrating direction (yaw/pitch).** The camera rides on the yaw and pitch stages, so turning the right way pulls the fingertip toward centre. After each ~4° of movement she checks, using only confident detections. If the fingertip got *further* from centre twice in a row, or she is pinned on an end stop with the finger still off to that side for 2 s, that axis was backwards. She flips it and saves it, and the serial log shows `[track] ... flipped`.
-- The web page shows the current 左右 / 上下 / 歪头 directions, with buttons to flip each by hand or 恢复默认. Roll cannot learn its direction, so if she tilts the opposite way to your finger, press **歪头方向**.
-- Needs the finger-tracking camera firmware (`enco02_cam`). With the old face-tracking firmware the serial log says so once and the head does not move.
+- **Face gone:** after 4 s the head glides back to the neutral pose and waits there, still tracking, until you come back or turn it off.
+- **Several people:** she keeps following the face she already has; with nobody locked, she picks the biggest (nearest) face.
+- **Roll is open loop.** The camera is not on the roll stage, so the tilt cannot be checked by the camera. She tilts by as much as your head tilts past ~6°, up to ±20°. If she tilts the same way as you instead of mirroring, press **歪头方向** on the web page.
+- The web page shows the current 左右 / 上下 / 歪头 directions, with buttons to flip each by hand or 恢复默认.
 
-### Who finds the finger
+### How the face is found
 
-**Best: the hand tracker on the Mac** (`tools/hand_tracker`; setup is in its README).
-- The ESP32‑CAM can't run a hand-recognition network. Like every ESP32‑CAM gesture project, it streams video to a computer.
-- On the Mac, Google MediaPipe finds the hand and sends the finger position back. Each sample is signed, so nothing else on the Wi‑Fi can steer the head.
-- While the tracker runs, the camera's sensor compresses JPEG itself: 640×480, ~15 fps while tracking, ~7 fps while waiting for the gesture.
-- **Start it:** run `tools/hand_tracker/.venv/bin/python tools/hand_tracker/hand_tracker.py`, or install it as a login agent with `tools/hand_tracker/install_launchd.sh`.
-- **Check it:** `http://192.168.86.65/status` shows `"ext":1` and `"sensor":"jpeg"`.
-
-**Fallback: the camera's own skin-colour finder.** It takes over automatically whenever the Mac tracker isn't connected. It needs no computer, but it can mistake skin-coloured walls or furniture for a finger.
+- The ESP32‑CAM runs Espressif's ESP‑WHO face detector itself (ESP‑DL's MSR01 + MNP01, the successor to MTMN). It needs no computer and no network.
+- Each detection gives a box (for yaw and pitch) and five landmarks. The angle of the line between the two eyes is the head tilt.
+- It needs the AI‑Thinker ESP32‑CAM with PSRAM; the model and the camera frames live there.
+- Detection takes a few hundred milliseconds per frame, so the head gets several updates a second and glides smoothly between them. The camera sends each result to the main board over the wire as a 10‑byte binary packet (under 1 ms on the wire).
+- **Check it:** `http://192.168.86.65/` draws a green box round the face and a cyan line between the eyes. The status text shows how long each detection takes.
+- The old finger tracking (the Mac hand tracker and the camera's skin‑colour finder) is still in the source. It is switched off with `CAM_FINGER_TRACKING 0` in `firmware/cam/cam_face.h`.
 
 ---
 
@@ -425,8 +421,8 @@ Static: `.dram0.data` 25,716 B plus `.dram0.bss` 51,424 B ≈ 77 KB.
 | "连接不上家庭网关" | The Mac is asleep or the bridge is stopped. Check `launchctl print gui/$(id -u)/com.enco.homebridge`, and keep the Mac plugged in with the lid open |
 | Clock shows `--:--` | Not synced yet (needs internet); give it a few seconds after Wi‑Fi connects |
 | No caption bar | You turned it off. Say "打开字幕" |
-| Head won't follow | Tracking is off after boot. Hold up one finger for ~1 s, or say "开启跟踪". The camera needs the finger-tracking firmware. For reliable detection, run the Mac hand tracker (`tools/hand_tracker`) |
-| Head chases something that isn't a finger | The camera's fallback finder saw a skin-coloured object. Run the Mac hand tracker, which recognises real hands |
+| Head won't follow | Tracking is off after boot. Say "开启跟踪" or use the web page. Face the camera from within ~1.5 m, in reasonable light |
+| Head tilts the same way as me instead of mirroring | Press **歪头方向** on the web page |
 | Web debug page stops answering during a conversation | On purpose: requests wait until free heap is back above 16 KB (standby), because answering them mid-conversation ran the board out of memory |
 | She's silent in standby | By design: the speaker is muted in standby. Say "Hi 安可" |
 | Silent even when awake (status bar shows the muted speaker) | Volume is 0, and a mute is remembered across reboots. Say "大声一点" / "音量调到 30", or use the web page |

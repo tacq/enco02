@@ -7,12 +7,15 @@
 // the whole link can be read by clipping a USB-serial adapter onto the wire.
 //
 //   cam  -> main   R                    booted, ready
+//                  A5 F1 <face packet>  face position - BINARY, see SendFacePacket()
 //                  T <dx> <dy> <conf> <lean> <kind>
-//                                       finger position, -100..100 from the
+//                                       finger position (CAM_FINGER_TRACKING
+//                                       builds only), -100..100 from the
 //                                       middle of the picture; conf 0..100;
 //                                       lean in degrees (+ = tip leans right);
 //                                       kind 1 = one raised finger
 //                  G 1                  one finger held up: arm tracking
+//                                       (finger builds only)
 //                  L <text>             vision result
 //                  E <msg>              something went wrong
 //
@@ -30,6 +33,16 @@
 // board decides what to do about it - only the main board knows the safe angle
 // limits, whether a gesture animation is already running, and whether the user
 // just asked for the head to be somewhere specific.
+//
+// What the head follows: a FACE (cam_face.h). Espressif's ESP-WHO detector -
+// ESP-DL's MSR01 + MNP01 cascade, the successor to MTMN - runs right here on
+// the RGB565 frame and returns a box (pan / pitch) and five landmarks; the
+// line between the two eyes is the head tilt, which the main board mirrors on
+// its roll servo. Tracking is armed by voice or the web page only; a face never
+// arms it by itself.
+//
+// The finger tracking described below is still in the tree but compiled out
+// (CAM_FINGER_TRACKING 0 in cam_face.h).
 //
 // Where the finger comes from. Normally a computer on the LAN runs
 // tools/hand_tracker/hand_tracker.py: it pulls /stream?raw=1&tracker=1, finds
@@ -49,6 +62,7 @@
 #include <img_converters.h>
 
 #include "cam_config.h"
+#include "cam_face.h"
 #include "cam_pins.h"
 #include "cam_remote.h"
 #include "cam_tracker.h"
@@ -120,7 +134,11 @@ constexpr uint32_t kIdleScanIntervalMs = 160;
 // debounce below still wants it held for kGestureFrames frames straight after
 // kGestureClearFrames frames without it, so nothing that sits in shot
 // permanently can ever arm anything.
-constexpr bool kGestureArmingEnabled = true;
+//
+// Face builds (the default) have no gesture at all: tracking is armed by voice
+// or the web page only, and a face walking into shot must not start the head
+// moving by itself.
+constexpr bool kGestureArmingEnabled = CAM_FINGER_TRACKING != 0;
 
 // Consecutive frames of "one finger" before it counts (5 x 160ms = 0.8s held),
 // and how long to ignore the gesture afterwards so a held-up finger arms
@@ -290,6 +308,19 @@ void Send(const char* s) {
   Serial.println(s);
 }
 
+// Arduino 3.x drops a UART onto the 1 MHz REF_TICK clock at <= 250000 baud, which samples a
+// ~230 kbaud bit too coarsely (see kFastBaud in the main board's cam_link.h); put it back on the
+// 80 MHz APB clock. Arduino 2.0.x - what this board builds with now - always clocks UARTs from
+// APB, so there it has nothing to do.
+void KeepLinkOnApbClock(uint32_t baud) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  uart_ll_set_sclk(UART_LL_GET_HW(1), SOC_MOD_CLK_APB);
+  uart_ll_set_baudrate(UART_LL_GET_HW(1), baud, 80000000);
+#else
+  (void)baud;
+#endif
+}
+
 bool InitCamera(pixformat_t format, framesize_t size, int jpeg_quality, size_t fb_count) {
   // Preserve any Flip V / Flip H toggled in the web UI across the JPEG mode
   // switch, falling back to the cam_config.h defaults on first boot.
@@ -354,12 +385,17 @@ bool InitCamera(pixformat_t format, framesize_t size, int jpeg_quality, size_t f
   }
   cam_web::SetExposureLevel(g_ae_level);
 
-  cam_tracker::Reset();
+  ResetTracker();
   return true;
 }
 
 // RGB565, for the on-board finder and the robot's viewfinder.
-bool InitTrackingCamera(framesize_t size = kTrackSize) { return InitCamera(PIXFORMAT_RGB565, size, 12, 1); }
+//
+// Two frame buffers (optimisation C): with one, the sensor only starts the next frame once the
+// previous buffer is handed back, so every Track() first waited ~40-60ms for a fresh capture before
+// the face detector could even start. With two, the driver keeps capturing into the spare while the
+// detector works, and GRAB_LATEST hands over the newest complete one. 2 x 150KB, in PSRAM.
+bool InitTrackingCamera(framesize_t size = kTrackSize) { return InitCamera(PIXFORMAT_RGB565, size, 12, 2); }
 
 // Hardware JPEG, for the hand tracker's stream (see kStreamSize).
 bool InitStreamCamera() { return InitCamera(PIXFORMAT_JPEG, kStreamSize, kStreamQuality, 2); }
@@ -373,7 +409,9 @@ bool InitStreamCamera() { return InitCamera(PIXFORMAT_JPEG, kStreamSize, kStream
 // second - the Mac busy, a Wi-Fi retry - must not bounce the sensor twice.
 void UpdateSensorMode() {
   const uint32_t now = millis();
-  const bool tracker = cam_web::TrackerConnected() && (g_sensor_jpeg || cam_web::TrackerActive());
+  // Face builds never hand the sensor to the hand tracker (cam_web refuses it).
+  const bool tracker =
+      CAM_FINGER_TRACKING && cam_web::TrackerConnected() && (g_sensor_jpeg || cam_web::TrackerActive());
   const bool want_jpeg = tracker && !g_video && !g_vision_busy &&
                          (g_stream_init_failed_ms == 0 || now - g_stream_init_failed_ms > kStreamRetryMs);
   if (want_jpeg == g_sensor_jpeg) {
@@ -429,7 +467,7 @@ void SetAeLevel(int level) {
     s->set_ae_level(s, g_ae_level);
   }
   cam_web::SetExposureLevel(g_ae_level);
-  cam_tracker::Reset();
+  ResetTracker();
   Serial.printf("[cam] ae_level %d\n", g_ae_level);
 }
 
@@ -571,7 +609,14 @@ void SendVideoFrame() {
   // Track off the very frame we are about to send, so the crosshair the main
   // board draws lines up with the picture underneath it rather than with where
   // the subject was two frames ago.
-  const TrackSample s = cam_tracker::Analyse(fb->buf, fb->width, fb->height);
+  //
+  // Face builds only look while tracking is armed: the detector costs a few
+  // hundred milliseconds a frame, and with no gesture to watch for there is
+  // nothing to gain from it when disarmed except a slower viewfinder.
+  TrackSample s{};
+  if (CAM_FINGER_TRACKING || g_tracking) {
+    s = AnalyseFrame(fb->buf, fb->width, fb->height);
+  }
   cam_web::SetLastSample(s);
 
   const uint16_t w = static_cast<uint16_t>(fb->width);
@@ -673,8 +718,7 @@ bool HandleCommand(char* line) {
       delay(5);
       const uint32_t target_baud = fast ? kLinkFastBaud : LINK_BAUD;
       Serial1.updateBaudRate(target_baud);
-      uart_ll_set_sclk(UART_LL_GET_HW(1), SOC_MOD_CLK_APB);
-      uart_ll_set_baudrate(UART_LL_GET_HW(1), target_baud, 80000000);
+      KeepLinkOnApbClock(target_baud);
       g_link_fast = fast;
 
       // Acknowledge, at the NEW rate. This is what makes the switch reliable
@@ -695,17 +739,19 @@ bool HandleCommand(char* line) {
     case 'A': {
       g_tracking = (line[1] == ' ' && line[2] == '1');
       if (!g_tracking) {
-        cam_tracker::Reset();
+        ResetTracker();
       }
       Serial.printf("[cam] tracking %s\n", g_tracking ? "on" : "off");
       break;
     }
     case 'S': {
       // Bring-up aid: everything you want to know before blaming the wiring.
-      Serial.printf("[cam] psram:%s heap:%u psram_free:%u wifi:%s ip:%s tracking:%d vision:%s\n", psramFound() ? "yes" : "NO",
-                    static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getFreePsram()),
-                    WiFi.status() == WL_CONNECTED ? "up" : "DOWN", WiFi.localIP().toString().c_str(),
-                    static_cast<int>(g_tracking), cam_vision::HasEndpoint() ? "server" : "config-key");
+      Serial.printf("[cam] psram:%s heap:%u psram_free:%u wifi:%s ip:%s tracking:%d vision:%s face_ms:%u avg:%u\n",
+                    psramFound() ? "yes" : "NO", static_cast<unsigned>(ESP.getFreeHeap()),
+                    static_cast<unsigned>(ESP.getFreePsram()), WiFi.status() == WL_CONNECTED ? "up" : "DOWN",
+                    WiFi.localIP().toString().c_str(), static_cast<int>(g_tracking),
+                    cam_vision::HasEndpoint() ? "server" : "config-key", static_cast<unsigned>(cam_face::LastInferMs()),
+                    static_cast<unsigned>(cam_face::AvgInferMs()));
       break;
     }
     case 'K': {
@@ -809,6 +855,57 @@ void PollDebugConsole() {
   PumpStream(Serial, g_dbg_line, g_dbg_line_len, sizeof(g_dbg_line), false);
 }
 
+// One face sample as a fixed 10-byte binary record rather than a text line:
+//
+//   A5 F1 | seq:u8 | dx:i8 | dy:i8 | roll:i8 | conf:u8 | size:u8 | age:u8 | crc:u16 (LE)
+//
+//   dx, dy  face-box centre, -100..100 from the middle of the picture
+//   roll    head tilt in degrees, + = the top of the head leans to the right
+//           of the picture, clamped to +/-60
+//   conf    detector score x100
+//   size    face-box width as a percentage of the frame width (distance cue)
+//   age     how long ago the analysed picture was taken, in 4ms units (0..1020ms). The main board
+//           uses it to aim from where the head was pointing when the picture was taken rather
+//           than from where it is now (latency compensation), which is what lets it correct the
+//           whole offset in one go without overshooting.
+//   crc     CRC16/CCITT-FALSE over seq..age, same as the video frames
+//
+// No formatting here and no parsing on the other side: the main board reads
+// eight bytes straight into place. 0xA5 never occurs in the ASCII protocol, so
+// the receiver steps out of its line parser on the magic exactly as it does for
+// a video frame, and the second byte (F1 vs 5A) says which record follows.
+// At 115200 the whole packet is on the wire in ~1ms; the detector, not the
+// link, sets the update rate.
+void SendFacePacket(const TrackSample& s, int frame_width) {
+  static uint8_t seq = 0;
+  auto i8 = [](int v, int lim) -> uint8_t {
+    v = v > lim ? lim : (v < -lim ? -lim : v);
+    return static_cast<uint8_t>(static_cast<int8_t>(v));
+  };
+  int size = frame_width > 0 ? (s.box_x1 - s.box_x0) * 100 / frame_width : 0;
+  size = size < 0 ? 0 : (size > 100 ? 100 : size);
+  uint32_t age_ms = s.capture_ms != 0 ? millis() - s.capture_ms : 0;
+  age_ms = (age_ms + 2) / 4;
+  const uint8_t age = static_cast<uint8_t>(age_ms > 255 ? 255 : age_ms);
+  uint8_t pkt[11] = {0xA5, 0xF1, seq++, i8(s.dx, 100), i8(s.dy, 100), i8(s.roll, 60), s.conf,
+                     static_cast<uint8_t>(size), age, 0, 0};
+  const uint16_t crc = Crc16(pkt + 2, 7);
+  pkt[9] = static_cast<uint8_t>(crc & 0xFF);
+  pkt[10] = static_cast<uint8_t>(crc >> 8);
+  Serial1.write(pkt, sizeof(pkt));
+
+  // The USB console gets a readable copy, but at most two a second.
+  static uint32_t last_echo_ms = 0;
+  const uint32_t now = millis();
+  if (now - last_echo_ms >= 500) {
+    last_echo_ms = now;
+    Serial.printf("-> face dx %d dy %d roll %d conf %u size %d%% age %ums (detect %ums %s, avg %ums)\n", s.dx, s.dy,
+                  s.roll, static_cast<unsigned>(s.conf), size, static_cast<unsigned>(age) * 4,
+                  static_cast<unsigned>(cam_face::LastInferMs()), cam_face::LastWasWindowed() ? "window" : "full",
+                  static_cast<unsigned>(cam_face::AvgInferMs()));
+  }
+}
+
 // Shared between the tracking loop and the web stream, so a browser watching
 // /stream does not silence the servo updates going to the main board.
 void ReportSample(const TrackSample& s) {
@@ -849,7 +946,8 @@ void ReportSample(const TrackSample& s) {
     }
   }
 
-  if (!g_tracking || s.kind != 1 || s.conf < kMinReportConf) {
+  constexpr uint8_t kWantKind = CAM_FINGER_TRACKING ? 1 : 2;
+  if (!g_tracking || s.kind != kWantKind || s.conf < kMinReportConf) {
     return;
   }
   // Go quiet only while the finger is centred (inside the main board's
@@ -858,7 +956,9 @@ void ReportSample(const TrackSample& s) {
   // the finger over several updates and decelerates on these messages, so
   // starving it mid-move would leave it stopped off-centre. A keepalive every
   // kFingerKeepaliveMs tells it the finger is still there.
-  const bool centred = abs(s.dx) < kCentredBand && abs(s.dy) < kCentredBand;
+  // Faces: the main board's pitch deadband is narrower (kFacePitchDeadband in cam_link.cpp).
+  constexpr int kCentredBandY = CAM_FINGER_TRACKING ? kCentredBand : 7;
+  const bool centred = abs(s.dx) < kCentredBand && abs(s.dy) < kCentredBandY;
   const bool still = abs(s.dx - g_last_dx) < 3 && abs(s.dy - g_last_dy) < 3 && abs(s.roll - g_last_roll) < 3;
   if (centred && still && (now - g_last_sent_ms) < kFingerKeepaliveMs) {
     return;
@@ -868,9 +968,13 @@ void ReportSample(const TrackSample& s) {
   g_last_roll = s.roll;
   g_last_sent_ms = now;
 
+#if CAM_FINGER_TRACKING
   char buf[40];
   snprintf(buf, sizeof(buf), "T %d %d %u %d 1", s.dx, s.dy, static_cast<unsigned>(s.conf), s.roll);
   Send(buf);
+#else
+  SendFacePacket(s, g_sensor_size == kVideoSize ? kVideoWidth : kTrackWidth);
+#endif
 }
 
 void Track() {
@@ -895,6 +999,11 @@ void Track() {
   if (cam_web::IsStreaming()) {
     return;
   }
+  // Face builds have no gesture to watch for, so a disarmed board does not
+  // look at all - the detector is the one expensive thing on this chip.
+  if (!CAM_FINGER_TRACKING && !g_tracking) {
+    return;
+  }
   const uint32_t interval = g_tracking ? kTrackIntervalMs : kIdleScanIntervalMs;
   if (millis() - g_last_track_ms < interval) {
     return;
@@ -911,7 +1020,7 @@ void Track() {
     esp_camera_fb_return(fb);
     return;
   }
-  const TrackSample s = cam_tracker::Analyse(fb->buf, fb->width, fb->height);
+  const TrackSample s = AnalyseFrame(fb->buf, fb->width, fb->height);
   esp_camera_fb_return(fb);
   cam_web::SetLastSample(s);
   ReportSample(s);
@@ -979,8 +1088,7 @@ void setup() {
   // UART1. Its default pins sit on the flash bus, so they must be remapped -
   // the GPIO matrix makes that free.
   Serial1.begin(LINK_BAUD, SERIAL_8N1, LINK_RX_GPIO, LINK_TX_GPIO);
-  uart_ll_set_sclk(UART_LL_GET_HW(1), SOC_MOD_CLK_APB);
-  uart_ll_set_baudrate(UART_LL_GET_HW(1), LINK_BAUD, 80000000);
+  KeepLinkOnApbClock(LINK_BAUD);
 
   if (!psramFound()) {
     // Without PSRAM neither a QVGA RGB565 frame (150KB) nor a base64 VGA JPEG
@@ -1030,9 +1138,13 @@ void setup() {
     Serial.println("      The main board will send K automatically once it");
     Serial.println("      connects and the server advertises a vision url.");
   }
+#if CAM_FINGER_TRACKING
   // Whether a key is set, never the key.
   Serial.println(cam_remote::Enabled() ? "[cam] hand tracker: accepted on /stream?raw=1&tracker=1"
                                        : "[cam] hand tracker: off (no CAM_TRACK_KEY in cam_config.h)");
+#else
+  Serial.println("[cam] tracking: FACE (ESP-DL MSR01+MNP01 on board); finger tracking compiled out");
+#endif
 }
 
 void loop() {
@@ -1076,5 +1188,8 @@ void loop() {
     SetVideoMode(false);
   }
 
-  delay(2);
+  // No delay(): the loop goes straight back to the UART. yield() only lets
+  // another ready task of the same priority run; the camera, WiFi and UART
+  // drivers all sit above us and never needed the sleep.
+  yield();
 }

@@ -698,20 +698,77 @@ const char* SwitchCharacter(const std::string& which) {
   return now;
 }
 
-// Same idea as the volume fallback below: a bare "换个角色" is often answered conversationally
-// instead of as a tool call, so the user's own words switch it too.
-uint32_t g_last_character_exec_time = 0;
+// The characters' spoken names: k3 is 1号驾驶员, fox is 2号驾驶员.
+const char* CharacterName(const char* id) {
+  if (id == nullptr) {
+    return "?";
+  }
+  if (strcmp(id, "k3") == 0) {
+    return "1号驾驶员";
+  }
+  if (strcmp(id, "fox") == 0) {
+    return "2号驾驶员";
+  }
+  return id;
+}
+
+// Is this utterance asking for a character change? Returns the id it names ("k3" / "fox"), "char"
+// for "the next one", or nullptr if it is not about characters at all.
+const char* CharacterRequest(const std::string& q) {
+  const bool about = q.find("角色") != std::string::npos || q.find("换人物") != std::string::npos ||
+                     q.find("驾驶员") != std::string::npos;
+  if (!about) {
+    return nullptr;
+  }
+  if (q.find("1号") != std::string::npos || q.find("一号") != std::string::npos) {
+    return "k3";
+  }
+  if (q.find("2号") != std::string::npos || q.find("二号") != std::string::npos ||
+      q.find("狐狸") != std::string::npos) {
+    return "fox";
+  }
+  const bool change = q.find("换") != std::string::npos || q.find("切") != std::string::npos ||
+                      q.find("下一个") != std::string::npos;
+  return change ? "char" : nullptr;
+}
+
+// A character request is acted on the moment the user's words arrive, and remembered for a while:
+// the model often ALSO calls self.screen.set_mode for it - sometimes with "char" (next), which on
+// top of the switch already made flipped straight back (fox -> k3 -> fox), and sometimes with
+// "toggle", which it reads as "切换" and which swapped the face for the chat text screen. Inside
+// this window any character or mode call from the model is resolved against what the user asked.
+constexpr uint32_t kCharacterRequestWindowMs = 15000;
+uint32_t g_char_request_ms = 0;
+std::string g_char_request_target;  // the id actually switched to
+
+bool CharacterRequestRecent() {
+  return g_char_request_ms != 0 && millis() - g_char_request_ms < kCharacterRequestWindowMs;
+}
+
+// Shows the character's face (not the chat text, not the camera) and says which one it is.
+void ShowCharacter(const char* id) {
+  if (g_display == nullptr) {
+    return;
+  }
+  if (g_display->GetUiMode() != Display::UiMode::kRobotFace && !g_display->InCameraView()) {
+    g_display->SetUiMode(Display::UiMode::kRobotFace);
+  }
+  g_display->ShowStatus(CharacterName(id));
+}
+
+// Straight off the user's words. True if they were a character request (handled or not).
 bool CheckAndExecuteCharacterFallback(const std::string& query) {
-  if (millis() - g_last_character_exec_time < 2500) {
+  const char* want = CharacterRequest(query);
+  if (want == nullptr) {
     return false;
   }
-  if (query.find("换角色") == std::string::npos && query.find("切换角色") == std::string::npos &&
-      query.find("换个角色") == std::string::npos && query.find("换人物") == std::string::npos) {
-    return false;
+  const char* now = SwitchCharacter(want);
+  g_char_request_ms = millis();
+  g_char_request_target = now != nullptr ? now : (g_display != nullptr ? g_display->CharacterId() : "");
+  if (now != nullptr) {
+    ShowCharacter(now);
   }
-  g_last_character_exec_time = millis();
-  const char* now = SwitchCharacter("char");
-  printf("[Voice Character Fallback] -> %s\n", now != nullptr ? now : "(refused)");
+  printf("[Voice Character] '%s' -> %s (%s)\n", want, now != nullptr ? now : "(refused)", CharacterName(now));
   return true;
 }
 
@@ -1527,7 +1584,7 @@ void InitMcpTools() {
   engine.AddMcpTool("self.audio_speaker.volume_down",
                     "Volume down one step (调低音量/小声一点/声音小点).", {});
 
-  engine.AddMcpTool("self.screen.set_mode", "Screen mode (切换屏幕): face表情 chat对话 toggle切换 debug_on/debug_off调试页面 fox/k3/char换角色", {
+  engine.AddMcpTool("self.screen.set_mode", "Screen: face表情 chat对话 toggle表情对话互换 debug_on/off调试页面; 换角色: k3=1号驾驶员 fox=2号驾驶员 char=下一个", {
     {"mode", ai_vox::ParamSchema<std::string>{.default_value = "face"}},
   });
   engine.AddMcpTool("self.screen.caption", "Show/hide the caption bar under the face (打开字幕/关闭字幕).", {
@@ -1607,15 +1664,16 @@ void InitMcpTools() {
                     {
                         {"question", ai_vox::ParamSchema<std::string>{.default_value = ""}},
                     });
-  // Tracking is OFF at boot and after every restart. These two are the only way
-  // to turn it on by voice; the other way is to hold up one finger, which the
-  // cam spots by itself and reports as a G line.
+  // Tracking is OFF at boot and after every restart. These two (and the web
+  // page) are the only way to turn it on: the cam follows a face, and a face
+  // walking into shot must not start the head moving by itself. (Finger-tracking
+  // cam builds can still arm it with a raised finger, reported as a G line.)
   //
   // These descriptions used to list half a dozen synonyms each. The model maps
   // intent perfectly well from two, and the tool list has to fit its 5120-byte
   // reservation (ai_vox_mcp_tool_manager.h) - past that it doubles to 10KB of
   // heap for the rest of the session.
-  engine.AddMcpTool("self.camera.track_on", "Head follows a raised finger (开启跟踪/跟着我手指).", {});
+  engine.AddMcpTool("self.camera.track_on", "Head follows the user's face (开启跟踪/跟着我).", {});
   engine.AddMcpTool("self.camera.track_off", "Stop head tracking (停止跟踪/别看我了).", {});
   // The viewfinder. Separate from look: this one shows the user what the robot
   // sees and leaves it on screen, rather than taking a single picture and going
@@ -2299,8 +2357,9 @@ void loop() {
             // Timer first, then volume, and only on what the user actually said. Each of these is
             // exclusive: a phrase that turned out to be a timer request is not also a head command,
             // so the first one to claim it wins.
+            // A character request was already acted on when the user's words arrived.
             if (!CheckAndExecuteTimerFallback(g_last_user_query) && !CheckAndExecuteVolumeFallback(g_last_user_query) &&
-                !CheckAndExecuteCharacterFallback(g_last_user_query)) {
+                CharacterRequest(g_last_user_query) == nullptr) {
               CheckAndExecuteMotionFallback(g_last_user_query);
             }
             g_last_user_query.clear();
@@ -2333,6 +2392,7 @@ void loop() {
             g_last_user_query.clear();
           }
           CheckAndExecuteEarsFallback(chat_message_event->content);
+          CheckAndExecuteCharacterFallback(chat_message_event->content);
           if (chat_message_event->content.find("退下") != std::string::npos ||
               chat_message_event->content.find("去休息") != std::string::npos ||
               chat_message_event->content.find("待命") != std::string::npos) {
@@ -2641,14 +2701,30 @@ void loop() {
           StopDebugServer();
           printf("on mcp tool call: debug page off\n");
           engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
-        } else if (mode_ptr != nullptr && (*mode_ptr == "fox" || *mode_ptr == "k3" || *mode_ptr == "char")) {
-          g_last_character_exec_time = millis();  // The transcript fallback must not switch again.
-          const char* now = SwitchCharacter(*mode_ptr);
-          printf("on mcp tool call: character -> %s\n", now != nullptr ? now : "(refused)");
+        } else if (mode_ptr != nullptr && (*mode_ptr == "fox" || *mode_ptr == "k3" || *mode_ptr == "char" ||
+                                           (CharacterRequestRecent() && (*mode_ptr == "toggle" ||
+                                                                         *mode_ptr == "chat" || *mode_ptr == "text")))) {
+          // Right after the user asked for a character, the switch has been made already (see
+          // CheckAndExecuteCharacterFallback): "char" and a stray "toggle"/"chat" resolve to that
+          // character instead of switching again or leaving the face. An explicit id still wins.
+          std::string want = *mode_ptr;
+          if (want != "fox" && want != "k3") {
+            want = CharacterRequestRecent() && !g_char_request_target.empty() ? g_char_request_target : "char";
+          }
+          const char* now = SwitchCharacter(want);
+          if (now == nullptr && g_display != nullptr && want != "char") {
+            now = g_display->CharacterId();  // already showing it
+          }
+          if (now != nullptr) {
+            g_char_request_ms = millis();
+            g_char_request_target = now;
+            ShowCharacter(now);
+          }
+          printf("on mcp tool call: character '%s' -> %s\n", mode_ptr->c_str(), now != nullptr ? now : "(refused)");
           if (now == nullptr) {
             engine.SendMcpCallError(mcp_tool_call_event->id, "character switch failed, try again");
           } else {
-            engine.SendMcpCallResponse(mcp_tool_call_event->id, std::string("now showing ") + now);
+            engine.SendMcpCallResponse(mcp_tool_call_event->id, std::string("now showing ") + CharacterName(now));
           }
         } else if (mode_ptr != nullptr && *mode_ptr == "toggle") {
           // Folded in from the old self.screen.toggle_mode tool to keep tools/list small.

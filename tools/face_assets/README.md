@@ -13,13 +13,15 @@ implemented in `face_lib.py`). A full build takes ~15 s.
 
 ## Characters
 
-| Id | Source | File | Flash | Extras |
-|---|---|---|---|---|
-| `fox` (default) | `source/fox_*.jpg` | `face_assets_fox.c` | ~330 KB | falling cherry petals |
-| `k3` | `source/k3_*.jpg` | `face_assets_k3.c` | ~596 KB | hair breeze |
+| Id | Name | Source | File | Flash | Extras |
+|---|---|---|---|---|---|
+| `k3` | 1号驾驶员 | `source/k3_*.jpg` | `face_assets_k3.c` | ~596 KB | hair breeze |
+| `fox` (default) | 2号驾驶员 | `source/fox_*.jpg` | `face_assets_fox.c` | ~330 KB | falling cherry petals, ear twitch |
 
-Both are compiled in and switchable at runtime: say "换角色", or the model calls
-`self.screen.set_mode` with `fox` / `k3` / `char` (next). The choice is saved in NVS
+Both are compiled in and switchable at runtime: say "换成1号驾驶员" / "2号驾驶员" to pick one, or
+"换角色" / "换驾驶员" for the next. The switch happens as soon as the words arrive; the model's own
+`self.screen.set_mode` call (`k3` / `fox` / `char`) is then resolved against the same request, so it
+cannot switch a second time or drop to the chat screen. The choice is saved in NVS
 (`display/character`). To leave one out of the build, add `-D ENCO_CHAR_K3=0` (or `ENCO_CHAR_FOX=0`)
 to the build flags — its art and `.c` stay in the tree.
 
