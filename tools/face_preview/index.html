@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Enco face preview</title>
+<!-- Everything is local: no network requests. Data comes from export.py (data/*.js). -->
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font: 13px -apple-system, "PingFang SC", sans-serif; background: #0d1117; color: #d0d7de;
+         display: flex; gap: 24px; padding: 20px; align-items: flex-start; }
+  /* Fixed-width column: the live readout changes length every frame and must never resize it. */
+  #stage { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; flex: none; }
+  canvas { image-rendering: pixelated; border: 1px solid #30363d; border-radius: 6px; background: #000; }
+  #panel { display: flex; flex-direction: column; gap: 14px; min-width: 360px; max-width: 460px; }
+  fieldset { border: 1px solid #30363d; border-radius: 8px; padding: 8px 10px 10px; margin: 0; }
+  legend { color: #8b949e; padding: 0 4px; }
+  button { background: #21262d; color: #d0d7de; border: 1px solid #30363d; border-radius: 6px; padding: 5px 9px;
+           margin: 2px; cursor: pointer; font: inherit; }
+  button:hover { background: #30363d; }
+  button.on { background: #1f6feb; border-color: #388bfd; color: #fff; }
+  label { margin-right: 10px; white-space: nowrap; }
+  select, input[type=number], input[type=text] { background: #0d1117; color: #d0d7de; border: 1px solid #30363d;
+           border-radius: 4px; padding: 3px 5px; font: inherit; }
+  input[type=number] { width: 64px; }
+  #readout { font: 12px ui-monospace, Menlo, monospace; color: #8b949e; white-space: pre;
+             width: 62ch; height: 6.5em; overflow: hidden; }
+  #missing { display: none; color: #f85149; max-width: 420px; }
+  .hint { color: #8b949e; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="screen" width="240" height="320"></canvas>
+  <div id="readout"></div>
+</div>
+
+<div id="panel">
+  <div id="missing">No data found. Run <code>python3 tools/face_preview/export.py</code> first, then reload.</div>
+
+  <fieldset>
+    <legend>Character / view</legend>
+    <select id="character"></select>
+    <label>Zoom <select id="zoom"><option>1</option><option selected>2</option><option>3</option><option>4</option></select></label>
+    <label>Speed <select id="speed">
+      <option value="0.1">0.1×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option>
+      <option value="1" selected>1×</option><option value="2">2×</option></select></label>
+    <div style="margin-top:6px">
+      <button id="pause">Pause</button>
+      <button id="step" title="One motion tick (50 ms)">Step 50 ms</button>
+      <button id="reset">Reset character</button>
+    </div>
+  </fieldset>
+
+  <fieldset id="earBox">
+    <legend>Ears (2号驾驶员 only)</legend>
+    <button data-ear="shake">抖耳朵 (kEarShake)</button>
+    <button data-ear="kEarFlick">Flick</button>
+    <button data-ear="kEarDoubleFlick">Double flick</button>
+    <button data-ear="kEarBoth">Both</button>
+    <button data-ear="kEarAlternate">Alternate</button>
+    <button data-ear="kEarPerk">Perk</button>
+    <div style="margin-top:6px">
+      <label><input type="checkbox" id="mirror"> Mirror (other ear leads)</label>
+      <label>Gain <input type="number" id="gain" value="1.0" step="0.1" min="0.1" max="2"></label>
+      <label><input type="checkbox" id="idleTwitch" checked> Idle twitches</label>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Expressions</legend>
+    <div id="exprs"></div>
+    <div style="margin-top:6px">
+      <label>Hold <input type="number" id="hold" value="4000" step="500" min="0"> ms</label>
+      <label><input type="checkbox" id="sleepy"> Sleepy</label>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>State</legend>
+    <label><input type="checkbox" id="speaking"> Speaking (mouth)</label>
+    <label>Ambient <select id="ambient">
+      <option value="0">off</option><option value="1" selected>idle</option><option value="2">listening</option></select></label>
+    <div style="margin-top:6px">
+      <label><input type="checkbox" id="caption" checked> Caption pill</label>
+      <input type="text" id="captionText" value="待命中 · 说 &quot;Hi 安可&quot; 唤醒" style="width:200px">
+    </div>
+    <div style="margin-top:6px">
+      <label>Status bar <input type="number" id="statusH" value="26" min="0" max="60"> px</label>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Debug</legend>
+    <label><input type="checkbox" id="warps" checked> Warps on</label>
+    <label><input type="checkbox" id="earMap"> Ear rig map</label>
+    <label><input type="checkbox" id="hairBands"> Hair wind bands</label>
+    <p class="hint">Ear map: red = follows the ear, green = ornament swing. Turning warps off shows the
+      un-warped frame for comparison. Re-run export.py after rebuilding assets, then reload.</p>
+  </fieldset>
+</div>
+
+<script src="data/manifest.js"></script>
+<script src="data/fox.js"></script>
+<script src="data/k3.js"></script>
+<script src="face_engine.js"></script>
+<script src="preview.js"></script>
+</body>
+</html>
