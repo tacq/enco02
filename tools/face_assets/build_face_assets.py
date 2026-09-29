@@ -195,42 +195,37 @@ CHARACTERS = {
         # Her fox ears, twitching at runtime (see WarpEarsChunk() in display.cpp). Traced off a 5x
         # grid of the base, (x, y) in 240x320 space:
         #   poly  - the ear, down to where hair covers its root;
-        #   base  - the root line: below it the motion fades out over base_fade px of hair;
+        #   base  - the root line: nothing below it moves; the ear bends over its own lowest
+        #           base_fade px, as if rooted in her head;
         #   pivot - what the ear turns about; tip - its tip (the tip lags the root, bending it);
         #   out   - -1: "outward" turns the tip left (her ear on screen left), +1: right;
         #   margin - px of backdrop around the ear dragged along, so the outline moves seamlessly;
         #   deco  - ornaments on the ear: a polygon, the point it hangs from, how much it hangs
-        #           plumb rather than turning with the ear (0..1), and its swing (Hz, damping).
+        #           plumb rather than turning with the ear (0..1), and its swing (Hz, damping);
+        #   hold  - where her hair (the crown between the ears) must not be dragged along;
+        #   pin   - regions held entirely (the flower pinned in her hair beside the ear).
         "ears": [
             {
                 "poly": [(47, -2), (53, -2), (62, 12), (72, 23), (82, 31), (92, 37), (97, 42),
                          (92, 53), (52, 58), (47, 50)],
                 "base": [(52, 58), (92, 53)],
                 "pivot": (74, 52), "tip": (50, 1), "out": -1, "margin": 22, "base_fade": 14,
-                "deco": [
-                    # red flower pinned at the ear's root: rides with it, a stiff little jiggle
-                    {"poly": [(44, 58), (56, 50), (80, 50), (88, 62), (86, 84), (72, 90), (54, 88),
-                              (44, 76)],
-                     "anchor": (68, 72), "hang": 0.0, "hz": 6.0, "zeta": 0.3},
-                    # pearl strings hanging from it: a slow pendulum
-                    {"poly": [(39, 91), (52, 89), (69, 90), (68, 116), (57, 117), (39, 104)],
-                     "anchor": (64, 89), "hang": 0.85, "hz": 2.2, "zeta": 0.12},
-                ],
+                "hold": [[(94, 28), (132, 28), (132, 80), (94, 80)]],
+                # The red flower, its clasp and pearl strings sit in her hair, not on the ear, so
+                # they stay put. (As ornaments riding the ear they turned a whole patch of the
+                # picture with them - hair included - which tore the strands around them, and so
+                # did the pendulums on the right ear's earring and bead chain.)
+                "pin": [[(44, 58), (56, 50), (80, 50), (88, 62), (86, 84), (72, 90), (68, 97),
+                         (50, 97), (44, 90), (44, 76)]],
+                "deco": [],
             },
             {
                 "poly": [(197, -2), (202, -2), (201, 20), (198, 40), (196, 58), (148, 52),
                          (149, 40), (155, 37), (165, 30), (175, 24), (185, 18), (191, 12)],
                 "base": [(148, 52), (196, 58)],
                 "pivot": (173, 54), "tip": (199, 1), "out": 1, "margin": 22, "base_fade": 14,
-                "deco": [
-                    # hook earring at the root of the ear
-                    {"poly": [(178, 57), (196, 57), (197, 83), (179, 83)],
-                     "anchor": (187, 60), "hang": 0.7, "hz": 3.0, "zeta": 0.15},
-                    # bead chain threaded down the lock beside it
-                    {"poly": [(158, 67), (171, 67), (183, 84), (189, 108), (191, 136), (179, 136),
-                              (172, 110), (167, 92), (157, 77)],
-                     "anchor": (164, 70), "hang": 0.9, "hz": 1.8, "zeta": 0.12},
-                ],
+                "hold": [[(116, 28), (153, 28), (153, 80), (116, 80)]],
+                "deco": [],
             },
         ],
     },
@@ -763,7 +758,8 @@ def hair_flow_warp(rgb, table, u_left, u_right):
 #
 # Each ear is a bone rotating about its root (display.cpp WarpEarsChunk). Nothing but weights
 # ships: per pixel of the ear's box, how much it follows the ear (1 on the ear, easing to 0 over
-# `margin` px of backdrop around it and `base_fade` px of hair below its root), and which ornament
+# `margin` px of backdrop around it and over the `base_fade` px of ear above its root - nothing
+# below the root moves, since that is her hair and head), and which ornament
 # it belongs to, if any. Ornaments ride on the ear but have their own angle - a pendulum for things
 # that dangle - so a bead string swings back to plumb after a flick instead of turning rigidly.
 # The firmware resamples the base portrait in flash through these, so it can move pixels across
@@ -771,6 +767,15 @@ def hair_flow_warp(rgb, table, u_left, u_right):
 
 EAR_DECO_FEATHER = 4        # px over which an ornament's own swing fades into its surroundings
 EAR_DECO_MAX = 4            # ornament index lives in the top 2 bits of the deco map
+# The margin drags the backdrop around an ear along with it, but part of that margin is her own
+# hair (the crown between the ears, the locks beside them). Dragged, those strands bend and kink
+# where the drag fades out - the "broken" hair. So hair beside the ear stays put: inside the
+# ear's `hold` polygons, any pixel brighter than the backdrop, more than EAR_HOLD_GAP px outside
+# the ear's outline and not part of an ornament is held, and the ear's pull fades in over
+# EAR_HOLD_FEATHER px away from held pixels (all through backdrop).
+EAR_HOLD_LUM = 100          # mean RGB above this is hair / skin, not the dark backdrop
+EAR_HOLD_GAP = 2.5          # px outside the outline still counted as the ear's own fur
+EAR_HOLD_FEATHER = 6        # px over which the pull fades in away from held hair
 
 
 def _inside(poly, x, y):
@@ -798,8 +803,9 @@ def _fall(t):
     return 1.0 if t <= 0 else (0.0 if t >= 1 else 0.5 + 0.5 * math.cos(math.pi * t))
 
 
-def ear_rig(spec):
-    """-> dict with the ear's box, bone geometry, ornaments and per-pixel maps (see enco_ear_t)."""
+def ear_rig(spec, rgb=None):
+    """-> dict with the ear's box, bone geometry, ornaments and per-pixel maps (see enco_ear_t).
+    rgb (the base portrait) is used to keep her hair around the ear still; None: no hold."""
     poly, margin, bfade = spec["poly"], spec["margin"], spec["base_fade"]
     (bx0, by0), (bx1, by1) = spec["base"]
     tx, ty = spec["tip"]
@@ -818,14 +824,35 @@ def ear_rig(spec):
     sx1 = min(W - 1, int(max(x + m for x, _, m in pts)) + 1)
     sy0 = max(0, int(min(y - m for _, y, m in pts)) - 1)
     sy1 = min(H - 1, int(max(y + m for _, y, m in pts)) + 1)
+    dist = {}
     for y in range(sy0, sy1 + 1):
         for x in range(sx0, sx1 + 1):
-            d = _poly_dist(poly, x, y)
+            dist[(x, y)] = _poly_dist(poly, x, y)
+    held = set()
+    holds = spec.get("hold", [])
+    if rgb is not None and holds:
+        for (x, y), d in dist.items():
+            if (d > EAR_HOLD_GAP and sum(rgb[y * W + x]) > 3 * EAR_HOLD_LUM
+                    and any(_inside(hp, x, y) for hp in holds)
+                    and all(_poly_dist(dc["poly"], x, y) >= EAR_DECO_FEATHER for dc in decos)):
+                held.add((x, y))
+    for (x, y) in dist:
+        if any(_inside(pp, x, y) for pp in spec.get("pin", [])):
+            held.add((x, y))
+    hf = EAR_HOLD_FEATHER
+    offs = [(i, j, math.hypot(i, j)) for j in range(-hf, hf + 1) for i in range(-hf, hf + 1)
+            if math.hypot(i, j) < hf]
+    for y in range(sy0, sy1 + 1):
+        for x in range(sx0, sx1 + 1):
+            d = dist[(x, y)]
             if d >= margin:
                 w = 0.0
             else:
                 below = (x - bx0) * nx + (y - by0) * ny
-                w = _fall(d / margin) * _fall(below / bfade)
+                w = _fall(d / margin) * _fall((below + bfade) / bfade)
+                if w > 0 and held:
+                    near = min((r for i, j, r in offs if (x + i, y + j) in held), default=hf)
+                    w *= 1.0 - _fall(near / hf)
             best, bi = 0.0, 0
             for i, dc in enumerate(decos):
                 dd = _poly_dist(dc["poly"], x, y)
@@ -957,7 +984,7 @@ def build_character(cid, ch, outdir):
     thumb = finish(box_downscale(base_lin, W, H, ch["thumb_src"], THUMB_W, THUMB_H))
     petals = petal_sprites() if ch["petals"] else []
     flow = hair_flow_table(ch["hair_flow"]) if ch.get("hair_flow") else None
-    ears = [ear_rig(e) for e in ch.get("ears", [])]
+    ears = [ear_rig(e, base) for e in ch.get("ears", [])]
 
     total = 0
     guard = f"ENCO_CHAR_{prefix.upper()}"
