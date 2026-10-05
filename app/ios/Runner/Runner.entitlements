@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Join the robot's setup hotspot (NEHotspotConfiguration). -->
+	<key>com.apple.developer.networking.HotspotConfiguration</key>
+	<true/>
+	<!-- LAN discovery broadcast. Must be requested from Apple before release; remove it for
+	     personal-team builds if signing fails. -->
+	<key>com.apple.developer.networking.multicast</key>
+	<true/>
+</dict>
+</plist>

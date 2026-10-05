@@ -1,0 +1,30 @@
+name: enco_app
+description: ENCO-02 companion app - pairing, Wi-Fi setup, control, firmware updates.
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.9.0
+  flutter: '>=3.35.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  intl: any
+  http: ^1.6.0
+  crypto: ^3.0.7
+  mobile_scanner: ^7.4.2
+  flutter_secure_storage: ^11.2.0
+  wifi_iot: ^0.4.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  test: ^1.31.1
+
+flutter:
+  uses-material-design: true
+  generate: true

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The robot API is plain HTTP on the LAN / setup hotspot at addresses only known at runtime, so
+  cleartext must be allowed. TODO(security): the app itself restricts HTTP to private IPv4 hosts
+  (Validators.lanHost) and authenticates with a per-pairing token; everything on the internet
+  (firmware manifest) is HTTPS-only in code.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
