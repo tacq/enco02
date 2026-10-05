@@ -1,6 +1,6 @@
 // Headless check of face_engine.js: renders frames to PNG without a browser.
 //   node tools/face_preview/snapshot.js [character] [out_dir] [action] [ms,ms,...]
-// action: shake | flick | expr:<name> | none. Frames are taken at the given ms after the action.
+// action: shake | flick | expr:<name> | emo:<emotion> | none. Frames are taken at the given ms after the action.
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -48,6 +48,7 @@ face.Advance(500);
 if (action === 'shake') face.TwitchEars();
 else if (action === 'flick') face.StartEarScript('kEarFlick', 1.0, false);
 else if (action.startsWith('expr:')) face.ShowExpression(action.slice(5), 4000, true);
+else if (action.startsWith('emo:')) face.UpdateRobotFaceEmotion(action.slice(4));
 let t = 0;
 fs.mkdirSync(out, { recursive: true });
 for (const ms of times) {
