@@ -845,6 +845,57 @@ bool IsNegativeReply(const std::string& text) {
   return false;
 }
 
+// Locks the head's current angles as the start pose (used at every boot, on wake and on "头摆正").
+void SaveHomePose() {
+  auto& servo = ServoController::GetInstance();
+  servo.SetHomeToCurrent();
+  g_last_motion_exec_time = millis();
+  printf("[head] home pose saved: pitch %.1f roll %.1f yaw %.1f\n", servo.HomeAngle(0), servo.HomeAngle(1),
+         servo.HomeAngle(2));
+  if (g_display) {
+    g_display->UpdateRobotFaceEmotion("happy");
+    g_display->ShowStatus("已设为初始角度");
+  }
+}
+
+// Forgets the saved start pose and eases back to the factory neutral.
+void ResetHomePose() {
+  auto& servo = ServoController::GetInstance();
+  servo.ResetHome();
+  g_last_motion_exec_time = millis();
+  printf("[head] home pose reset to factory\n");
+  if (g_display) {
+    g_display->UpdateRobotFaceEmotion("neutral");
+    g_display->LookDirection("center");
+    g_display->ShowStatus("已恢复默认角度");
+  }
+  servo.CenterAll();
+}
+
+// Keyword backup for self.head.center mode=set_home/reset_home, for turns where the model answers
+// without calling the tool. Only ever fed what the user said - never the assistant's reply, which
+// may well contain "初始角度" in a question ("要我把当前角度设为初始角度吗?").
+bool CheckAndExecuteHomeFallback(const std::string& query) {
+  if (query.empty()) return false;
+  auto contains = [&](const char* kw) { return query.find(kw) != std::string::npos; };
+  const bool mentions_home = contains("初始角度") || contains("初始位置") || contains("起始角度") ||
+                             contains("起始位置") || contains("开机角度") || contains("开机位置");
+  if (contains("恢复默认角度") || contains("恢复出厂角度") || contains("取消角度锁定") ||
+      (mentions_home && (contains("恢复默认") || contains("重置")))) {
+    printf("[Voice Home Fallback] reset home\n");
+    ResetHomePose();
+    return true;
+  }
+  if (contains("锁定角度") || contains("锁定当前角度") || contains("角度锁定") ||
+      (mentions_home && (contains("设") || contains("当前") || contains("锁定") || contains("记住") ||
+                         contains("保存")))) {
+    printf("[Voice Home Fallback] set home\n");
+    SaveHomePose();
+    return true;
+  }
+  return false;
+}
+
 void CheckAndExecuteMotionFallback(const std::string& query) {
   if (millis() - g_last_motion_exec_time < 2500) {
     return;  // Debounce: motion already executed within 2.5s
@@ -917,7 +968,8 @@ void CheckAndExecuteMotionFallback(const std::string& query) {
       g_display->ShowStatus("摇头晃脑...");
     }
     ServoController::GetInstance().TriggerHeadBobble();
-  } else if (contains("头摆正") || contains("摆正") || contains("正视") || contains("头复位") || contains("向前看")) {
+  } else if (contains("头摆正") || contains("摆正") || contains("正视") || contains("头复位") || contains("向前看") ||
+             contains("回到初始") || contains("回初始")) {
     printf("[Voice Motion Fallback] 头摆正\n");
     g_last_motion_exec_time = millis();
     if (g_display) {
@@ -1374,10 +1426,10 @@ void SetHeadRandom(const bool on) {
     auto& servo = ServoController::GetInstance();
     servo.StopAnimation();
     if (!CamLink::GetInstance().tracking_enabled()) {
-      // Non-blocking ease back to centre (glides run from loop()).
-      servo.GlideTo(ServoController::kPinServo0, ServoController::kDefaultAngle);
-      servo.GlideTo(ServoController::kPinServo1, ServoController::kDefaultAngle);
-      servo.GlideTo(ServoController::kPinServo2, ServoController::kServo2DefaultAngle);
+      // Non-blocking ease back to the home pose (glides run from loop()).
+      servo.GlideTo(ServoController::kPinServo0, servo.HomeAngle(0));
+      servo.GlideTo(ServoController::kPinServo1, servo.HomeAngle(1));
+      servo.GlideTo(ServoController::kPinServo2, servo.HomeAngle(2));
     }
   }
   printf("[head] random animations %s\n", on ? "on" : "off");
@@ -1571,7 +1623,10 @@ void InitMcpTools() {
   engine.AddMcpTool("self.head.bobble", "摇头晃脑/摇头/不要. mode: random随机动作, random_on/random_off开始/停止随机动作", {
     {"mode", ai_vox::ParamSchema<std::string>{.default_value = "bobble"}},
   });
-  engine.AddMcpTool("self.head.center", "Head straight forward (头摆正/向前看).", {});
+  // Same trick as bobble: the start-pose commands ride on center as a mode instead of a new tool.
+  engine.AddMcpTool("self.head.center", "头摆正/回初始角度. mode: set_home把当前角度设为开机初始角度(锁定), reset_home恢复默认", {
+    {"mode", ai_vox::ParamSchema<std::string>{.default_value = "center"}},
+  });
 
   engine.AddMcpTool("self.audio_speaker.set_volume", "Set speaker volume 0-100 (调整音量).", {
     {"volume", ai_vox::ParamSchema<int64_t>{.default_value = std::nullopt, .min = 0, .max = 100}},
@@ -1767,6 +1822,9 @@ uint16_t g_cam_view_last_frames = 0;
 // thaw it again, and only once there is memory to spare.
 bool g_cam_view_low_heap_hold = false;
 uint32_t g_cam_view_heap_check_ms = 0;
+// Set when a viewfinder the user opened was taken down for a reconnect; it comes back by itself
+// once the new session is up and settled (see CameraReopenTick). Any explicit close clears it.
+bool g_cam_view_reopen = false;
 
 // Measured on this board with the viewfinder up: the JPEG pool (4KB) plus the camera HUD (2.4KB)
 // plus the UART ring leave the WiFi/mbedTLS stack short of the ~1.4KB blocks it needs for a TLS
@@ -1779,10 +1837,19 @@ uint32_t g_cam_view_heap_check_ms = 0;
 // the picture stays frozen with its hint up until the session drops to standby.
 // A resume costs ~6.5KB (measured: 20.4KB free -> 13.9KB right after), so the gap between the
 // thaw and freeze lines must be wider than that or the stream thrashes pause/resume.
-constexpr size_t kCamFreezeFreeHeap = 11000;
+//
+// Measured again after "打开摄像头": once the reply ends, an awake session with the HUD up and the
+// pool released sits at free ~16.3KB, largest ~11.3-11.7KB - and stays there. The old thaw bar
+// (18.5KB / 12KB) was never reached, so the view froze after 2 frames on the first spoken reply and
+// showed only "语音优先 · 画面暂停" until the user closed it. The thaw bar is now below that plateau,
+// and the free-heap freeze line moved down to keep the >6.5KB gap. The largest-block line, which is
+// what actually protects WiFi/TLS (it needs ~1.4-2.3KB blocks), is unchanged; failure was observed
+// at ~3.3KB free / 1.3KB largest, well below either line.
+constexpr size_t kCamFreezeFreeHeap = 8500;
 constexpr size_t kCamFreezeLargestBlock = 5000;
-constexpr size_t kCamThawFreeHeap = 18500;
-constexpr size_t kCamThawLargestBlock = 12000;
+constexpr size_t kCamThawFreeHeap = 15500;
+// 4KB decoder pool must come out of one block and still leave the freeze line's 5KB behind.
+constexpr size_t kCamThawLargestBlock = 9000;
 // After a reply ends, wait this long before re-taking the 4KB pool, so a follow-up sentence or a
 // tool-driven second reply does not immediately bounce the stream again.
 constexpr uint32_t kCamThawSettleMs = 800;
@@ -1868,6 +1935,7 @@ void CloseCameraView() {
   g_cam_view_frozen = false;
   g_cam_view_low_heap_hold = false;
   g_cam_view_deadline_ms = 0;
+  g_cam_view_reopen = false;
   LogHeap("camera view closed");
 }
 
@@ -1898,6 +1966,92 @@ void ThawCameraView() {
   g_cam_view_stat_ms = 0;
   g_cam_view_last_frames = 0;
   CamLink::GetInstance().BeginVideo();
+}
+
+// The viewfinder must not be up while the websocket (re)connects. Measured: with the HUD resident
+// and the stream having run in standby, the heap after the TLS handshake was free ~12.9KB but so
+// fragmented that the 4980-byte tools/list send failed (largest block 564), followed by
+// WEBSOCKET_EVENT_ERROR sock_errno 12 - and the same on every wake after that, so she never spoke
+// again until the user closed the camera. Closing it first lets the HUD and pool coalesce back.
+void CloseCameraViewForReconnect(const char* why) {
+  if (!g_display || !g_display->InCameraView()) {
+    return;
+  }
+  const bool reopen = !g_cam_view_transient;
+  printf("camera view: closing for %s%s\n", why, reopen ? " (will reopen)" : "");
+  CloseCameraView();  // also clears g_cam_view_reopen, so set it afterwards
+  g_cam_view_reopen = reopen;
+}
+
+// Reopens a viewfinder closed by CloseCameraViewForReconnect once the session is connected, awake,
+// quiet for a while (tools/list and the first exchange are done) and the heap can carry it.
+constexpr uint32_t kCamReopenSettleMs = 3000;
+constexpr size_t kCamReopenFreeHeap = 18000;
+constexpr size_t kCamReopenLargestBlock = 10000;
+void CameraReopenTick() {
+  if (!g_cam_view_reopen || !g_display || g_display->InCameraView()) {
+    return;
+  }
+  if (!g_awake_session || g_chat_state != ai_vox::ChatState::kListening ||
+      millis() - g_chat_state_since_ms < kCamReopenSettleMs) {
+    return;
+  }
+  const size_t free_heap = esp_get_free_heap_size();
+  const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  if (free_heap < kCamReopenFreeHeap || largest < kCamReopenLargestBlock) {
+    return;
+  }
+  g_cam_view_reopen = false;
+  printf("camera view: reopening after reconnect (free %u, largest %u)\n", static_cast<unsigned>(free_heap),
+         static_cast<unsigned>(largest));
+  OpenCameraView(/*transient=*/false);
+}
+
+// The cam answers over a UART that occasionally drops a byte, which can leave a broken multi-byte
+// UTF-8 sequence in the text (seen: "看起杘�二十岁"). Sent as-is in a websocket text frame, that is
+// invalid UTF-8 and the server closes the session on the spot - the answer is never spoken and the
+// user hears nothing. Drop any malformed sequence; keep everything that decodes.
+std::string SanitizeUtf8(const char* text) {
+  std::string out;
+  if (text == nullptr) return out;
+  const auto* s = reinterpret_cast<const unsigned char*>(text);
+  const size_t n = strlen(text);
+  out.reserve(n);
+  size_t i = 0;
+  while (i < n) {
+    const unsigned char c = s[i];
+    size_t len = 0;
+    if (c < 0x80) {
+      len = 1;
+    } else if (c >= 0xC2 && c <= 0xDF) {
+      len = 2;
+    } else if (c >= 0xE0 && c <= 0xEF) {
+      len = 3;
+    } else if (c >= 0xF0 && c <= 0xF4) {
+      len = 4;
+    }
+    bool ok = len != 0 && i + len <= n;
+    for (size_t k = 1; ok && k < len; ++k) {
+      ok = (s[i + k] & 0xC0) == 0x80;
+    }
+    if (ok && len == 3) {
+      // Reject overlongs and UTF-16 surrogates.
+      if ((c == 0xE0 && s[i + 1] < 0xA0) || (c == 0xED && s[i + 1] >= 0xA0)) ok = false;
+    } else if (ok && len == 4) {
+      if ((c == 0xF0 && s[i + 1] < 0x90) || (c == 0xF4 && s[i + 1] >= 0x90)) ok = false;
+    }
+    if (ok) {
+      if (len == 1 && c < 0x20 && c != '\n' && c != '\t') {
+        // Control bytes are noise from the link, not text.
+      } else {
+        out.append(text + i, len);
+      }
+      i += len;
+    } else {
+      ++i;  // skip one byte and resync on the next lead byte
+    }
+  }
+  return out;
 }
 }  // namespace
 
@@ -2074,6 +2228,7 @@ void loop() {
   TimerTick();
   NotificationTick();
   IdleCompanionTick(engine);
+  CameraReopenTick();
 
   // Drains at most a few bytes of UART and, at most once per 60ms, nudges a
   // servo. Nothing here allocates.
@@ -2095,20 +2250,23 @@ void loop() {
     const char* look_text = nullptr;
     if (cam.TakeLookResult(&look_id, &look_ok, &look_text)) {
       printf("cam look result (%s): %s\n", look_ok ? "ok" : "err", look_text);
+      // Must be valid UTF-8 before it goes into a websocket text frame - see SanitizeUtf8.
+      std::string clean = SanitizeUtf8(look_text);
+      if (clean.empty()) {
+        clean = look_ok ? "看不清楚" : "Camera error";
+      }
       if (g_display && g_display->InCameraView()) {
-        if (g_cam_view_transient) {
-          // Free the transient viewfinder (6.5KB of heap) BEFORE sending the MCP
-          // response so AudioOutputEngine has full contiguous memory when TTS starts.
-          CloseCameraView();
-          if (look_ok) {
-            g_display->ShowStatus("已识别");
-          }
-        } else {
-          // Persistent viewfinder ("打开摄像头"): keep the frozen frame up (4KB JPEG
-          // pool already freed by FreezeCameraView) and thaw after TTS finishes.
-          g_display->SetCameraHint(look_text);
-          g_display->SetCameraCapturing(false);
-          g_cam_view_deadline_ms = millis() + 2500;
+        // Free the viewfinder (HUD 2.4KB + whatever the stream fragmented) BEFORE sending the MCP
+        // response, so AudioOutputEngine and WiFi have contiguous memory for the spoken answer.
+        // This used to apply only to a transient view; a persistent one ("打开摄像头") was kept up
+        // with the answer as its hint, and the log showed WiFi then failing 2308-byte allocs
+        // (free 9.6KB, largest 1972) through the reply and the websocket dying right after it.
+        // A persistent view comes back by itself once the reply is over (CameraReopenTick).
+        const bool reopen = !g_cam_view_transient;
+        CloseCameraView();
+        g_cam_view_reopen = reopen;
+        if (look_ok) {
+          g_display->ShowStatus("已识别");
         }
       } else if (look_ok && g_display) {
         g_display->ShowStatus("已识别");
@@ -2117,9 +2275,9 @@ void loop() {
         // The description, not a finished sentence: the server's model reads
         // this and phrases the reply itself, so it comes out in the assistant's
         // own voice rather than as a readout.
-        engine.SendMcpCallResponse(look_id, std::string(look_text));
+        engine.SendMcpCallResponse(look_id, clean);
       } else {
-        engine.SendMcpCallError(look_id, std::string(look_text));
+        engine.SendMcpCallError(look_id, clean);
       }
     }
   }
@@ -2183,7 +2341,7 @@ void loop() {
                    5u * g_cam_bounce_count);
             g_display->SetCameraHint("内存紧张 · 画面暂停");
           } else {
-            g_display->SetCameraHint("语音优先 · 画面暂停");
+            g_display->SetCameraHint("语音优先 · 说完后恢复画面");
           }
         } else if (g_cam_bounce_count != 0 && now_ms - g_cam_resumed_ms > 6000) {
           g_cam_bounce_count = 0;
@@ -2286,6 +2444,7 @@ void loop() {
         }
         case ai_vox::ChatState::kStandby: {
           printf("Standby -> idle companion mode (say 'Hi ENCO' or '安可' to wake)\n");
+          CloseCameraViewForReconnect("standby");
           EnterStandbyCompanionMode();
           LogHeap("standby");
           // Connect the background WebSocket while staying in Silent Standby Companion Mode
@@ -2295,6 +2454,7 @@ void loop() {
         }
         case ai_vox::ChatState::kConnecting: {
           printf("Connecting...\n");
+          CloseCameraViewForReconnect("connecting");
           g_display->ShowStatus(g_awake_session ? "连接中..." : "待命 · 叫 \"安可\" 唤醒");
           break;
         }
@@ -2359,7 +2519,7 @@ void loop() {
             // so the first one to claim it wins.
             // A character request was already acted on when the user's words arrived.
             if (!CheckAndExecuteTimerFallback(g_last_user_query) && !CheckAndExecuteVolumeFallback(g_last_user_query) &&
-                CharacterRequest(g_last_user_query) == nullptr) {
+                CharacterRequest(g_last_user_query) == nullptr && !CheckAndExecuteHomeFallback(g_last_user_query)) {
               CheckAndExecuteMotionFallback(g_last_user_query);
             }
             g_last_user_query.clear();
@@ -2629,15 +2789,27 @@ void loop() {
           servo.TriggerHeadBobble();
         }
       } else if (matches("self.head.center", "center") || matches("self.servo.center", "reset")) {
-        printf("on mcp tool call: center\n");
-        engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
-        g_last_motion_exec_time = millis();
-        if (g_display) {
-          g_display->UpdateRobotFaceEmotion("neutral");
-          g_display->LookDirection("center");
-          g_display->ShowStatus("头已正视");
+        std::string mode = "center";
+        if (const auto p = mcp_tool_call_event->param<std::string>("mode")) mode = *p;
+        if (mode == "set_home") {
+          printf("on mcp tool call: head set_home\n");
+          SaveHomePose();
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        } else if (mode == "reset_home") {
+          printf("on mcp tool call: head reset_home\n");
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+          ResetHomePose();
+        } else {
+          printf("on mcp tool call: center\n");
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+          g_last_motion_exec_time = millis();
+          if (g_display) {
+            g_display->UpdateRobotFaceEmotion("neutral");
+            g_display->LookDirection("center");
+            g_display->ShowStatus("头已正视");
+          }
+          ServoController::GetInstance().CenterAll();
         }
-        ServoController::GetInstance().CenterAll();
       } else if (matches("self.servo.set_angle", "set_angle")) {
         const auto pin_ptr = mcp_tool_call_event->param<int64_t>("pin");
         const auto angle_ptr = mcp_tool_call_event->param<int64_t>("angle");

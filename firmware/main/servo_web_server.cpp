@@ -133,9 +133,9 @@ void ServoWebServer::HandleApiServo() {
 
 void ServoWebServer::HandleApiCenter() {
   auto& servo = ServoController::GetInstance();
-  servo.GlideTo(ServoController::kPinServo0, ServoController::kDefaultAngle);
-  servo.GlideTo(ServoController::kPinServo1, ServoController::kDefaultAngle);
-  servo.GlideTo(ServoController::kPinServo2, ServoController::kServo2DefaultAngle);
+  servo.GlideTo(ServoController::kPinServo0, servo.HomeAngle(0));
+  servo.GlideTo(ServoController::kPinServo1, servo.HomeAngle(1));
+  servo.GlideTo(ServoController::kPinServo2, servo.HomeAngle(2));
   server_->sendHeader("Access-Control-Allow-Origin", "*");
   server_->send(200, "application/json", "{\"success\":true,\"action\":\"center\"}");
 }

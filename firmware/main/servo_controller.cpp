@@ -43,8 +43,12 @@ void ServoController::Init() {
     return;
   }
 
-  uint32_t default_duty = AngleToDuty(kDefaultAngle);
-  uint32_t default_duty_yaw = AngleToDuty(kServo2DefaultAngle);
+  // The first pulse the servos ever see is the home pose, so a saved start angle is taken directly
+  // at power-on rather than after a detour through the factory neutral.
+  LoadHome();
+  uint32_t default_duty = AngleToDuty(home_[0]);
+  uint32_t default_duty_roll = AngleToDuty(home_[1]);
+  uint32_t default_duty_yaw = AngleToDuty(home_[2]);
 
   // 2. Configure Channel 0 on GPIO 0 (Pitch)
   ledc_channel_config_t ch0_conf = {};
@@ -67,7 +71,7 @@ void ServoController::Init() {
   ch1_conf.channel = kChannel1;
   ch1_conf.intr_type = LEDC_INTR_DISABLE;
   ch1_conf.timer_sel = LEDC_TIMER_0;
-  ch1_conf.duty = default_duty;
+  ch1_conf.duty = default_duty_roll;
   ch1_conf.hpoint = 0;
   err = ledc_channel_config(&ch1_conf);
   if (err != ESP_OK) {
@@ -88,9 +92,10 @@ void ServoController::Init() {
     ESP_LOGE(TAG, "ledc_channel_config Ch2 failed: %d", err);
   }
 
-  angle_servo0_ = kDefaultAngle;
-  angle_servo1_ = kDefaultAngle;
-  angle_servo2_ = kServo2DefaultAngle;
+  angle_servo0_ = home_[0];
+  angle_servo1_ = home_[1];
+  angle_servo2_ = home_[2];
+  for (int i = 0; i < 3; ++i) glide_target_[i] = home_[i];
   initialized_ = true;
   LoadAxisSpeeds();
 
@@ -109,7 +114,8 @@ void ServoController::Init() {
                                                     1);
   }
 
-  ESP_LOGI(TAG, "All 3 servos initialized: Pitch 90°, Roll 90°, Yaw 70° (Front)");
+  ESP_LOGI(TAG, "All 3 servos initialized at home: Pitch %.1f°, Roll %.1f°, Yaw %.1f°", home_[0], home_[1],
+           home_[2]);
 }
 
 int ServoController::PinToIndex(int pin) {
@@ -371,14 +377,65 @@ void ServoController::MoveAllSmooth(float target0, float target1, float target2,
 }
 
 void ServoController::CenterAll() {
-  MoveAllSmooth(kDefaultAngle, kDefaultAngle, kServo2DefaultAngle);
-  ESP_LOGI(TAG, "All 3 servos centered smoothly: Pitch 90°, Roll 90°, Yaw 70° (Front)");
+  MoveAllSmooth(home_[0], home_[1], home_[2]);
+  ESP_LOGI(TAG, "All 3 servos back to home: Pitch %.1f°, Roll %.1f°, Yaw %.1f°", home_[0], home_[1], home_[2]);
 }
 
 namespace {
 constexpr const char* kServoPrefsNamespace = "servo";
 constexpr const char* kSpeedKeys[3] = {"sp_pitch", "sp_roll", "sp_yaw"};
+constexpr const char* kHomeKeys[3] = {"home_pitch", "home_roll", "home_yaw"};
+constexpr float kFactoryHome[3] = {ServoController::kDefaultAngle, ServoController::kDefaultAngle,
+                                   ServoController::kServo2DefaultAngle};
+constexpr float kHomeMin[3] = {ServoController::kServo0MinAngle, ServoController::kServo1MinAngle,
+                               ServoController::kServo2MinAngle};
+constexpr float kHomeMax[3] = {ServoController::kServo0MaxAngle, ServoController::kServo1MaxAngle,
+                               ServoController::kServo2MaxAngle};
 }  // namespace
+
+void ServoController::LoadHome() {
+  for (int a = 0; a < 3; ++a) home_[a] = kFactoryHome[a];
+  Preferences prefs;
+  if (!prefs.begin(kServoPrefsNamespace, /*readOnly=*/true)) {
+    return;  // Nothing saved yet: factory neutral.
+  }
+  for (int a = 0; a < 3; ++a) {
+    float v = prefs.getFloat(kHomeKeys[a], kFactoryHome[a]);
+    // Guard against a corrupt/out-of-range value: never drive a servo past its safe limits at boot.
+    if (!(v >= kHomeMin[a] && v <= kHomeMax[a])) v = kFactoryHome[a];
+    home_[a] = v;
+  }
+  prefs.end();
+}
+
+void ServoController::SetHomeToCurrent() {
+  if (!initialized_) {
+    Init();
+  }
+  // Freeze the head where it is: an animation or glide still running would otherwise move it away
+  // from the pose the user just asked to keep.
+  if (!OnAnimationTask()) StopAnimation();
+  StopGlides();
+  home_[0] = angle_servo0_;
+  home_[1] = angle_servo1_;
+  home_[2] = angle_servo2_;
+  Preferences prefs;
+  if (prefs.begin(kServoPrefsNamespace, /*readOnly=*/false)) {
+    for (int a = 0; a < 3; ++a) prefs.putFloat(kHomeKeys[a], home_[a]);
+    prefs.end();
+  }
+  ESP_LOGI(TAG, "Home pose saved: Pitch %.1f°, Roll %.1f°, Yaw %.1f°", home_[0], home_[1], home_[2]);
+}
+
+void ServoController::ResetHome() {
+  for (int a = 0; a < 3; ++a) home_[a] = kFactoryHome[a];
+  Preferences prefs;
+  if (prefs.begin(kServoPrefsNamespace, /*readOnly=*/false)) {
+    for (int a = 0; a < 3; ++a) prefs.remove(kHomeKeys[a]);
+    prefs.end();
+  }
+  ESP_LOGI(TAG, "Home pose reset to factory: Pitch %.1f°, Roll %.1f°, Yaw %.1f°", home_[0], home_[1], home_[2]);
+}
 
 void ServoController::SetAxisSpeed(int axis, float deg_s) {
   if (axis < 0 || axis > 2) {

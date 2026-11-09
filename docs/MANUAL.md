@@ -152,14 +152,18 @@ Needs the home bridge running on your Mac (see [§16](#16-home-bridge-on-the-mac
 | "向左转头" / "往左看" | Turn left 10° | surprised |
 | "向右转头" / "往右看" | Turn right 10° | surprised |
 | "摇头" / "摇头晃脑" / "不要不要" | Playful ~3 s shake: yaw ±28°, tilt ±17°, nod ±8° | laughing |
-| "头摆正" / "向前看" / "头复位" | Centre all axes | neutral |
+| "头摆正" / "向前看" / "头复位" / "回到初始角度" | Back to the start pose (factory centre unless one was saved) | neutral |
+| "将当前角度设为初始角度" / "锁定当前角度" / "记住这个开机角度" | Save the current head angles as the start pose (stored, used at every power-on) | happy |
+| "恢复默认角度" / "重置初始角度" / "取消角度锁定" | Forget the saved start pose and ease back to the factory centre | neutral |
 | "随机动作" / "做个动作" | One random predefined animation | – |
 | "开始随机动作" | Random animations on: standby and awake, every 6–12 s (saved; also the 🤖 button on the web page) | – |
-| "停止随机动作" | Random animations off: stop and ease back to centre (saved) | – |
+| "停止随机动作" | Random animations off: stop and ease back to the start pose (saved) | – |
 
 All moves ease in and out (cosine curve): soft start, soft stop, ~30°/s average, never faster than 0.45 s per move.
 
 Repeated commands within 2.5 s are ignored, so one sentence can't move the head twice.
+
+**Start pose.** Turn the head where you want it (by voice or the web page), then say "将当前角度设为初始角度". From then on the head powers up there, returns there on wake and on "头摆正", and the web page's centre button goes there too. Random animations, 摇头晃脑 and face tracking still move around the factory centre.
 
 ---
 

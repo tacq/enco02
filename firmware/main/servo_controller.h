@@ -59,8 +59,20 @@ class ServoController {
   // Get current angle for a pin (0, 25, or 26)
   float GetAngle(int pin) const;
 
-  // Center all 3 servos to 90 degrees
+  // Move all 3 servos smoothly to the home pose (factory 90/90/70 unless the user saved another).
   void CenterAll();
+
+  // ---- Home (start) pose: where the head goes at power-on, on CenterAll() and on "回正" ----
+  // Defaults to the factory neutral (kDefaultAngle, kDefaultAngle, kServo2DefaultAngle). The user
+  // can lock the current pose as home by voice ("将当前角度设为初始角度"); it is saved in NVS and
+  // applied directly at the next boot, so the head does not first snap to the factory pose.
+  // Keyframe animations and the bobble still play around the factory neutral: their amplitudes are
+  // sized to stay inside the safe limits from there.
+  float HomeAngle(int axis) const { return (axis >= 0 && axis < 3) ? home_[axis] : kDefaultAngle; }
+  // Captures the current angles (after stopping any animation/glide) as home and persists them.
+  void SetHomeToCurrent();
+  // Forgets the saved home and goes back to the factory neutral (the head is not moved here).
+  void ResetHome();
 
   // Smooth interpolated movements to avoid mechanical inertia/shaking.
   // Motion follows a cosine ease-in/ease-out curve (soft start, soft stop). Duration is derived from
@@ -166,8 +178,11 @@ class ServoController {
   static void AnimationTaskEntry(void* arg);
   void AnimationTaskLoop();
 
+  void LoadHome();
+
   bool initialized_ = false;
   volatile bool is_animating_ = false;
+  float home_[3] = {kDefaultAngle, kDefaultAngle, kServo2DefaultAngle};
   TaskHandle_t animation_task_ = nullptr;
   float angle_servo0_ = kDefaultAngle;
   float angle_servo1_ = kDefaultAngle;
